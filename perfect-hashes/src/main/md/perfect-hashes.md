@@ -296,8 +296,8 @@ public static <E> Equivalence<E> create(Collection<? extends E> keys) {
 And here's the overall framework of the class:
 
 ~~~~
-@com/googlecode/perfecthashes/PerfectHashes.java:*@ +=
-package com.googlecode.perfecthashes;
+@com/blogspot/remisthoughts/perfecthashes/PerfectHashes.java:*@ +=
+package com.blogspot.remisthoughts.perfecthashes;
 @Imports@
 public final class PerfectHashes {
     /*

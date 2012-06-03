@@ -29,6 +29,7 @@
 
 	<modules>
 		<module>perfect-hashes</module>
+		<module>dynamic-optimisation</module>
 	</modules>
 
 	<properties>
@@ -102,6 +103,7 @@
 				<plugin>
 					<groupId>org.codehaus.mojo</groupId>
 					<artifactId>build-helper-maven-plugin</artifactId>
+					<version>1.7</version>
 					<executions>
 						<execution>
 							<phase>generate-sources</phase>
@@ -172,11 +174,42 @@
 								<executable>bash</executable>
 								<arguments>
 									<argument>-c</argument>
-									<argument><![CDATA[awk 'BEGIN{print "<html><body>"} {print} END{print "</body></html>"}' ${project.build.directory}/${project.artifactId}.md.html > ${project.build.directory}/${generated.sources.dir}/com/googlecode/perfecthashes/package.html]]></argument>
+									<argument><![CDATA[
+awk \
+    'BEGIN{print "<html><body>"} \
+    {print} \
+    END{print "</body></html>"}' \
+${project.build.directory}/${project.artifactId}.md.html \
+> ${project.build.directory}/${generated.sources.dir}/com/blogspot/remisthoughts/${shortname}/package.html
+]]></argument>
 								</arguments>
 							</configuration>
 						</execution>
 					</executions>
+				</plugin>
+				<plugin>
+					<groupId>org.eclipse.m2e</groupId>
+					<artifactId>lifecycle-mapping</artifactId>
+					<version>1.0.0</version>
+					<configuration>
+						<lifecycleMappingMetadata>
+							<pluginExecutions>
+								<pluginExecution>
+									<pluginExecutionFilter>
+										<groupId>org.codehaus.mojo</groupId>
+										<artifactId>exec-maven-plugin</artifactId>
+										<versionRange>[,)</versionRange>
+										<goals>
+											<goal>java</goal>
+										</goals>
+									</pluginExecutionFilter>
+									<action>
+										<execute />
+									</action>
+								</pluginExecution>
+							</pluginExecutions>
+						</lifecycleMappingMetadata>
+					</configuration>
 				</plugin>
 			</plugins>
 		</pluginManagement>

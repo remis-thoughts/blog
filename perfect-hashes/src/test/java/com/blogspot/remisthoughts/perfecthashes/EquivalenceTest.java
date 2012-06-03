@@ -1,4 +1,4 @@
-package com.googlecode.perfecthashes;
+package com.blogspot.remisthoughts.perfecthashes;
 
 import org.junit.Assert;
 import org.junit.Test;

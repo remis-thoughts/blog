@@ -1,4 +1,4 @@
-package com.googlecode.perfecthashes;
+package com.blogspot.remisthoughts.perfecthashes;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
