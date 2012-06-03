@@ -10,6 +10,11 @@
 	<name>remis-thoughts</name>
 	<description>A parent project for literate Java blog posts</description>
 	<url>http://remis-thoughts.blogspot.com</url>
+	<scm>
+		<connection>scm:git:git@github.com:remis-thoughts/blog.git</connection>
+		<url>scm:git:git@github.com:remis-thoughts/blog.git</url>
+		<developerConnection>scm:git:git@github.com:remis-thoughts/blog.git</developerConnection>
+	</scm>
 	<licenses>
 		<license>
 			<name>The Apache Software License, Version 2.0</name>
