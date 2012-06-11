@@ -10,7 +10,7 @@ We'll start with the wrapper class, that delegates to the current backing implem
 
 ~~~~
 @Dynamic List Class@ +=
-private static final class DynamicList<E> extends ForwardingList<E> {
+private static final class DynamicList<E> extends ForwardingList<E> implements Serializable {
   private List<E> implementation = new ArrayList<E>();
   protected List<E> delegate() {
     return implementation;
@@ -189,6 +189,7 @@ And we'll finish off with all the Java boilerplate needed to make this work:
 
 ~~~~
 @Imports@ +=
+import java.io.Serializable;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Iterator;
