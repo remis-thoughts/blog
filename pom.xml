@@ -30,14 +30,27 @@
 	<modules>
 		<module>perfect-hashes</module>
 		<module>dynamic-optimisation</module>
+		<module>triple-buffering</module>
 	</modules>
+
+	<!-- for NAR, until it's in the central repo... -->
+	<pluginRepositories>
+		<pluginRepository>
+			<id>nar-repo</id>
+			<name>Duns' Maven Snapshot Repository</name>
+			<url>http://duns.github.com/maven-snapshots</url>
+		</pluginRepository>
+	</pluginRepositories>
 
 	<properties>
 		<project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
 		<generated.sources.dir>generated-sources</generated.sources.dir>
+		<language>java</language>
+		<skip.javadoc>false</skip.javadoc>
 	</properties>
 
 	<build>
+		<defaultGoal>install</defaultGoal>
 		<pluginManagement>
 			<plugins>
 				<plugin>
@@ -137,9 +150,9 @@
 									<argument>${basedir}/src/main/md/${project.artifactId}.md</argument>
 									<argument>--tangle</argument>
 									<argument>--lang</argument>
-									<argument>java</argument>
+									<argument>${language}</argument>
 									<argument>--outputdir</argument>
-									<argument>target/${generated.sources.dir}</argument>
+									<argument>${project.build.directory}/${generated.sources.dir}</argument>
 								</arguments>
 							</configuration>
 						</execution>
@@ -158,8 +171,9 @@
 									<argument>--lang</argument>
 									<argument>java</argument>
 									<argument>--outputdir</argument>
-									<argument>target</argument>
+									<argument>${project.build.directory}</argument>
 								</arguments>
+								<skip>${skip.javadoc}</skip>
 							</configuration>
 						</execution>
 						<execution>
@@ -169,7 +183,7 @@
 							<goals>
 								<goal>exec</goal>
 							</goals>
-							<phase>generate-sources</phase>
+							<phase>process-sources</phase>
 							<configuration>
 								<executable>bash</executable>
 								<arguments>
@@ -183,6 +197,7 @@ ${project.build.directory}/${project.artifactId}.md.html \
 > ${project.build.directory}/${generated.sources.dir}/com/blogspot/remisthoughts/${shortname}/package.html
 ]]></argument>
 								</arguments>
+								<skip>${skip.javadoc}</skip>
 							</configuration>
 						</execution>
 					</executions>
@@ -198,7 +213,7 @@ ${project.build.directory}/${project.artifactId}.md.html \
 									<pluginExecutionFilter>
 										<groupId>org.codehaus.mojo</groupId>
 										<artifactId>exec-maven-plugin</artifactId>
-										<versionRange>[,)</versionRange>
+										<versionRange>[1.2,]</versionRange>
 										<goals>
 											<goal>java</goal>
 										</goals>
@@ -209,6 +224,60 @@ ${project.build.directory}/${project.artifactId}.md.html \
 								</pluginExecution>
 							</pluginExecutions>
 						</lifecycleMappingMetadata>
+					</configuration>
+				</plugin>
+				<plugin>
+					<artifactId>maven-resources-plugin</artifactId>
+					<executions>
+						<execution>
+							<id>copy-headers-to-noarch</id>
+							<phase>process-sources</phase>
+							<goals>
+								<goal>copy-resources</goal>
+							</goals>
+							<configuration>
+								<outputDirectory>${project.build.directory}/nar/${project.artifactId}-${project.version}-noarch/include</outputDirectory>
+								<resources>
+									<resource>
+										<directory>${project.build.directory}/${generated.sources.dir}</directory>
+										<includes>
+											<include>**/*.h</include>
+										</includes>
+									</resource>
+								</resources>
+							</configuration>
+						</execution>
+					</executions>
+				</plugin>
+				<plugin>
+					<artifactId>maven-nar-plugin</artifactId>
+					<extensions>true</extensions>
+					<configuration>
+						<libraries>
+							<library>
+								<type>shared</type>
+							</library>
+						</libraries>
+						<tests>
+							<test>
+								<name>test</name>
+								<link>shared</link>
+							</test>
+						</tests>
+						<c>
+							<defines>
+								<define>_GLIBCXX_ATOMIC_BUILTINS</define>
+							</defines>
+							<includePaths>
+								<includePath>src/main/include</includePath>
+								<includePath>${project.build.directory}/${generated.sources.dir}</includePath>
+							</includePaths>
+							<testIncludePaths>
+								<testIncludePath>src/main/include</testIncludePath>
+								<testIncludePath>src/test/include</testIncludePath>
+								<testIncludePath>${project.build.directory}/${generated.sources.dir}</testIncludePath>
+							</testIncludePaths>
+						</c>
 					</configuration>
 				</plugin>
 			</plugins>
