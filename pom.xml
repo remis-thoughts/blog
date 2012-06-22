@@ -60,6 +60,27 @@
 					<configuration>
 						<encoding>UTF-8</encoding>
 					</configuration>
+					<executions>
+						<execution>
+							<id>copy-headers-to-noarch</id>
+							<phase>process-sources</phase>
+							<goals>
+								<goal>copy-resources</goal>
+							</goals>
+							<configuration>
+								<outputDirectory>${project.build.directory}/nar/${project.artifactId}-${project.version}-noarch/include</outputDirectory>
+								<resources>
+									<resource>
+										<directory>${project.build.directory}/${generated.sources.dir}</directory>
+										<includes>
+											<include>**/*.h</include>
+										</includes>
+									</resource>
+								</resources>
+								<overwrite>true</overwrite>
+							</configuration>
+						</execution>
+					</executions>
 				</plugin>
 				<plugin>
 					<groupId>org.apache.maven.plugins</groupId>
@@ -204,30 +225,6 @@
 					</configuration>
 				</plugin>
 				<plugin>
-					<artifactId>maven-resources-plugin</artifactId>
-					<executions>
-						<execution>
-							<id>copy-headers-to-noarch</id>
-							<phase>process-sources</phase>
-							<goals>
-								<goal>copy-resources</goal>
-							</goals>
-							<configuration>
-								<outputDirectory>${project.build.directory}/nar/${project.artifactId}-${project.version}-noarch/include</outputDirectory>
-								<resources>
-									<resource>
-										<directory>${project.build.directory}/${generated.sources.dir}</directory>
-										<includes>
-											<include>**/*.h</include>
-										</includes>
-									</resource>
-								</resources>
-								<overwrite>true</overwrite>
-							</configuration>
-						</execution>
-					</executions>
-				</plugin>
-				<plugin>
 					<groupId>org.apache.maven.plugins</groupId>
 					<artifactId>maven-antrun-plugin</artifactId>
 					<version>1.7</version>
@@ -242,12 +239,12 @@
 							</goals>
 							<configuration>
 								<target>
-								    <copy 
-								        file="${project.build.directory}/${project.artifactId}.md.html" 
-								        tofile="${project.build.directory}/${generated.sources.dir}/com/blogspot/remisthoughts/${shortname}/package.html" 
-								        overwrite="true" />
+									<copy
+										file="${project.build.directory}/${project.artifactId}.md.html"
+										tofile="${project.build.directory}/${generated.sources.dir}/com/blogspot/remisthoughts/${shortname}/package.html"
+										overwrite="true" />
 								</target>
-                                <skip>${skip.javadoc}</skip>
+								<skip>${skip.javadoc}</skip>
 							</configuration>
 						</execution>
 					</executions>
