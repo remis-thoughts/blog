@@ -172,30 +172,7 @@
 									<argument>java</argument>
 									<argument>--outputdir</argument>
 									<argument>${project.build.directory}</argument>
-								</arguments>
-								<skip>${skip.javadoc}</skip>
-							</configuration>
-						</execution>
-						<execution>
-							<!-- we need to turn the HTML snippet into a full doc if we want to -->
-							<!-- use it as a package.html header -->
-							<id>move-weave</id>
-							<goals>
-								<goal>exec</goal>
-							</goals>
-							<phase>process-sources</phase>
-							<configuration>
-								<executable>bash</executable>
-								<arguments>
-									<argument>-c</argument>
-									<argument><![CDATA[
-awk \
-    'BEGIN{print "<html><body>"} \
-    {print} \
-    END{print "</body></html>"}' \
-${project.build.directory}/${project.artifactId}.md.html \
-> ${project.build.directory}/${generated.sources.dir}/com/blogspot/remisthoughts/${shortname}/package.html
-]]></argument>
+									<argument>--standalone</argument>
 								</arguments>
 								<skip>${skip.javadoc}</skip>
 							</configuration>
@@ -245,6 +222,32 @@ ${project.build.directory}/${project.artifactId}.md.html \
 										</includes>
 									</resource>
 								</resources>
+								<overwrite>true</overwrite>
+							</configuration>
+						</execution>
+					</executions>
+				</plugin>
+				<plugin>
+					<groupId>org.apache.maven.plugins</groupId>
+					<artifactId>maven-antrun-plugin</artifactId>
+					<version>1.7</version>
+					<executions>
+						<execution>
+							<!-- we need to turn the HTML snippet into a full doc if we want to -->
+							<!-- use it as a package.html header -->
+							<id>move-weave</id>
+							<phase>process-sources</phase>
+							<goals>
+								<goal>run</goal>
+							</goals>
+							<configuration>
+								<target>
+								    <copy 
+								        file="${project.build.directory}/${project.artifactId}.md.html" 
+								        tofile="${project.build.directory}/${generated.sources.dir}/com/blogspot/remisthoughts/${shortname}/package.html" 
+								        overwrite="true" />
+								</target>
+                                <skip>${skip.javadoc}</skip>
 							</configuration>
 						</execution>
 					</executions>
