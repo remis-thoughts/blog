@@ -3,7 +3,6 @@
 	<modelVersion>4.0.0</modelVersion>
 
 	<artifactId>dynamic-optimisation</artifactId>
-	<version>${project.parent.version}</version>
 	<packaging>jar</packaging>
 
 	<name>dynamic-optimisation</name>
@@ -20,6 +19,10 @@
 	<build>
 		<plugins>
 			<plugin>
+				<groupId>de.saumya.mojo</groupId>
+				<artifactId>gem-maven-plugin</artifactId>
+			</plugin>
+			<plugin>
 				<artifactId>maven-gpg-plugin</artifactId>
 			</plugin>
 			<plugin>
@@ -34,10 +37,6 @@
 			<plugin>
 				<groupId>org.codehaus.mojo</groupId>
 				<artifactId>build-helper-maven-plugin</artifactId>
-			</plugin>
-			<plugin>
-				<groupId>org.codehaus.mojo</groupId>
-				<artifactId>exec-maven-plugin</artifactId>
 			</plugin>
 		</plugins>
 	</build>

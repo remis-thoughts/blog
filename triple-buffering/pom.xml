@@ -34,10 +34,10 @@
 			<plugin>
 				<artifactId>maven-nar-plugin</artifactId>
 			</plugin>
-			<plugin>
-				<groupId>org.codehaus.mojo</groupId>
-				<artifactId>exec-maven-plugin</artifactId>
-			</plugin>
+            <plugin>
+                <groupId>de.saumya.mojo</groupId>
+                <artifactId>gem-maven-plugin</artifactId>
+            </plugin>
 		</plugins>
 	</build>
 </project>

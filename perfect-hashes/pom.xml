@@ -20,6 +20,10 @@
 	<build>
 		<plugins>
 			<plugin>
+				<groupId>de.saumya.mojo</groupId>
+				<artifactId>gem-maven-plugin</artifactId>
+			</plugin>
+			<plugin>
 				<artifactId>maven-gpg-plugin</artifactId>
 			</plugin>
 			<plugin>
@@ -28,16 +32,12 @@
 			<plugin>
 				<artifactId>maven-javadoc-plugin</artifactId>
 			</plugin>
-            <plugin>
-                <artifactId>maven-antrun-plugin</artifactId>
-            </plugin>
 			<plugin>
-				<groupId>org.codehaus.mojo</groupId>
-				<artifactId>build-helper-maven-plugin</artifactId>
+				<artifactId>maven-antrun-plugin</artifactId>
 			</plugin>
 			<plugin>
 				<groupId>org.codehaus.mojo</groupId>
-				<artifactId>exec-maven-plugin</artifactId>
+				<artifactId>build-helper-maven-plugin</artifactId>
 			</plugin>
 		</plugins>
 	</build>
