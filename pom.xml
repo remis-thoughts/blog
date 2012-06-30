@@ -31,6 +31,7 @@
 		<module>perfect-hashes</module>
 		<module>dynamic-optimisation</module>
 		<module>triple-buffering</module>
+		<module>compile-to-asm</module>
 	</modules>
 
 	<pluginRepositories>
@@ -311,6 +312,8 @@ load '${project.build.directory}/rubygems-gem-maven-plugin/gems/literate_md-1.0.
 							</goals>
 							<configuration>
 								<grammars>*.g</grammars>
+								<sourceDirectory>${project.build.directory}/${generated.sources.dir}</sourceDirectory>
+								<outputDirectory>${project.build.directory}/${generated.sources.dir}</outputDirectory>
 							</configuration>
 						</execution>
 					</executions>
