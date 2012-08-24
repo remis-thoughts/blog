@@ -1,0 +1,7 @@
+fn seven_args(a, b, c, d, e, f, g) {
+    sum_six = +(+(+(+(+(a, b), c), d), e), f);
+    sub_seven = -(sum_six, g);
+    return sub_seven;
+}
+
+return seven_args(1, 2, 3, 4, 5, 6, 16);

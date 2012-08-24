@@ -1,0 +1,5 @@
+fn identity(x) {
+  return x;
+}
+
+return identity(3);
