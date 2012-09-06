@@ -454,51 +454,84 @@ boolean isNextInstructionReachable() { return false; }
 We need two separate bits of information from this graph; how the nodes relate to each other and how the instructions fit in between the nodes. 
 
 ~~~~
+@Other Helpers@ +=
+static final class ControlFlowGraph {
+  @Control Flow Graph Members@
+  ControlFlowGraph(Variable[] variables, List<Instruction> code) {
+    @Fit Instructions Between Nodes@
+    @Map Nodes To Instructions@
+    @Join Nodes Together@
+    @Variables Used At Next Instruction@
+  }
+}
 @Build Control Flow Graph@ +=
-int highestNode = 0;
-@Fit Instructions Between Nodes@
-@Join Nodes Together@
-@Identify Teminal Nodes@
+ControlFlowGraph controlFlow = new ControlFlowGraph(code);
 ~~~~
 
 Firstly: how nodes relate to the graph. This will create new nodes (i.e. increment _highestNode_) as needed. It's important we check both branches, as even though we'll only set our next node once (even if we branch) we want to make sure every node has a previous node set.
 
 ~~~~
+@Control Flow Graph Members@ +=
+private static final int FIRST_NODE = 0, LAST_NODE = 1, UNASSIGNED = -1;
+final int numNodes;
+final int[] prevNode, nextNode;
 @Fit Instructions Between Nodes@ +=
-int[] prevNode = new int[code.size()]; Arrays.fill(prevNode, -1);
-int[] nextNode = new int[code.size()]; Arrays.fill(nextNode, -1);
-Multimap<Integer, Integer> nextNodes = TreeMultimap.create();
+int highestNode = LAST_NODE + 1;
+prevNode = new int[code.size()]; Arrays.fill(prevNode, 1, code.size(), UNASSIGNED);
+nextNode = new int[code.size()]; Arrays.fill(nextNode, UNASSIGNED);
 for(int i = 0; i < code.size(); ++i ) {
-  if(prevNode[i] < 0) prevNode[i] = highestNode++; // e.g. seed for first nodee
   Instruction instr = code.get(i);
   if(instr.isNextInstructionReachable()) {
-    if(prevNode[i+1] < 0) prevNode[i+1] = highestNode++; 
-    nextNodes.put(prevNode[i], nextNode[i] = prevNode[i+1]);
+    if(prevNode[i+1] == UNASSIGNED) prevNode[i+1] = highestNode++; 
+    nextNode[i] = prevNode[i+1];
   }
   if(instr.couldJumpTo() != null) {
     int nextInstr = code.indexOf(new DefineLabel(instr.couldJumpTo()));
-    if(prevNode[nextInstr] >= 0) nextNode[i] = prevNode[nextInstr]; // e.g. a loop
+    if(prevNode[nextInstr] != UNASSIGNED) nextNode[i] = prevNode[nextInstr]; // e.g. a loop
     else nextNode[i] = prevNode[nextInstr] = highestNode++; 
-    nextNodes.put(prevNode[i], prevNode[nextInstr]);
   }
-  if(nextNode[i] < 0) 
-    nextNodes.put(prevNode[i], nextNode[i] = highestNode++); // control terminates, e.g. a ret
+  if(nextNode[i] == UNASSIGNED) nextNode[i] = LAST_NODE; // control terminates, e.g. a ret
 }
+this.numNodes = highestNode;
 ~~~~
 
 Now we know where nodes fit into the graph we can build up maps of nodes to instructions before and instructions after.
 
 ~~~~
-@Join Nodes Together@ +=
-Multimap<Integer, Integer> instructionsBefore = TreeMultimap.create();
-Multimap<Integer, Integer> instructionsAfter = TreeMultimap.create();
+@Control Flow Graph Members@ +=
+final Multimap<Integer, Instruction> 
+  instructionsBeforeNode = HashMultimap.create(), 
+  instructionsAfterNode = HashMultimap.create();
+@Map Nodes To Instructions@ +=
 for(int i = 0; i < code.size(); ++i ) {
-  instructionsBefore.put(nextNode[i], i);
-  instructionsAfter.put(prevNode[i], i);
+  instructionsBeforeNode.put(nextNode[i], code.get(i));
+  instructionsAfterNode.put(prevNode[i], code.get(i));
 }
-Function<Integer, Instruction> getInstruction = new Function<Integer, Instruction>() {
-  public Instruction apply(Integer i) { return code.get(i); }
-};
+~~~~
+
+...and a map of nodes to nodes
+
+~~~~
+@Control Flow Graph Members@ +=
+ImmutableMultimap<Integer, Integer> nextNodes;
+@Join Nodes Together@ +=
+ImmutableMultimap.Builder<Integer, Integer> nextNodes = ImmutableMultimap.builder();
+for(int i = 0; i < code.size(); ++i )
+  nextNodes.put(prevNode[i], nextNode[i]);
+this.nextNodes = nextNodes.build();
+~~~~
+
+Which variables are used in any of the instructions following this node?
+
+~~~~
+@Control Flow Graph Members@ +=
+BitSet varsUsedNext = new BitSet(), varsUsedPrev = new BitSet();
+@Variables Used At Next Instruction@ +=
+for(int i = 0; i < code.size(); ++i )
+  for(Variable variable : filter(code.get(i).getParameters(), Variable.class)) {
+    varsUsedNext.set(prevNode[i] * variables.length + indexOf(variables, variable));
+    varsUsedPrev.set(nextNode[i] * variables.length + indexOf(variables, variable));
+  }
 ~~~~
 
 Which variables need to be assigned to registers?
@@ -525,27 +558,30 @@ Liveness...as a BitSet
 
 ~~~~
 @Other Helpers@ +=
-private static final class Liveness {
-  final Variable[] variables;
-  final BitSet isLive = new BitSet();
-  Liveness(Variable[] variables) { this.variables = variables; }
-  int index(Variable variable, int node) {
-    return node * variables.length + indexOf(variables, variable);
+static final class Liveness {
+  final Variable[] variables; final BitSet isLive;
+  Liveness(Variable[] variables, BitSet isLive) { 
+    this.variables = variables; this.isLive = isLive; 
   }
-  BitSet getLiveAtNode(int node) {
-    BitSet ret = new BitSet(variables.length);
-    for(int v = 0; v < variables.length; ++v)
-      ret.set(v, isLive.get(node * variables.length + v));
+  boolean isLiveAt(int variable, int node) {
+    return isLive.get(node * variables.length + variable);
+  }
+  /** @return true if any changes */
+  boolean copyFrom(int nodeFrom, int nodeTo) {
+    boolean ret = false;
+    int index = isLive.nextSetBit(nodeFrom * variables.length);
+    while(index >= 0 && index < (nodeFrom + 1) * variables.length) {
+      int variable = index - nodeFrom * variables.length;
+      ret |= !isLive.get(nodeTo * variables.length + variable);
+      isLive.set(nodeTo * variables.length + variable);
+      index = isLive.nextSetBit(index + 1);
+    }
     return ret;
-  }
-  void setLiveAtNode(int node, BitSet live) {
-    for (int v = live.nextSetBit(0); v >= 0; v = live.nextSetBit(v+1))
-      isLive.set(node * variables.length + v);
   }
   public String toString() {
     StringBuilder ret = new StringBuilder();
     for (int v = 0; v < variables.length; ++v) {
-      ret.append(Strings.padEnd(variables[v].toString(), 20, ' '));
+      ret.append(Strings.padStart(variables[v].toString(), 20, ' ')).append(':');
       for (int n = 0; n < isLive.length() / variables.length; ++n) 
         ret.append(isLive.get(n * variables.length + v) ? "-" : " ");
       ret.append('\n');
@@ -555,46 +591,40 @@ private static final class Liveness {
 }
 ~~~~
 
+A variable is not live at the node before the instruction where it's created and is not live at the node after the instruction where it's last read.
+
 ~~~~
 @Other Helpers@ +=
-private static Liveness calculateLiveness(
-  Variable[] variables, 
-  Iterable<Integer> startingNodes,
-  Multimap<Integer, Integer> prevInstr, Multimap<Integer, Integer> nextInstr,
-  int[] prevNode, int[] nextNode,
-  Function<Integer, Instruction> getInstr) {
-  Queue<Integer> unprocessed = Queues.newArrayDeque(startingNodes);
-  Liveness ret = new Liveness(variables); Integer node = null; 
+private static void propagateLiveness(
+  Liveness liveness,
+  int startingNode,
+  ImmutableMultimap<Integer, Integer> nextNodes) {
+  Queue<Integer> unprocessed = Queues.newArrayDeque(Arrays.asList(startingNode));
   BitSet nodesSeen = new BitSet();
-  while((node = unprocessed.poll()) != null) {
-    BitSet liveBefore = ret.getLiveAtNode(node);
-    for(Variable variable : varsUsed(transform(prevInstr.get(node), getInstr)))
-      ret.isLive.set(ret.index(variable, node));
-    for(int i : prevInstr.get(node))
-      ret.setLiveAtNode(node, ret.getLiveAtNode(prevNode[i]));
-    if(!nodesSeen.get(node) || !liveBefore.equals(ret.getLiveAtNode(node)))
-      for(int i : nextInstr.get(node)) unprocessed.offer(nextNode[i]);
+  for(Integer node = unprocessed.poll(); node != null; node = unprocessed.poll()) {
+    boolean changed = false;
+    for(int n : nextNodes.inverse().get(node))
+      changed |= liveness.copyFrom(n, node);
+    if(!nodesSeen.get(node) || changed)
+      for(int n : nextNodes.get(node)) unprocessed.offer(n);
     nodesSeen.set(node);
   }
-  return ret;
 }
 ~~~~
 
 
 ~~~~
+@Other Helpers@ +=
+static Liveness calculateLiveness(Variable[] variables, List<Instruction> code, ControlFlowGraph controlFlow) {
+  Liveness forwards = new Liveness(variables, (BitSet) controlFlow.varsUsedPrev.clone()); 
+  propagateLiveness(forwards, ControlFlowGraph.FIRST_NODE, controlFlow.nextNodes);
+  Liveness backwards = new Liveness(variables, (BitSet) controlFlow.varsUsedNext.clone()); 
+  propagateLiveness(backwards, ControlFlowGraph.LAST_NODE, controlFlow.nextNodes.inverse());
+  forwards.isLive.and(backwards.isLive);
+  return forwards;
+}
 @Calculate Liveness@ +=
-Liveness liveness = calculateLiveness(
-  variables, 
-  Arrays.asList(0), 
-  instructionsBefore, instructionsAfter, 
-  prevNode, nextNode, 
-  getInstruction);
-liveness.isLive.and(calculateLiveness(
-  variables, 
-  indicesOf(code, ret), 
-  instructionsAfter, instructionsBefore, 
-  nextNode, prevNode, 
-  getInstruction).isLive);
+Liveness liveness = calculateLiveness(variables, code, controlFlow); 
 ~~~~
 
 
@@ -608,14 +638,15 @@ int numRegistersAndStack = numRegisters + 1;
 int theStack = numRegisters; // index number of stack "register"
 ~~~~ 
 
-The first (and most important) set of unknowns are the _VAR_IN_REG_AT_INSTR_ columns: which register each variable is in at each node in the control flow graph. 
+The first (and most important) set of unknowns are the _VAR_IN_REG_AT_INSTR_ columns: which register each variable is in at each node in the control flow graph, assuming it's live. 
 
 ~~~~
 @Set Up Columns@ +=
 for (int v = 0; v < variables.length; ++v)
-  for (int r = 0; r < numRegistersAndStack; ++r)
-    for(int n = 0; n < highestNode; ++n)
-      allocation.column(VAR_IN_REG_AT_INSTR, v, r, n).type(ColumnType.BINARY);
+  for(int n = 0; n < highestNode; ++n)
+    if(liveness.isLiveAt(v, n))
+      for (int r = 0; r < numRegistersAndStack; ++r)
+        allocation.column(VAR_IN_REG_AT_INSTR, v, r, n).type(ColumnType.BINARY);
 @Other Helpers@ +=
 private static final String VAR_IN_REG_AT_INSTR = "x";
 ~~~~
@@ -625,9 +656,10 @@ The next set of unknowns are used to work out the cost of a given assignment. We
 ~~~~
 @Set Up Columns@ +=
 for (int v = 0; v < variables.length; ++v)
-  for (int r = 0; r < numRegistersAndStack; ++r)
-    for(int n = 0; n < highestNode; ++n)
-      allocation.column(NEW_VAR_IN_REG_FLAG, v, r, n).type(ColumnType.BINARY);
+  for(int n = 0; n < highestNode; ++n)
+    if(liveness.isLiveAt(v, n))
+      for (int r = 0; r < numRegistersAndStack; ++r)
+        allocation.column(NEW_VAR_IN_REG_FLAG, v, r, n).type(ColumnType.BINARY);
 @Other Helpers@ +=
 private static final String NEW_VAR_IN_REG_FLAG = "c";
 ~~~~
@@ -638,7 +670,6 @@ The cost of register access, _mu_ in (the paper)[http://grothoff.org/christian/l
 @Other Helpers@ +=
 private static final double COST_OF_REG_ACCESS = 1.0;
 private static double spillCost(
-  Variable v, int node, 
   Multimap<Integer, Instruction> instrsBefore, Multimap<Integer, Instruction> instrsAfter) {
   double ret = 0.0;
   for(Instruction instrBefore : instrsBefore.get(node))
@@ -655,19 +686,26 @@ The objective: minimise spillage at each node.
 ~~~~
 @Set Up Objective@ +=
 allocation.objective("spillage", Direction.MINIMIZE);
+@Minimise Number Of Spills@
 for (int v = 0; v < variables.length; ++v)
   for (int n = 0; n < highestNode; ++n)
-    allocation.objective().add(
-      spillCost(
-        variables[v], n, 
-        transformValues(instructionsBefore, getInstruction), 
-        transformValues(instructionsAfter, getInstruction)), 
-      VAR_IN_REG_AT_INSTR, v, theStack, n);
-for (int v = 0; v < variables.length; ++v)
-  for (int r = 0; r < numRegistersAndStack; ++r)
-    for (int n = 0; n < highestNode; ++n)
-      allocation.objective().add(COST_OF_REG_ACCESS, NEW_VAR_IN_REG_FLAG, v, r, n);
+    if(liveness.isLiveAt(v, n))
+      for (int r = 0; r < numRegistersAndStack; ++r)
+        allocation.objective().add(COST_OF_REG_ACCESS, NEW_VAR_IN_REG_FLAG, v, r, n);
 @Add Objective Hints@
+~~~~
+
+~~~~
+@Minimise Number Of Spills@ +=
+for (int v = 0; v < variables.length; ++v)
+  for (int n = 0; n < highestNode; ++n)
+    if(liveness.isLiveAt(v, n))
+      allocation.objective().add(
+        spillCost(
+          variables[v], n, 
+          instructionsBefore, 
+          instructionsAfter, 
+        VAR_IN_REG_AT_INSTR, v, theStack, n);
 ~~~~
 
 Hinting. We'd like to make as many _movq_s no-ops as possible (especially if we've defined a register). We deliberately insert a move just before a return to set the _eax_ register to the return value; it'd be nice if it was a no-op. Also, after a _call_ where we move the return value in _eax_ to the return _Variable_. However, currently:
@@ -689,10 +727,10 @@ for(int i = 0; i < code.size(); ++i) {
   if(!isAMove(code.get(i))) continue;
   int v = indexOf(variables, code.get(i));
   int r = indexOf(gpRegisters, code.get(i));
-  if(v >= 0 && r >= 0) {
-    allocation.objective().add(MOVE_NOP_HINT, VAR_IN_REG_AT_INSTR, v, r, prevNode[i]); // right reg before
-    allocation.objective().add(MOVE_NOP_HINT, VAR_IN_REG_AT_INSTR, v, r, nextNode[i]); // right reg after
-  }
+  if(v >= 0 && r >= 0)
+    for(int n : Arrays.asList(prevNode[i], nextNode[i]))  // right reg before & after
+      if(liveness.isLiveAt(v, n))
+        allocation.objective().add(MOVE_NOP_HINT, VAR_IN_REG_AT_INSTR, v, r, n);
 }
 @Other Helpers@ +=
 private static boolean isAMove(Instruction i) {
@@ -710,41 +748,45 @@ addl %ecx, %eax
 movl %eax, %eax
 </pre>
 
-Constraint: registers can only ever hold one variable at once(apart from the stack)
+Constraint: registers can only ever hold one variable at once (apart from the stack). 
 
 ~~~~
 @Set Up Constraints@ +=
-for (int r = 0; r < numRegisters /*not stack*/; ++r)
-  for (int n = 0; n < highestNode; ++n) {
-    allocation.row(ONE_VAR_PER_REG, r, n).bounds(0.0, 1.0);
-    for (int v = 0; v < variables.length; ++v)
-      allocation.row(ONE_VAR_PER_REG, r, n).add(1.0, VAR_IN_REG_AT_INSTR, v, r, n);
+for (int n = 0; n < highestNode; ++n) {
+  for (int v = 0; v < variables.length; ++v)
+    if(liveness.isLiveAt(v, n))
+      for (int r = 0; r < numRegisters /*not stack*/; ++r)
+        allocation.row(ONE_VAR_PER_REG, r, n)
+          .bounds(0.0, 1.0)
+          .add(1.0, VAR_IN_REG_AT_INSTR, v, r, n);
   }
 @Other Helpers@ +=
 private static final String ONE_VAR_PER_REG = "one_var_per_reg";
 ~~~~
 
-Contraint: variables must not be lost; they must be in either the stack or exactly one register. While technically we could put the variable on stack as well as in more than one register, this makes the LP solver much slower as there are so many more possible combinations of assignments to narrow down.
+Constraint: variables must not be lost; they must be in either the stack or exactly one register. While technically we could put the variable on stack as well as in more than one register, this makes the LP solver much slower as there are so many more possible combinations of assignments to narrow down. Also, if a variable's not live then force it on the stack.
 
 ~~~~
 @Set Up Constraints@ +=
 for (int v = 0; v < variables.length; ++v)
-  for (int n = 0; n < highestNode; ++n) {
-    allocation.row(VARS_NOT_LOST, v, n).bounds(1.0, 1.0);
-    for (int r = 0; r < numRegistersAndStack; ++r)
-      allocation.row(VARS_NOT_LOST, v, n).add(1.0, VAR_IN_REG_AT_INSTR, v, r, n);
-  }
+  for (int n = 0; n < highestNode; ++n)
+    if(liveness.isLiveAt(v, n))
+      for (int r = 0; r < numRegistersAndStack; ++r)
+        allocation.row(VARS_NOT_LOST, v, n)
+          .bounds(1.0, 1.0)
+          .add(1.0, VAR_IN_REG_AT_INSTR, v, r, n);
 @Other Helpers@ +=
 private static final String VARS_NOT_LOST = "vars_not_lost";
 ~~~~
 
-The last pair of constraints ensure that the _NEW_VAR_IN_REG_FLAG_ works as we want.
+The last pair of constraints ensure that the _NEW_VAR_IN_REG_FLAG_ works as we want. What's the -1 for?
 
 ~~~~
 @Set Up Constraints@ +=
 for (int v = 0; v < variables.length; ++v)
   for (int r = 0; r < numRegistersAndStack; ++r)
     for(Entry<Integer, Integer> n : nextNodes.entries()) {
+      if(!liveness.isLiveAt(v, n.getKey()) || !liveness.isLiveAt(v, n.getValue())) continue;
       allocation.
         row(FLAG_SET_CORRECTLY, v, r, n.getKey(), n.getValue()).
         bounds(0.0, null).
@@ -770,7 +812,7 @@ if (!solver.solve(allocation))
 private static final Solver solver = new SolverGlpk();
 ~~~~
 
-We know which register each variable is in at each node now:
+We know which register each variable is in at each node now (assuming it's live):
 
 ~~~~
 @Other Helpers@ +=
@@ -793,7 +835,7 @@ Instruction resolve(Variable from, Register to) {
 }
 ~~~~
 
-We'll iterate through the linear programming solution and resolve variables as needed. For each instruction, we'll use the node before to work out which variables are where.
+We'll iterate through the linear programming solution and resolve variables as needed. For each instruction, we'll use the node before to work out which variables are where. Note that the variable must be live at the previous node, by definition.
 
 ~~~~
 @Copy Solution Into Code@ +=
@@ -1074,12 +1116,6 @@ private static <T> int indexOf(T[] ts, Instruction i) {
 }
 private static <T> int indexOf(T[] ts, T t) {
   return Arrays.asList(ts).indexOf(t);
-}
-private static <T> List<Integer> indicesOf(List<T> ts, T t) {
-  List<Integer> ret = new ArrayList<Integer>(5);
-  for(int i = 0; i < ts.size(); ++i)
-    if(Objects.equal(ts.get(i), t)) ret.add(i);
-  return ret;
 }
 ~~~~
 
