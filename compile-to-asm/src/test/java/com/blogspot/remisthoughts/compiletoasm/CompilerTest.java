@@ -77,6 +77,7 @@ public class CompilerTest {
 				print(System.err, gcc.getErrorStream());
 				fail("gcc must compile successfully");
 			}
+			System.out.println(asmFile.getAbsolutePath());
 			System.out.println(Files.toString(asmFile, Charsets.UTF_8));
 
 			// run the file and check it produces the correct exit code
