@@ -523,17 +523,22 @@ for(int i = 0; i < code.size(); ++i )
 this.nextNodes = nextNodes.build();
 ~~~~
 
-Which variables are used in any of the instructions following this node?
+Which variables are used in any of the instructions following this node? We can't call a variable dead if at least one code path reads it, but we can call it dead if every code path writes to it (and doesn't read from it in the same instruction).
 
 ~~~~
 @Control Flow Graph Members@ +=
-BitSet varsUsedNext = new BitSet(), varsUsedPrev = new BitSet();
+BitSet varsReadNext = new BitSet(), varsWrittenNext = new BitSet();
 @Variables Used At Next Instruction@ +=
 for(int i = 0; i < code.size(); ++i )
-  for(Variable variable : filter(code.get(i).getParameters(), Variable.class)) {
-    varsUsedNext.set(prevNode[i] * variables.length + indexOf(variables, variable));
-    varsUsedPrev.set(nextNode[i] * variables.length + indexOf(variables, variable));
-  }
+  for(Variable variable : filter(code.get(i).readsFrom(), Variable.class))
+    varsReadNext.set(prevNode[i] * variables.length + indexOf(variables, variable));
+for(Entry<Integer, Collection<Integer>> next : instructionsFollowingNode.asMap().entrySet()) { // not empty
+  Set<Variable> varsSet = Sets.newTreeSet(Arrays.asList(variables)); 
+  for(int i : next.getValue())
+    varsSet.retainAll(Sets.newTreeSet(filter(code.get(i).writesTo(), Variable.class)));
+  for(Variable variable : varsSet)
+    varsWrittenNext.set(next.getKey() * variables.length + indexOf(variables, variable));
+}
 ~~~~
 
 If one of the instructions following a node is a function call, we should only put live variables into registers that'll be preserved across function calls.
@@ -547,22 +552,35 @@ for(int i = 0; i < code.size(); ++i )
     nodesBeforeFnCalls.set(prevNode[i]);
 ~~~~
 
-Which variables need to be assigned to registers?
+Data dependencies - will let us calculate liveness
 
 ~~~~
 @Instruction Members@ +=
-List<Value> getParameters() { return Collections.emptyList(); }
+Collection<Value> readsFrom() { return Collections.emptyList(); }
+Collection<ValueCanStoreInto> writesTo() { return Collections.emptyList(); }
 @BinaryOp Members@ +=
-List<Value> getParameters() { return Arrays.asList(arg1, arg2); }
+Collection<Value> readsFrom() { return op.readsFrom(arg1, arg2); }
+Collection<ValueCanStoreInto> writesTo() { return op.writesTo(arg1, arg2); }
+@Op Members@ +=
+Collection<Value> readsFrom(Value arg1, ValueCanStoreInto arg2) { return Arrays.asList(arg1, arg2); }
+Collection<ValueCanStoreInto> writesTo(Value arg1, ValueCanStoreInto arg2) { return  Arrays.asList(arg2); }
+@MOVQ@ +=
+Collection<Value> readsFrom(Value arg1, ValueCanStoreInto arg2) { return Arrays.asList(arg1); }
 @Other Helpers@ +=
-private static final Function<Instruction, Iterable<Value>> getParameters = new Function<Instruction, Iterable<Value>>() {
-  public Iterable<Value> apply(Instruction i) { return i.getParameters(); }
-};
-private static Set<Variable> varsUsed(Iterable<Instruction> code ) {
-  return Sets.newTreeSet(filter(concat(transform(code, getParameters)), Variable.class));
+private static Set<Variable> varsUsed(Instruction i) {
+  return Sets.newTreeSet(filter(concat(i.readsFrom(), i.writesTo()), Variable.class));
 }
+~~~~
+
+We need to know all the variables we'll ever need to assign
+
+~~~~
 @Get Variables Used@ +=
-Set<Variable> allVariables = varsUsed(code);
+Set<Variable> allVariables = Sets.newTreeSet();
+for(Instruction i : code) {
+  addAll(allVariables, filter(i.readsFrom(), Variable.class));
+  addAll(allVariables, filter(i.writesTo(), Variable.class));
+}
 if(allVariables.isEmpty()) { @No Stack Variables@ return code; }
 Variable[] variables = allVariables.toArray(new Variable[allVariables.size()]);
 ~~~~
@@ -573,84 +591,61 @@ Liveness...as a BitSet
 @Other Helpers@ +=
 static final class Liveness {
   final Variable[] variables; final BitSet isLive;
-  Liveness(Variable[] variables, BitSet isLive) { 
-    this.variables = variables; this.isLive = isLive; 
+  Liveness(ControlFlowGraph controlFlow) { 
+    this.variables = controlFlow.variables;
+    @Calculate Liveness From Graph@
   }
   boolean isLiveAt(int variable, int node) {
     return isLive.get(node * variables.length + variable);
-  }
-  /** @return true if any changes */
-  boolean copyFrom(int nodeFrom, int nodeTo) {
-    boolean ret = false;
-    int index = isLive.nextSetBit(nodeFrom * variables.length);
-    while(index >= 0 && index < (nodeFrom + 1) * variables.length) {
-      int variable = index - nodeFrom * variables.length;
-      ret |= !isLive.get(nodeTo * variables.length + variable);
-      isLive.set(nodeTo * variables.length + variable);
-      index = isLive.nextSetBit(index + 1);
-    }
-    return ret;
   }
   public String toString() {
     StringBuilder ret = new StringBuilder();
     for (int v = 0; v < variables.length; ++v) {
       ret.append(Strings.padStart(variables[v].toString(), 20, ' ')).append(':');
-      for (int n = 0; n < isLive.length() / variables.length; ++n) 
+      for (int n = 0; n < (isLive.length()+1) / variables.length; ++n) 
         ret.append(isLive.get(n * variables.length + v) ? "-" : " ");
       ret.append('\n');
     }
     return ret.toString();
   }
+  @Liveness Members@
 }
 ~~~~
 
 A variable is not live at the node before the instruction where it's created and is not live at the node after the instruction where it's last read.
 
 ~~~~
-@Other Helpers@ +=
-private static void propagateLiveness(
-  Liveness liveness,
-  int startingNode,
-  ImmutableMultimap<Integer, Integer> nextNodes) {
-  Queue<Integer> unprocessed = Queues.newArrayDeque(Arrays.asList(startingNode));
-  BitSet nodesSeen = new BitSet();
-  for(Integer node = unprocessed.poll(); node != null; node = unprocessed.poll()) {
-    boolean changed = false;
-    for(int n : nextNodes.inverse().get(node))
-      changed |= liveness.copyFrom(n, node);
-    if(!nodesSeen.get(node) || changed)
-      for(int n : nextNodes.get(node)) unprocessed.offer(n);
-    nodesSeen.set(node);
-  }
-}
-~~~~
-
-~~~~
-@Other Helpers@ +=
-static Liveness calculateLiveness(Variable[] variables, List<Instruction> code, ControlFlowGraph controlFlow) {
-  Liveness forwards = new Liveness(variables, (BitSet) controlFlow.varsUsedPrev.clone()); 
-  propagateLiveness(forwards, ControlFlowGraph.FIRST_NODE, controlFlow.nextNodes);
-  Liveness backwards = new Liveness(variables, (BitSet) controlFlow.varsUsedNext.clone()); 
-  propagateLiveness(backwards, ControlFlowGraph.LAST_NODE, controlFlow.nextNodes.inverse());
-  forwards.isLive.and(backwards.isLive);
-  return forwards;
+@Calculate Liveness From Graph@ +=
+isLive = (BitSet) controlFlow.varsReadNext.clone(); 
+Queue<Integer> unprocessed = Queues.newArrayDeque(Arrays.asList(ControlFlowGraph.LAST_NODE));
+BitSet nodesSeen = new BitSet();
+for(Integer node = unprocessed.poll(); node != null; node = unprocessed.poll()) {
+  boolean changed = false;
+  for(int n : controlFlow.nextNodes.get(node))
+      changed |= copyFrom(isLive, n, node, variables.length);
+  for(int index = node * variables.length; index < (node+1) * variables.length; ++index)
+    if(controlFlow.varsWrittenNext.get(index) && !controlFlow.varsReadNext.get(index))
+      isLive.clear(index);
+  if(!nodesSeen.get(node) || changed)
+    for(int n : controlFlow.nextNodes.inverse().get(node)) unprocessed.offer(n);
+  nodesSeen.set(node);
 }
 @Calculate Liveness@ +=
-Liveness liveness = calculateLiveness(variables, code, controlFlow); 
+Liveness liveness = new Liveness(controlFlow); 
 ~~~~
 
 We can use liveness information to decide what variables we need to assign to registers at each node. At function calls we should ensure that any live variables are stored in registers that'll be preserved. The assembly instructions inserted before the function call itself will ensure that the parameters will stay in the correct registers.
 
 ~~~~
 @Control Flow Graph Members@ +=
-final int numVariables;
+final Variable[] variables;
 boolean needsAssigning(Liveness liveness, int variable, int node, int register) {
-  boolean isLive = liveness.isLiveAt(variable, node) || varsUsedNext.get(node * numVariables + variable);
+  boolean isLive = liveness.isLiveAt(variable, node) || varsUsedNext.get(node * variables.length + variable);
   boolean thisRegPreserved = !nodesBeforeFnCalls.get(node) || calleeSavesRegisterIndices.get(register);
   return isLive && thisRegPreserved;
 }
 @Store Number Of Variables@ +=
-this.numVariables = variables.length; 
+this.variables = variables; 
 @Other Helpers@ += 
 private static final BitSet calleeSavesRegisterIndices = new BitSet();
 static {
@@ -877,7 +872,7 @@ We'll iterate through the linear programming solution and resolve variables as n
 ~~~~
 @Copy Solution Into Code@ +=
 for(int i = 0; i < code.size(); ++i)
-  for(Variable variable : filter(code.get(i).getParameters(), Variable.class)) {
+  for(Variable variable : varsUsed(code.get(i))) {
     int v = indexOf(variables, variable);
     for (int r = 0; r < gpRegisters.length; ++r)
       if(allocation.column(VAR_IN_REG_AT_INSTR, v, r, controlFlow.prevNode[i]).getValue() > 0.5) { // huge tolerance for 0-1 integer
@@ -1142,6 +1137,20 @@ private static <T> int indexOf(T[] ts, Instruction i) {
 }
 private static <T> int indexOf(T[] ts, T t) {
   return Arrays.asList(ts).indexOf(t);
+}
+/** @return true if any changes */
+private static boolean copyFrom(BitSet set, int indexFrom, int indexTo, int num) {
+  boolean ret = false;
+  for(
+    int index = set.nextSetBit(indexFrom * num);
+    index >= 0 && index < (indexFrom + 1) * num;
+    index = set.nextSetBit(index + 1)) 
+  {
+    int v = index - indexFrom * num;
+    ret |= !set.get(indexTo * num + v);
+    set.set(indexTo * num + v);
+  }
+  return ret;
 }
 ~~~~
 
