@@ -147,18 +147,21 @@ static final class Variable implements ValueCanStoreInto, Comparable<Variable> {
 private static final AtomicInteger uniqueness = new AtomicInteger();
 ~~~~
 
-The registers (and their types). NB: omit frame pointer here
+The registers (and their types). NB: omit frame pointer here - and add _THESTACK_ as a synthetic var.
 
 ~~~~
 @Value Classes@ +=
 enum Register implements ValueCanStoreInto {
-  rax, rbx, rcx, rdx, rsp /*stack pointer*/, rbp /*frame pointer*/, rsi, rdi, r8, r9, r10, r11, r12, r13, r14, r15;
+  rax, rbx, rcx, rdx, rsp /*stack pointer*/, 
+  rbp /*frame pointer*/, rsi, rdi, r8, r9, 
+  r10, r11, r12, r13, r14, r15, THESTACK;
   public String toString() { return String.format("%%%s", name()); }
+  private static final Register[] ASSIGNABLE = { 
+    rax, rbx, rcx, rdx, rbp, rsi, rdi, r8, r9, r10, r11, r12, r13, r14, r15, THESTACK 
+  };
+  private static final Register[] CALLEE_SAVES = { rbx, rbp, r12, r13, r14, r15 };
+  private static final Register[] PARAMETERS = { rdi, rsi, rdx, rcx, r8, r9 };
 }
-@Other Helpers@ +=
-private static final Register[] gpRegisters = { rax, rbx, rcx, rdx, rbp, rsi, rdi, r8, r9, r10, r11, r12, r13, r14, r15 };
-private static final Register[] calleeSavesRegisters = { rbx, rbp, r12, r13, r14, r15 };
-private static final Register[] paramRegisters = { rdi, rsi, rdx, rcx, r8, r9 };
 ~~~~
 
 Calling functions [CDECL](http://en.wikipedia.org/wiki/X86_calling_conventions#cdecl). Note that we'll assume the function being called is a local variable if it has the same name as a local variable in this function - otherwise it'll be a label which the linker will resolve for us.
@@ -172,9 +175,9 @@ private static void call(Tree t, List<Instruction> code, List<List<Instruction>>
   for (Tree argument : children(t, 1)) {
     values.add(getAsValue(argument, code, text, params, declaredVars));
   }
-  int numParams = values.size(), maxInRegs = paramRegisters.length;
+  int numParams = values.size(), maxInRegs = Register.PARAMETERS.length;
   for(int r = 0; r < Math.min(numParams, maxInRegs); ++r)
-    code.add(Op.movq.with(values.get(r), paramRegisters[r]));
+    code.add(Op.movq.with(values.get(r), Register.PARAMETERS[r]));
   @Before We Push Function Params Onto Stack@
   for(Value value : Lists.reverse(values.subList(Math.min(numParams, maxInRegs), numParams))) 
     code.add(@Push Value Onto The Stack@);
@@ -316,10 +319,10 @@ Note that CALLEE_SAVE_VAR shouldn't be user-enterable or this will confuse thing
 @Instruction Classes@ +=
 static final Instruction ret = new NoArgInstruction(@Ret x86 Code@) { @Ret Members@ };
 @Entering Function@ +=
-for(Register r : calleeSavesRegisters)
+for(Register r : Register.CALLEE_SAVES)
   code.add(Op.movq.with(r, new Variable(CALLEE_SAVE_VAR + r)));
 @Returning From Function@ +=
-for(Register r : calleeSavesRegisters)
+for(Register r : Register.CALLEE_SAVES)
   code.add(Op.movq.with(new Variable(CALLEE_SAVE_VAR + r), r));
 @Are We Returning From The Main Function@
 code.add(Compiler.ret);
@@ -335,10 +338,10 @@ Map<Variable, Parameter> params = Maps.newTreeMap();
 int number = 0;
 for(Tree param : children(def, 1)) {
   Variable v = new Variable(text(param));
-  if(number < paramRegisters.length)
-    code.add(Op.movq.with(paramRegisters[number++], v));
+  if(number < Register.PARAMETERS.length)
+    code.add(Op.movq.with(Register.PARAMETERS[number++], v));
   else
-    params.put(v, new Parameter(number++ - paramRegisters.length));
+    params.put(v, new Parameter(number++ - Register.PARAMETERS.length));
 }
 @Static Classes@ +=
 private static final class Parameter implements ValueCanStoreInto {
@@ -556,20 +559,17 @@ Data dependencies - will let us calculate liveness
 
 ~~~~
 @Instruction Members@ +=
-Collection<Value> readsFrom() { return Collections.emptyList(); }
-Collection<ValueCanStoreInto> writesTo() { return Collections.emptyList(); }
+Set<Value> readsFrom() { return Collections.emptySet(); }
+Set<ValueCanStoreInto> writesTo() { return Collections.emptySet(); }
+<E> Set<E> uses(Class<E> c) { return ImmutableSet.copyOf(filter(concat(readsFrom(), writesTo()), c)); }
 @BinaryOp Members@ +=
-Collection<Value> readsFrom() { return op.readsFrom(arg1, arg2); }
-Collection<ValueCanStoreInto> writesTo() { return op.writesTo(arg1, arg2); }
+Set<Value> readsFrom() { return op.readsFrom(arg1, arg2); }
+Set<ValueCanStoreInto> writesTo() { return op.writesTo(arg1, arg2); }
 @Op Members@ +=
-Collection<Value> readsFrom(Value arg1, ValueCanStoreInto arg2) { return Arrays.asList(arg1, arg2); }
-Collection<ValueCanStoreInto> writesTo(Value arg1, ValueCanStoreInto arg2) { return  Arrays.asList(arg2); }
+Set<Value> readsFrom(Value arg1, ValueCanStoreInto arg2) { return ImmutableSet.of(arg1, arg2); }
+Set<ValueCanStoreInto> writesTo(Value arg1, ValueCanStoreInto arg2) { return  ImmutableSet.of(arg2); }
 @MOVQ@ +=
-Collection<Value> readsFrom(Value arg1, ValueCanStoreInto arg2) { return Arrays.asList(arg1); }
-@Other Helpers@ +=
-private static Set<Variable> varsUsed(Instruction i) {
-  return Sets.newTreeSet(filter(concat(i.readsFrom(), i.writesTo()), Variable.class));
-}
+Set<Value> readsFrom(Value arg1, ValueCanStoreInto arg2) { return ImmutableSet.of(arg1); }
 ~~~~
 
 We need to know all the variables we'll ever need to assign
@@ -634,24 +634,25 @@ for(Integer node = unprocessed.poll(); node != null; node = unprocessed.poll()) 
 Liveness liveness = new Liveness(controlFlow); 
 ~~~~
 
-We can use liveness information to decide what variables we need to assign to registers at each node. At function calls we should ensure that any live variables are stored in registers that'll be preserved. The assembly instructions inserted before the function call itself will ensure that the parameters will stay in the correct registers.
+We can use liveness information to decide what variables we need to assign to registers at each node. At function calls we should ensure that any live variables are stored in registers that'll be preserved. The assembly instructions inserted before the function call itself will ensure that the parameters will stay in the correct registers. Also, if a variable is going to be used in an instruction following a node that variable can't be assigned to the stack!
 
 ~~~~
 @Control Flow Graph Members@ +=
 final Variable[] variables;
-boolean needsAssigning(Liveness liveness, int variable, int node, int register) {
-  boolean isLive = liveness.isLiveAt(variable, node) || varsUsedNext.get(node * variables.length + variable);
-  boolean thisRegPreserved = !nodesBeforeFnCalls.get(node) || calleeSavesRegisterIndices.get(register);
-  return isLive && thisRegPreserved;
+boolean needsAssigning(Liveness liveness, int variable, int node, Register r) {
+  boolean isLive = liveness.isLiveAt(variable, node) || isVarUsedNext(variable, node);
+  boolean thisRegPreserved = !nodesBeforeFnCalls.get(node) || calleeSavesRegisterIndices.get(r.ordinal());
+  boolean ifUsedNotOnStack = !(isVarUsedNext(node, variable) && r == Register.THESTACK);
+  return isLive && thisRegPreserved && ifUsedNotOnStack;
 }
 @Store Number Of Variables@ +=
 this.variables = variables; 
 @Other Helpers@ += 
 private static final BitSet calleeSavesRegisterIndices = new BitSet();
 static {
-  for(Register r : calleeSavesRegisters)
-    calleeSavesRegisterIndices.set(indexOf(gpRegisters, r));
-  calleeSavesRegisterIndices.set(gpRegisters.length); // the stack's saved too!
+  for(Register r : Register.CALLEE_SAVES)
+    calleeSavesRegisterIndices.set(r.ordinal());
+  calleeSavesRegisterIndices.set(Register.THESTACK.ordinal()); // the stack's saved too!
 }
 ~~~~
 
@@ -660,9 +661,6 @@ Now we can start setting up the problem. Note that some constraints refer to jus
 ~~~~
 @LP Initialisation@ += 
 Problem allocation = new Problem();
-int numRegisters = gpRegisters.length;
-int numRegistersAndStack = numRegisters + 1;
-int theStack = numRegisters; // index number of stack "register"
 ~~~~ 
 
 The first (and most important) set of unknowns are the _VAR_IN_REG_AT_INSTR_ columns: which register each variable is in at each node in the control flow graph, assuming it's live. 
@@ -671,9 +669,9 @@ The first (and most important) set of unknowns are the _VAR_IN_REG_AT_INSTR_ col
 @Set Up Columns@ +=
 for (int v = 0; v < variables.length; ++v)
   for(int n = 0; n < controlFlow.numNodes; ++n)
-    for (int r = 0; r < numRegistersAndStack; ++r)
+    for (Register r : Register.ASSIGNABLE)
       if(controlFlow.needsAssigning(liveness, v, n, r))
-        allocation.column(VAR_IN_REG_AT_INSTR, v, r, n).type(ColumnType.BINARY);
+        allocation.column(VAR_IN_REG_AT_INSTR, v, r.ordinal(), n).type(ColumnType.BINARY);
 @Other Helpers@ +=
 private static final String VAR_IN_REG_AT_INSTR = "x";
 ~~~~
@@ -684,9 +682,9 @@ The next set of unknowns are used to work out the cost of a given assignment. We
 @Set Up Columns@ +=
 for (int v = 0; v < variables.length; ++v)
   for(int n = 0; n < controlFlow.numNodes; ++n)
-    for (int r = 0; r < numRegistersAndStack; ++r)
+    for (Register r : Register.ASSIGNABLE)
       if(controlFlow.needsAssigning(liveness, v, n, r))
-        allocation.column(NEW_VAR_IN_REG_FLAG, v, r, n).type(ColumnType.BINARY);
+        allocation.column(NEW_VAR_IN_REG_FLAG, v, r.ordinal(), n).type(ColumnType.BINARY);
 @Other Helpers@ +=
 private static final String NEW_VAR_IN_REG_FLAG = "c";
 ~~~~
@@ -705,10 +703,14 @@ private static double spillCost(int variable, int node, ControlFlowGraph control
 private static final double COST_OF_SPILL = 100.0;
 @Control Flow Graph Members@ +=
 boolean isVarUsedNext(int variable, int node) {
-  return varsUsedNext.get(node * numVariables + variable);
+  return varsReadNext.get(node * variables.length + variable) 
+      || varsWrittenNext.get(node * variables.length + variable);
 }
 boolean isVarUsedPrev(int variable, int node) {
-  return varsUsedPrev.get(node * numVariables + variable);
+  for(int n : nextNodes.get(node))
+    if(isVarUsedNext(variable, n))
+      return true;
+  return false;
 }
 ~~~~
 
@@ -720,9 +722,9 @@ allocation.objective("spillage", Direction.MINIMIZE);
 @Minimise Number Of Spills@
 for (int v = 0; v < variables.length; ++v)
   for (int n = 0; n < controlFlow.numNodes; ++n)
-    for (int r = 0; r < numRegistersAndStack; ++r)
+    for (Register r : Register.ASSIGNABLE)
       if(controlFlow.needsAssigning(liveness, v, n, r))
-        allocation.objective().add(COST_OF_REG_ACCESS, NEW_VAR_IN_REG_FLAG, v, r, n);
+        allocation.objective().add(COST_OF_REG_ACCESS, NEW_VAR_IN_REG_FLAG, v, r.ordinal(), n);
 @Add Objective Hints@
 ~~~~
 
@@ -730,8 +732,8 @@ for (int v = 0; v < variables.length; ++v)
 @Minimise Number Of Spills@ +=
 for (int v = 0; v < variables.length; ++v)
   for (int n = 0; n < controlFlow.numNodes; ++n)
-    if(controlFlow.needsAssigning(liveness, v, n, theStack))
-      allocation.objective().add(spillCost(v, n, controlFlow), VAR_IN_REG_AT_INSTR, v, theStack, n);
+    if(controlFlow.needsAssigning(liveness, v, n, Register.THESTACK))
+      allocation.objective().add(spillCost(v, n, controlFlow), VAR_IN_REG_AT_INSTR, v, Register.THESTACK.ordinal(), n);
 ~~~~
 
 Hinting. We'd like to make as many _movq_s no-ops as possible (especially if we've defined a register). We deliberately insert a move just before a return to set the _eax_ register to the return value; it'd be nice if it was a no-op. Also, after a _call_ where we move the return value in _eax_ to the return _Variable_. However, currently:
@@ -751,12 +753,11 @@ movl %ecx, %eax
 @Add Objective Hints@ +=
 for(int i = 0; i < code.size(); ++i) {
   if(!isAMove(code.get(i))) continue;
-  int v = indexOf(variables, code.get(i));
-  int r = indexOf(gpRegisters, code.get(i));
-  if(v >= 0 && r >= 0)
-    for(int n : controlFlow.nodesAround(i)) 
-      if(controlFlow.needsAssigning(liveness, v, n, r))
-        allocation.objective().add(MOVE_NOP_HINT, VAR_IN_REG_AT_INSTR, v, r, n);
+  for(Variable v : code.get(i).uses(Variable.class))
+    for(Register r : code.get(i).uses(Register.class))
+      for(int n : controlFlow.nodesAround(i)) 
+        if(controlFlow.needsAssigning(liveness, indexOf(variables, v), n, r))
+          allocation.objective().add(MOVE_NOP_HINT, VAR_IN_REG_AT_INSTR, indexOf(variables, v), r.ordinal(), n);
 }
 @Other Helpers@ +=
 private static boolean isAMove(Instruction i) {
@@ -784,11 +785,12 @@ Constraint: registers can only ever hold one variable at once (apart from the st
 @Set Up Constraints@ +=
 for (int n = 0; n < controlFlow.numNodes; ++n) {
   for (int v = 0; v < variables.length; ++v)
-    for (int r = 0; r < numRegisters /*not stack*/; ++r)
-      if(controlFlow.needsAssigning(liveness, v, n, r))
-        allocation.row(ONE_VAR_PER_REG, r, n)
-          .bounds(0.0, 1.0)
-          .add(1.0, VAR_IN_REG_AT_INSTR, v, r, n);
+    for (Register r : Register.ASSIGNABLE)
+      if(r != Register.THESTACK)
+        if(controlFlow.needsAssigning(liveness, v, n, r))
+          allocation.row(ONE_VAR_PER_REG, r.ordinal(), n)
+            .bounds(0.0, 1.0)
+            .add(1.0, VAR_IN_REG_AT_INSTR, v, r.ordinal(), n);
   }
 @Other Helpers@ +=
 private static final String ONE_VAR_PER_REG = "one_var_per_reg";
@@ -800,11 +802,11 @@ Constraint: variables must not be lost; they must be in either the stack or exac
 @Set Up Constraints@ +=
 for (int v = 0; v < variables.length; ++v)
   for (int n = 0; n < controlFlow.numNodes; ++n)
-    for (int r = 0; r < numRegistersAndStack; ++r)
+    for (Register r : Register.ASSIGNABLE)
       if(controlFlow.needsAssigning(liveness, v, n, r))
         allocation.row(VARS_NOT_LOST, v, n)
           .bounds(1.0, 1.0)
-          .add(1.0, VAR_IN_REG_AT_INSTR, v, r, n);
+          .add(1.0, VAR_IN_REG_AT_INSTR, v, r.ordinal(), n);
 @Other Helpers@ +=
 private static final String VARS_NOT_LOST = "vars_not_lost";
 ~~~~
@@ -814,23 +816,23 @@ The last pair of constraints ensure that the _NEW_VAR_IN_REG_FLAG_ works as we w
 ~~~~
 @Set Up Constraints@ +=
 for (int v = 0; v < variables.length; ++v)
-  for (int r = 0; r < numRegistersAndStack; ++r)
+  for (Register r : Register.ASSIGNABLE)
     for(Entry<Integer, Integer> n : controlFlow.nextNodes.entries()) {
       if(!controlFlow.needsAssigning(liveness, v, n.getKey(), r) 
       || !controlFlow.needsAssigning(liveness, v, n.getValue(), r)) 
         continue;
       allocation.
-        row(FLAG_SET_CORRECTLY, v, r, n.getKey(), n.getValue()).
+        row(FLAG_SET_CORRECTLY, v, r.ordinal(), n.getKey(), n.getValue()).
         bounds(0.0, null).
-        add(1.0, VAR_IN_REG_AT_INSTR, v, r, n.getValue()).
-        add(-1.0, VAR_IN_REG_AT_INSTR, v, r, n.getKey()).
-        add(1.0, NEW_VAR_IN_REG_FLAG, v, r, n.getValue());
+        add( 1.0, VAR_IN_REG_AT_INSTR, v, r.ordinal(), n.getValue()).
+        add(-1.0, VAR_IN_REG_AT_INSTR, v, r.ordinal(), n.getKey()).
+        add( 1.0, NEW_VAR_IN_REG_FLAG, v, r.ordinal(), n.getValue());
       allocation.
-        row(FLAG_SET_CORRECTLY, v, r, n.getValue()-1, n.getKey()).
+        row(FLAG_SET_CORRECTLY, v, r.ordinal(), n.getValue()-1, n.getKey()).
         bounds(0.0, null).
-        add(-1.0, VAR_IN_REG_AT_INSTR, v, r, n.getValue()).
-        add(1.0, VAR_IN_REG_AT_INSTR, v, r, n.getKey()).
-        add(1.0, NEW_VAR_IN_REG_FLAG, v, r, n.getValue());
+        add(-1.0, VAR_IN_REG_AT_INSTR, v, r.ordinal(), n.getValue()).
+        add( 1.0, VAR_IN_REG_AT_INSTR, v, r.ordinal(), n.getKey()).
+        add( 1.0, NEW_VAR_IN_REG_FLAG, v, r.ordinal(), n.getValue());
     }
 @Other Helpers@ +=
 private static final String FLAG_SET_CORRECTLY = "flag_set_correctly";
@@ -849,9 +851,9 @@ We know which register each variable is in at each node now (assuming it's live)
 ~~~~
 @Other Helpers@ +=
 private static Register whereAmI(Problem allocation, int v, int n) {
-  for(int r = 0; r < gpRegisters.length; ++r)
-    if(allocation.column(VAR_IN_REG_AT_INSTR, v, r, n).getValue() > 0.5)
-        return gpRegisters[r];
+  for(Register r : Register.ASSIGNABLE)
+    if(allocation.column(VAR_IN_REG_AT_INSTR, v, r.ordinal(), n).getValue() > 0.5)
+        return r;
   throw new IllegalStateException(); // shouldn't get here
 }
 ~~~~
@@ -872,11 +874,11 @@ We'll iterate through the linear programming solution and resolve variables as n
 ~~~~
 @Copy Solution Into Code@ +=
 for(int i = 0; i < code.size(); ++i)
-  for(Variable variable : varsUsed(code.get(i))) {
+  for(Variable variable : code.get(i).uses(Variable.class)) {
     int v = indexOf(variables, variable);
-    for (int r = 0; r < gpRegisters.length; ++r)
-      if(allocation.column(VAR_IN_REG_AT_INSTR, v, r, controlFlow.prevNode[i]).getValue() > 0.5) { // huge tolerance for 0-1 integer
-        code.set(i, code.get(i).resolve(variable, gpRegisters[r])); break;
+    for (Register r : Register.ASSIGNABLE)
+      if(allocation.column(VAR_IN_REG_AT_INSTR, v, r.ordinal(), controlFlow.prevNode[i]).getValue() > 0.5) { // huge tolerance for 0-1 integer
+        code.set(i, code.get(i).resolve(variable, r)); break;
       }
   } 
 ~~~~
@@ -906,9 +908,9 @@ Multimap<Integer, Instruction>
   stackMovesAfter = HashMultimap.create();
 for (int v = 0; v < variables.length; ++v)
   for (int n = 0; n < controlFlow.numNodes; ++n)
-    if(controlFlow.needsAssigning(liveness, v, n, theStack))
-      if(allocation.column(NEW_VAR_IN_REG_FLAG, v, theStack, n).getValue() > 0.5) // v has moved 
-        if(allocation.column(VAR_IN_REG_AT_INSTR, v, theStack, n).getValue() > 0.5) // v now on stack
+    if(controlFlow.needsAssigning(liveness, v, n, Register.THESTACK))
+      if(allocation.column(NEW_VAR_IN_REG_FLAG, v, Register.THESTACK.ordinal(), n).getValue() > 0.5) // v has moved 
+        if(allocation.column(VAR_IN_REG_AT_INSTR, v, Register.THESTACK.ordinal(), n).getValue() > 0.5) // v now on stack
           for(int i : controlFlow.instructionsBeforeNode.get(n))
             stackMovesAfter.put(i, Op.movq.with(whereAmI(allocation, v, controlFlow.prevNode[i]), onStack(stackVars, v)));
         else // v now in register
@@ -1013,7 +1015,7 @@ Getting rid of no-ops (most importantly moves)
 @Instruction Members@ += 
 boolean isNoOp() { return false; } 
 @Other Helpers@ += 
-private static final Predicate<Instruction> noNoOps = new Predicate<Instruction>() {
+static final Predicate<Instruction> noNoOps = new Predicate<Instruction>() {
   public boolean apply(Instruction i) { return !i.isNoOp(); }
 };
 @BinaryOp Members@ +=
@@ -1130,11 +1132,6 @@ Some array helpers (we do a lot of linear searching, but not enough to warrant s
 
 ~~~~
 @Other Helpers@ +=
-private enum Which { FIRST, LAST };
-private static <T> int indexOf(T[] ts, Instruction i) {
-  Iterable<T> t = filter(i.getParameters(), (Class<T>) ts.getClass().getComponentType()); 
-  return isEmpty(t) ? -1 : indexOf(ts, getFirst(t, 0));
-}
 private static <T> int indexOf(T[] ts, T t) {
   return Arrays.asList(ts).indexOf(t);
 }

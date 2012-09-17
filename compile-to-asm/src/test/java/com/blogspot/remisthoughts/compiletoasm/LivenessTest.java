@@ -28,7 +28,8 @@ public class LivenessTest {
 				Op.movq.with(vars[1], Register.rax),
 				Compiler.ret);
 
-		Liveness liveness = new Liveness(new ControlFlowGraph(vars, code));
+		ControlFlowGraph cfg = new ControlFlowGraph(vars, code);
+		Liveness liveness = new Liveness(cfg);
 		assertNotNull(liveness);
 
 		// vars[0]: "a"
