@@ -13,7 +13,6 @@ import com.blogspot.remisthoughts.compiletoasm.Compiler.Definition;
 import com.blogspot.remisthoughts.compiletoasm.Compiler.Immediate;
 import com.blogspot.remisthoughts.compiletoasm.Compiler.Instruction;
 import com.blogspot.remisthoughts.compiletoasm.Compiler.Label;
-import com.blogspot.remisthoughts.compiletoasm.Compiler.Liveness;
 import com.blogspot.remisthoughts.compiletoasm.Compiler.Op;
 import com.blogspot.remisthoughts.compiletoasm.Compiler.Register;
 import com.blogspot.remisthoughts.compiletoasm.Compiler.Variable;
@@ -41,15 +40,14 @@ public class AliasingTest {
 				ret);
 
 		ControlFlowGraph cfg = new ControlFlowGraph(vars, code);
-		Liveness liveness = new Liveness(cfg);
 
-		assertEquals(0, cfg.getAliasingVars(code, liveness, 0).size());
-		assertEquals(0, cfg.getAliasingVars(code, liveness, 1).size());
-		assertEquals(0, cfg.getAliasingVars(code, liveness, 2).size());
-		assertEquals(2, cfg.getAliasingVars(code, liveness, 3).size());
-		assertEquals(0, cfg.getAliasingVars(code, liveness, 4).size());
-		assertEquals(2, cfg.getAliasingVars(code, liveness, 5).size());
-		assertEquals(0, cfg.getAliasingVars(code, liveness, 6).size());
-		assertEquals(0, cfg.getAliasingVars(code, liveness, 7).size());
+		assertEquals(0, cfg.aliasingVars.get(0).size());
+		assertEquals(0, cfg.aliasingVars.get(1).size());
+		assertEquals(0, cfg.aliasingVars.get(2).size());
+		assertEquals(2, cfg.aliasingVars.get(3).size());
+		assertEquals(0, cfg.aliasingVars.get(4).size());
+		assertEquals(2, cfg.aliasingVars.get(5).size());
+		assertEquals(0, cfg.aliasingVars.get(6).size());
+		assertEquals(0, cfg.aliasingVars.get(7).size());
 	}
 }

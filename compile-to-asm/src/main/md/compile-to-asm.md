@@ -427,7 +427,6 @@ code = registerAllocation(code);
 static List<Instruction> registerAllocation(final List<Instruction> code) {
   @Get Variables Used@
   @Build Control Flow Graph@
-  @Calculate Liveness@
   @LP Initialisation@
   @Set Up Columns@
   @Set Up Objective@
@@ -467,6 +466,8 @@ static final class ControlFlowGraph {
     @Join Nodes Together@
     @Variables Used At Next Instruction@
     @Identify Function Calls@
+    @Calculate Liveness@
+    @Mark Aliased Variables@
   }
 }
 @Build Control Flow Graph@ +=
@@ -585,53 +586,29 @@ if(allVariables.isEmpty()) { @No Stack Variables@ return code; }
 Variable[] variables = allVariables.toArray(new Variable[allVariables.size()]);
 ~~~~
 
-Liveness...as a BitSet
+Liveness...as a BitSet. A variable is not live at the node before the instruction where it's created and is not live at the node after the instruction where it's last read.
 
 ~~~~
-@Other Helpers@ +=
-static final class Liveness {
-  final Variable[] variables; final BitSet isLive;
-  Liveness(ControlFlowGraph controlFlow) { 
-    this.variables = controlFlow.variables;
-    @Calculate Liveness From Graph@
-  }
-  boolean isLiveAt(int variable, int node) {
-    return isLive.get(node * variables.length + variable);
-  }
-  public String toString() {
-    StringBuilder ret = new StringBuilder();
-    for (int v = 0; v < variables.length; ++v) {
-      ret.append(Strings.padStart(variables[v].toString(), 20, ' ')).append(':');
-      for (int n = 0; n < (isLive.length()+1) / variables.length; ++n) 
-        ret.append(isLive.get(n * variables.length + v) ? "-" : " ");
-      ret.append('\n');
-    }
-    return ret.toString();
-  }
-  @Liveness Members@
+@Control Flow Graph Members@ +=
+final BitSet isLive;
+boolean isLiveAt(int variable, int node) {
+  return isLive.get(node * variables.length + variable);
 }
-~~~~
-
-A variable is not live at the node before the instruction where it's created and is not live at the node after the instruction where it's last read.
-
-~~~~
-@Calculate Liveness From Graph@ +=
-isLive = (BitSet) controlFlow.varsReadNext.clone(); 
+@Calculate Liveness@ +=
+isLive = (BitSet) varsReadNext.clone(); 
 Queue<Integer> unprocessed = Queues.newArrayDeque(Arrays.asList(ControlFlowGraph.LAST_NODE));
 BitSet nodesSeen = new BitSet();
 for(Integer node = unprocessed.poll(); node != null; node = unprocessed.poll()) {
   boolean changed = false;
-  for(int n : controlFlow.nextNodes.get(node))
+  for(int n : this.nextNodes.get(node))
       changed |= copyFrom(isLive, n, node, variables.length);
   for(int index = node * variables.length; index < (node+1) * variables.length; ++index)
-    if(controlFlow.varsWrittenNext.get(index) && !controlFlow.varsReadNext.get(index))
+    if(varsWrittenNext.get(index) && !varsReadNext.get(index))
       isLive.clear(index);
   if(!nodesSeen.get(node) || changed)
-    for(int n : controlFlow.nextNodes.inverse().get(node)) unprocessed.offer(n);
+    for(int n : this.nextNodes.inverse().get(node)) unprocessed.offer(n);
   nodesSeen.set(node);
 }
-@Calculate Liveness@ +=
-Liveness liveness = new Liveness(controlFlow); 
 ~~~~
 
 We can use liveness information to decide what variables we need to assign to registers at each node. At function calls we should ensure that any live variables are stored in registers that'll be preserved. The assembly instructions inserted before the function call itself will ensure that the parameters will stay in the correct registers. Also, if a variable is going to be used in an instruction following a node that variable can't be assigned to the stack!
@@ -639,8 +616,8 @@ We can use liveness information to decide what variables we need to assign to re
 ~~~~
 @Control Flow Graph Members@ +=
 final Variable[] variables;
-boolean needsAssigning(Liveness liveness, int variable, int node, Register r) {
-  boolean isLive = liveness.isLiveAt(variable, node) || isVarUsedNext(variable, node);
+boolean needsAssigning(int variable, int node, Register r) {
+  boolean isLive = isLiveAt(variable, node) || isVarUsedNext(variable, node);
   boolean thisRegPreserved = !nodesBeforeFnCalls.get(node) || calleeSavesRegisterIndices.get(r.ordinal());
   boolean ifUsedNotOnStack = !(isVarUsedNext(node, variable) && r == Register.THESTACK);
   return isLive && thisRegPreserved && ifUsedNotOnStack;
@@ -670,7 +647,7 @@ The first (and most important) set of unknowns are the _VAR_IN_REG_AT_INSTR_ col
 for (int v = 0; v < variables.length; ++v)
   for(int n = 0; n < controlFlow.numNodes; ++n)
     for (Register r : Register.ASSIGNABLE)
-      if(controlFlow.needsAssigning(liveness, v, n, r))
+      if(controlFlow.needsAssigning(v, n, r))
         allocation.column(VAR_IN_REG_AT_INSTR, v, r.ordinal(), n).type(ColumnType.BINARY);
 @Other Helpers@ +=
 private static final String VAR_IN_REG_AT_INSTR = "x";
@@ -683,7 +660,7 @@ The next set of unknowns are used to work out the cost of a given assignment. We
 for (int v = 0; v < variables.length; ++v)
   for(int n = 0; n < controlFlow.numNodes; ++n)
     for (Register r : Register.ASSIGNABLE)
-      if(controlFlow.needsAssigning(liveness, v, n, r))
+      if(controlFlow.needsAssigning(v, n, r))
         allocation.column(NEW_VAR_IN_REG_FLAG, v, r.ordinal(), n).type(ColumnType.BINARY);
 @Other Helpers@ +=
 private static final String NEW_VAR_IN_REG_FLAG = "c";
@@ -723,7 +700,7 @@ allocation.objective("spillage", Direction.MINIMIZE);
 for (int v = 0; v < variables.length; ++v)
   for (int n = 0; n < controlFlow.numNodes; ++n)
     for (Register r : Register.ASSIGNABLE)
-      if(controlFlow.needsAssigning(liveness, v, n, r))
+      if(controlFlow.needsAssigning(v, n, r))
         allocation.objective().add(COST_OF_REG_ACCESS, NEW_VAR_IN_REG_FLAG, v, r.ordinal(), n);
 @Add Objective Hints@
 ~~~~
@@ -732,7 +709,7 @@ for (int v = 0; v < variables.length; ++v)
 @Minimise Number Of Spills@ +=
 for (int v = 0; v < variables.length; ++v)
   for (int n = 0; n < controlFlow.numNodes; ++n)
-    if(controlFlow.needsAssigning(liveness, v, n, Register.THESTACK))
+    if(controlFlow.needsAssigning(v, n, Register.THESTACK))
       allocation.objective().add(spillCost(v, n, controlFlow), VAR_IN_REG_AT_INSTR, v, Register.THESTACK.ordinal(), n);
 ~~~~
 
@@ -756,7 +733,7 @@ for(int i = 0; i < code.size(); ++i) {
   for(Variable v : code.get(i).uses(Variable.class))
     for(Register r : code.get(i).uses(Register.class))
       for(int n : controlFlow.nodesAround(i)) 
-        if(controlFlow.needsAssigning(liveness, indexOf(variables, v), n, r))
+        if(controlFlow.needsAssigning(indexOf(variables, v), n, r))
           allocation.objective().add(MOVE_NOP_HINT, VAR_IN_REG_AT_INSTR, indexOf(variables, v), r.ordinal(), n);
 }
 @Other Helpers@ +=
@@ -783,17 +760,17 @@ Constraint: registers can only ever hold one variable at once (apart from the st
 
 ~~~~
 @Control Flow Graph Members@ +=
-Set<Integer> getAliasingVars(List<Instruction> code, Liveness liveness, int node) {
-  Collection<Integer> instrsAfter = instructionsFollowingNode.get(node);
-  if(instrsAfter.size() != 1) return Collections.emptySet();
+final Multimap<Integer, Integer> aliasingVars = TreeMultimap.create();
+@Mark Aliased Variables@ +=
+for (int n = 0; n < numNodes; ++n) {
+  Collection<Integer> instrsAfter = instructionsFollowingNode.get(n);
+  if(instrsAfter.size() != 1) continue;
   int i = getOnlyElement(instrsAfter); Instruction instr = code.get(i); 
-  if(!isAMove(instr)) return Collections.emptySet();
-  if(instr.uses(Variable.class).size() != 2) return Collections.emptySet();
+  if(!isAMove(instr) || instr.uses(Variable.class).size() != 2) continue;
   int reads = indexOf(variables, getOnlyElement(instr.readsFrom()));
-  if(liveness.isLiveAt(reads, nextNode[i])) return Collections.emptySet();
   int writes = indexOf(variables, getOnlyElement(instr.writesTo()));
-  if(liveness.isLiveAt(writes, node)) return Collections.emptySet();
-  return ImmutableSet.of(reads, writes);
+  if(isLiveAt(reads, nextNode[i]) || isLiveAt(writes, n)) continue;
+  aliasingVars.putAll(n, Arrays.asList(reads, writes));
 }
 ~~~~
 
@@ -802,16 +779,16 @@ Set<Integer> getAliasingVars(List<Instruction> code, Liveness liveness, int node
 for (int n = 0; n < controlFlow.numNodes; ++n) {
   for (Register r : Register.ASSIGNABLE)
     if(r != Register.THESTACK)
-      if(controlFlow.getAliasingVars(code, liveness, n).isEmpty()) {
+      if(controlFlow.aliasingVars.get(n).isEmpty()) {
         for (int v = 0; v < variables.length; ++v)
-          if(controlFlow.needsAssigning(liveness, v, n, r))
+          if(controlFlow.needsAssigning(v, n, r))
             allocation.row(ONE_VAR_PER_REG, r.ordinal(), n)
               .bounds(0.0, 1.0)
               .add(1.0, VAR_IN_REG_AT_INSTR, v, r.ordinal(), n);
       } else {
-        for(int avoid : controlFlow.getAliasingVars(code, liveness, n))
+        for(int avoid : controlFlow.aliasingVars.get(n))
           for (int v = 0; v < variables.length; ++v)
-            if(v != avoid && controlFlow.needsAssigning(liveness, v, n, r))
+            if(v != avoid && controlFlow.needsAssigning(v, n, r))
               allocation.row(ONE_VAR_PER_REG, r.ordinal(), n, avoid)
                 .bounds(0.0, 1.0)
                 .add(1.0, VAR_IN_REG_AT_INSTR, v, r.ordinal(), n);
@@ -828,7 +805,7 @@ Constraint: variables must not be lost; they must be in either the stack or exac
 for (int v = 0; v < variables.length; ++v)
   for (int n = 0; n < controlFlow.numNodes; ++n)
     for (Register r : Register.ASSIGNABLE)
-      if(controlFlow.needsAssigning(liveness, v, n, r))
+      if(controlFlow.needsAssigning(v, n, r))
         allocation.row(VARS_NOT_LOST, v, n)
           .bounds(1.0, 1.0)
           .add(1.0, VAR_IN_REG_AT_INSTR, v, r.ordinal(), n);
@@ -843,8 +820,8 @@ The last pair of constraints ensure that the _NEW_VAR_IN_REG_FLAG_ works as we w
 for (int v = 0; v < variables.length; ++v)
   for (Register r : Register.ASSIGNABLE)
     for(Entry<Integer, Integer> n : controlFlow.nextNodes.entries()) {
-      if(!controlFlow.needsAssigning(liveness, v, n.getKey(), r) 
-      || !controlFlow.needsAssigning(liveness, v, n.getValue(), r)) 
+      if(!controlFlow.needsAssigning(v, n.getKey(), r) 
+      || !controlFlow.needsAssigning(v, n.getValue(), r)) 
         continue;
       allocation.
         row(FLAG_SET_CORRECTLY, v, r.ordinal(), n.getKey(), n.getValue()).
@@ -933,7 +910,7 @@ Multimap<Integer, Instruction>
   stackMovesAfter = HashMultimap.create();
 for (int v = 0; v < variables.length; ++v)
   for (int n = 0; n < controlFlow.numNodes; ++n)
-    if(controlFlow.needsAssigning(liveness, v, n, Register.THESTACK))
+    if(controlFlow.needsAssigning(v, n, Register.THESTACK))
       if(allocation.column(NEW_VAR_IN_REG_FLAG, v, Register.THESTACK.ordinal(), n).getValue() > 0.5) // v has moved 
         if(allocation.column(VAR_IN_REG_AT_INSTR, v, Register.THESTACK.ordinal(), n).getValue() > 0.5) // v now on stack
           for(int i : controlFlow.instructionsBeforeNode.get(n))

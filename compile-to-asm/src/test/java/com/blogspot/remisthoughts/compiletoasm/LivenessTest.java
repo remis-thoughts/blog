@@ -1,7 +1,6 @@
 package com.blogspot.remisthoughts.compiletoasm;
 
 import static org.junit.Assert.assertFalse;
-import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
 
 import java.util.List;
@@ -11,7 +10,6 @@ import org.junit.Test;
 import com.blogspot.remisthoughts.compiletoasm.Compiler.ControlFlowGraph;
 import com.blogspot.remisthoughts.compiletoasm.Compiler.Immediate;
 import com.blogspot.remisthoughts.compiletoasm.Compiler.Instruction;
-import com.blogspot.remisthoughts.compiletoasm.Compiler.Liveness;
 import com.blogspot.remisthoughts.compiletoasm.Compiler.Op;
 import com.blogspot.remisthoughts.compiletoasm.Compiler.Register;
 import com.blogspot.remisthoughts.compiletoasm.Compiler.Variable;
@@ -19,7 +17,7 @@ import com.google.common.collect.Lists;
 
 public class LivenessTest {
 	@Test
-	public void testLiveness() throws Exception {
+	public void testcfg() throws Exception {
 		Variable[] vars = {new Variable("a"), new Variable("b")};
 		List<Instruction> code = Lists.newArrayList(
 				Op.movq.with(Register.rax, vars[0]),
@@ -29,24 +27,22 @@ public class LivenessTest {
 				Compiler.ret);
 
 		ControlFlowGraph cfg = new ControlFlowGraph(vars, code);
-		Liveness liveness = new Liveness(cfg);
-		assertNotNull(liveness);
 
 		// vars[0]: "a"
-		assertFalse(liveness.isLiveAt(0, 0));
-		assertTrue(liveness.isLiveAt(0, 2));
-		assertTrue(liveness.isLiveAt(0, 3));
-		assertFalse(liveness.isLiveAt(0, 4));
-		assertFalse(liveness.isLiveAt(0, 5));
-		assertFalse(liveness.isLiveAt(0, 1));
+		assertFalse(cfg.isLiveAt(0, 0));
+		assertTrue(cfg.isLiveAt(0, 2));
+		assertTrue(cfg.isLiveAt(0, 3));
+		assertFalse(cfg.isLiveAt(0, 4));
+		assertFalse(cfg.isLiveAt(0, 5));
+		assertFalse(cfg.isLiveAt(0, 1));
 
 		// vars[1]: "b"
-		assertFalse(liveness.isLiveAt(1, 0));
-		assertFalse(liveness.isLiveAt(1, 2));
-		assertTrue(liveness.isLiveAt(1, 3));
-		assertTrue(liveness.isLiveAt(1, 4));
-		assertFalse(liveness.isLiveAt(1, 5));
-		assertFalse(liveness.isLiveAt(1, 1));
+		assertFalse(cfg.isLiveAt(1, 0));
+		assertFalse(cfg.isLiveAt(1, 2));
+		assertTrue(cfg.isLiveAt(1, 3));
+		assertTrue(cfg.isLiveAt(1, 4));
+		assertFalse(cfg.isLiveAt(1, 5));
+		assertFalse(cfg.isLiveAt(1, 1));
 	}
 
 	/**
@@ -63,25 +59,24 @@ public class LivenessTest {
 				Op.movq.with(vars[0], Register.rax), // mov a, %rax
 				Compiler.ret);
 
-		Liveness liveness = new Liveness(new ControlFlowGraph(vars, code));
-		assertNotNull(liveness);
+		ControlFlowGraph cfg = new ControlFlowGraph(vars, code);
 
 		// vars[0]: "a"
-		assertFalse(liveness.isLiveAt(0, 0));
-		assertTrue(liveness.isLiveAt(0, 2));
-		assertFalse(liveness.isLiveAt(0, 3));
-		assertFalse(liveness.isLiveAt(0, 4));
-		assertTrue(liveness.isLiveAt(0, 5));
-		assertFalse(liveness.isLiveAt(0, 6));
-		assertFalse(liveness.isLiveAt(0, 1));
+		assertFalse(cfg.isLiveAt(0, 0));
+		assertTrue(cfg.isLiveAt(0, 2));
+		assertFalse(cfg.isLiveAt(0, 3));
+		assertFalse(cfg.isLiveAt(0, 4));
+		assertTrue(cfg.isLiveAt(0, 5));
+		assertFalse(cfg.isLiveAt(0, 6));
+		assertFalse(cfg.isLiveAt(0, 1));
 
 		// vars[1]: "b"
-		assertFalse(liveness.isLiveAt(1, 0));
-		assertFalse(liveness.isLiveAt(1, 2));
-		assertTrue(liveness.isLiveAt(1, 3));
-		assertTrue(liveness.isLiveAt(1, 4));
-		assertFalse(liveness.isLiveAt(1, 5));
-		assertFalse(liveness.isLiveAt(1, 6));
-		assertFalse(liveness.isLiveAt(1, 1));
+		assertFalse(cfg.isLiveAt(1, 0));
+		assertFalse(cfg.isLiveAt(1, 2));
+		assertTrue(cfg.isLiveAt(1, 3));
+		assertTrue(cfg.isLiveAt(1, 4));
+		assertFalse(cfg.isLiveAt(1, 5));
+		assertFalse(cfg.isLiveAt(1, 6));
+		assertFalse(cfg.isLiveAt(1, 1));
 	}
 }
