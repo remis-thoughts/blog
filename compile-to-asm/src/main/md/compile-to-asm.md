@@ -782,15 +782,40 @@ movl %eax, %eax
 Constraint: registers can only ever hold one variable at once (apart from the stack). 
 
 ~~~~
+@Control Flow Graph Members@ +=
+Set<Integer> getAliasingVars(List<Instruction> code, Liveness liveness, int node) {
+  Collection<Integer> instrsAfter = instructionsFollowingNode.get(node);
+  if(instrsAfter.size() != 1) return Collections.emptySet();
+  int i = getOnlyElement(instrsAfter); Instruction instr = code.get(i); 
+  if(!isAMove(instr)) return Collections.emptySet();
+  if(instr.uses(Variable.class).size() != 2) return Collections.emptySet();
+  int reads = indexOf(variables, getOnlyElement(instr.readsFrom()));
+  if(liveness.isLiveAt(reads, nextNode[i])) return Collections.emptySet();
+  int writes = indexOf(variables, getOnlyElement(instr.writesTo()));
+  if(liveness.isLiveAt(writes, node)) return Collections.emptySet();
+  return ImmutableSet.of(reads, writes);
+}
+~~~~
+
+~~~~
 @Set Up Constraints@ +=
 for (int n = 0; n < controlFlow.numNodes; ++n) {
-  for (int v = 0; v < variables.length; ++v)
-    for (Register r : Register.ASSIGNABLE)
-      if(r != Register.THESTACK)
-        if(controlFlow.needsAssigning(liveness, v, n, r))
-          allocation.row(ONE_VAR_PER_REG, r.ordinal(), n)
-            .bounds(0.0, 1.0)
-            .add(1.0, VAR_IN_REG_AT_INSTR, v, r.ordinal(), n);
+  for (Register r : Register.ASSIGNABLE)
+    if(r != Register.THESTACK)
+      if(controlFlow.getAliasingVars(code, liveness, n).isEmpty()) {
+        for (int v = 0; v < variables.length; ++v)
+          if(controlFlow.needsAssigning(liveness, v, n, r))
+            allocation.row(ONE_VAR_PER_REG, r.ordinal(), n)
+              .bounds(0.0, 1.0)
+              .add(1.0, VAR_IN_REG_AT_INSTR, v, r.ordinal(), n);
+      } else {
+        for(int avoid : controlFlow.getAliasingVars(code, liveness, n))
+          for (int v = 0; v < variables.length; ++v)
+            if(v != avoid && controlFlow.needsAssigning(liveness, v, n, r))
+              allocation.row(ONE_VAR_PER_REG, r.ordinal(), n, avoid)
+                .bounds(0.0, 1.0)
+                .add(1.0, VAR_IN_REG_AT_INSTR, v, r.ordinal(), n);
+      }
   }
 @Other Helpers@ +=
 private static final String ONE_VAR_PER_REG = "one_var_per_reg";

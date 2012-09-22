@@ -1,45 +1,30 @@
 package com.blogspot.remisthoughts.compiletoasm;
 
 import static com.blogspot.remisthoughts.compiletoasm.Compiler.ret;
-import static com.google.common.collect.Iterables.filter;
-import static com.google.common.collect.Iterables.isEmpty;
 import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertTrue;
 
 import java.util.Arrays;
 import java.util.List;
 
 import org.junit.Test;
 
+import com.blogspot.remisthoughts.compiletoasm.Compiler.ControlFlowGraph;
 import com.blogspot.remisthoughts.compiletoasm.Compiler.Definition;
 import com.blogspot.remisthoughts.compiletoasm.Compiler.Immediate;
 import com.blogspot.remisthoughts.compiletoasm.Compiler.Instruction;
 import com.blogspot.remisthoughts.compiletoasm.Compiler.Label;
+import com.blogspot.remisthoughts.compiletoasm.Compiler.Liveness;
 import com.blogspot.remisthoughts.compiletoasm.Compiler.Op;
 import com.blogspot.remisthoughts.compiletoasm.Compiler.Register;
 import com.blogspot.remisthoughts.compiletoasm.Compiler.Variable;
-import com.google.common.base.Joiner;
-import com.google.common.collect.Lists;
 
-public class RegisterAllocationTest {
-
-	private static List<Instruction> assertAllocation(List<Instruction> code) {
-		code = Compiler.registerAllocation(code);
-		code = Lists.newArrayList(filter(code, Compiler.noNoOps));
-		for (Instruction i : code) {
-			assertTrue("expected '" + i + "' to have no variables", isEmpty(i.uses(Variable.class)));
-		}
-		System.out.println(Joiner.on('\n').join(code));
-		return code;
-	}
-
-	// TESTS
-
+public class AliasingTest {
 	@Test
-	public void testNoAssignment() throws Exception {
+	public void testAliasing() throws Exception {
 		Variable a = new Variable("a");
 		Variable b = new Variable("b");
 		Immediate one = new Immediate(1);
+		Variable[] vars = {a, b};
 
 		/*
 		 * a = 1;
@@ -55,7 +40,16 @@ public class RegisterAllocationTest {
 				Op.movq.with(a, Register.rax),
 				ret);
 
-		code = assertAllocation(code);
-		assertEquals(4, code.size());
+		ControlFlowGraph cfg = new ControlFlowGraph(vars, code);
+		Liveness liveness = new Liveness(cfg);
+
+		assertEquals(0, cfg.getAliasingVars(code, liveness, 0).size());
+		assertEquals(0, cfg.getAliasingVars(code, liveness, 1).size());
+		assertEquals(0, cfg.getAliasingVars(code, liveness, 2).size());
+		assertEquals(2, cfg.getAliasingVars(code, liveness, 3).size());
+		assertEquals(0, cfg.getAliasingVars(code, liveness, 4).size());
+		assertEquals(2, cfg.getAliasingVars(code, liveness, 5).size());
+		assertEquals(0, cfg.getAliasingVars(code, liveness, 6).size());
+		assertEquals(0, cfg.getAliasingVars(code, liveness, 7).size());
 	}
 }
