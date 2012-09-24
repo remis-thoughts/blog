@@ -33,8 +33,6 @@ public class RegisterAllocationTest {
 		return code;
 	}
 
-	// TESTS
-
 	@Test
 	public void testNoAssignment() throws Exception {
 		Variable a = new Variable("a");

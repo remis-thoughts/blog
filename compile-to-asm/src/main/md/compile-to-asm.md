@@ -713,6 +713,22 @@ for (int v = 0; v < variables.length; ++v)
       allocation.objective().add(spillCost(v, n, controlFlow), VAR_IN_REG_AT_INSTR, v, Register.THESTACK.ordinal(), n);
 ~~~~
 
+~~~~
+@Control Flow Graph Members@ +=
+final Multimap<Integer, Integer> aliasingVars = TreeMultimap.create();
+@Mark Aliased Variables@ +=
+for (int n = 0; n < numNodes; ++n) {
+  Collection<Integer> instrsAfter = instructionsFollowingNode.get(n);
+  if(instrsAfter.size() != 1) continue;
+  int i = getOnlyElement(instrsAfter); Instruction instr = code.get(i); 
+  if(!isAMove(instr) || instr.uses(Variable.class).size() != 2) continue;
+  int reads = indexOf(variables, getOnlyElement(instr.readsFrom()));
+  int writes = indexOf(variables, getOnlyElement(instr.writesTo()));
+  if(isLiveAt(reads, nextNode[i]) || isLiveAt(writes, n)) continue;
+  aliasingVars.putAll(n, Arrays.asList(reads, writes));
+}
+~~~~
+
 Hinting. We'd like to make as many _movq_s no-ops as possible (especially if we've defined a register). We deliberately insert a move just before a return to set the _eax_ register to the return value; it'd be nice if it was a no-op. Also, after a _call_ where we move the return value in _eax_ to the return _Variable_. However, currently:
 <pre>
 fn() { a=1; b=5; return a+b; }
@@ -747,6 +763,47 @@ List<Integer> nodesAround(int instruction) {
 }
 ~~~~
 
+Let's also encourage putting aliased vars in the same register. For that we'll need another flag:
+
+~~~~
+@Set Up Columns@ +=
+for(Integer n : controlFlow.aliasingVars.keys())
+  for (Register r : Register.ASSIGNABLE)
+    if(r != Register.THESTACK)
+        allocation.column(ALIASED_IN_SAME_REG, n, r.ordinal()).type(ColumnType.BINARY);
+@Other Helpers@ +=
+private static final String ALIASED_IN_SAME_REG = "a";
+~~~~
+
+~~~~
+@Add Objective Hints@ +=
+for(Integer node : controlFlow.aliasingVars.keys())
+  for (Register r : Register.ASSIGNABLE)
+    if(r != Register.THESTACK)
+      allocation.objective().add(ALIASED_VAR_HINT, ALIASED_IN_SAME_REG, node, r.ordinal());
+@Other Helpers@ +=
+private static final double ALIASED_VAR_HINT = -0.5;
+~~~~
+
+~~~~
+@Set Up Constraints@ +=
+for(Integer node : controlFlow.aliasingVars.keys())
+  for (Register r : Register.ASSIGNABLE)
+    if(r != Register.THESTACK) {
+      Collection<Integer> aliasedVars = controlFlow.aliasingVars.get(node);
+      for(int v : aliasedVars)
+        allocation.
+          row(ALIASED_VAR_FLAG, node, r.ordinal()).
+          add( 1.0, VAR_IN_REG_AT_INSTR, v, r.ordinal(), node);
+      allocation.
+        row(ALIASED_VAR_FLAG, node, r.ordinal()).
+        bounds(0.0, aliasedVars.size() - 1).
+        add( -1.0 * aliasedVars.size(), ALIASED_IN_SAME_REG, node, r.ordinal());
+    }
+@Other Helpers@ +=
+private static final String ALIASED_VAR_FLAG = "aliased_var_flag";
+~~~~
+
 We now get 
 <pre>
 movl $1, %ebx
@@ -759,39 +816,23 @@ movl %eax, %eax
 Constraint: registers can only ever hold one variable at once (apart from the stack). 
 
 ~~~~
-@Control Flow Graph Members@ +=
-final Multimap<Integer, Integer> aliasingVars = TreeMultimap.create();
-@Mark Aliased Variables@ +=
-for (int n = 0; n < numNodes; ++n) {
-  Collection<Integer> instrsAfter = instructionsFollowingNode.get(n);
-  if(instrsAfter.size() != 1) continue;
-  int i = getOnlyElement(instrsAfter); Instruction instr = code.get(i); 
-  if(!isAMove(instr) || instr.uses(Variable.class).size() != 2) continue;
-  int reads = indexOf(variables, getOnlyElement(instr.readsFrom()));
-  int writes = indexOf(variables, getOnlyElement(instr.writesTo()));
-  if(isLiveAt(reads, nextNode[i]) || isLiveAt(writes, n)) continue;
-  aliasingVars.putAll(n, Arrays.asList(reads, writes));
-}
-~~~~
-
-~~~~
 @Set Up Constraints@ +=
 for (int n = 0; n < controlFlow.numNodes; ++n) {
   for (Register r : Register.ASSIGNABLE)
     if(r != Register.THESTACK)
-      if(controlFlow.aliasingVars.get(n).isEmpty()) {
-        for (int v = 0; v < variables.length; ++v)
-          if(controlFlow.needsAssigning(v, n, r))
-            allocation.row(ONE_VAR_PER_REG, r.ordinal(), n)
-              .bounds(0.0, 1.0)
-              .add(1.0, VAR_IN_REG_AT_INSTR, v, r.ordinal(), n);
-      } else {
+      if(controlFlow.aliasingVars.containsKey(n)) {
         for(int avoid : controlFlow.aliasingVars.get(n))
           for (int v = 0; v < variables.length; ++v)
             if(v != avoid && controlFlow.needsAssigning(v, n, r))
               allocation.row(ONE_VAR_PER_REG, r.ordinal(), n, avoid)
                 .bounds(0.0, 1.0)
                 .add(1.0, VAR_IN_REG_AT_INSTR, v, r.ordinal(), n);
+      } else {
+        for (int v = 0; v < variables.length; ++v)
+          if(controlFlow.needsAssigning(v, n, r))
+            allocation.row(ONE_VAR_PER_REG, r.ordinal(), n)
+              .bounds(0.0, 1.0)
+              .add(1.0, VAR_IN_REG_AT_INSTR, v, r.ordinal(), n);
       }
   }
 @Other Helpers@ +=
@@ -837,7 +878,7 @@ for (int v = 0; v < variables.length; ++v)
         add( 1.0, NEW_VAR_IN_REG_FLAG, v, r.ordinal(), n.getValue());
     }
 @Other Helpers@ +=
-private static final String FLAG_SET_CORRECTLY = "flag_set_correctly";
+private static final String FLAG_SET_CORRECTLY = "var_in_reg_flag";
 ~~~~
 
 ~~~~
@@ -880,11 +921,11 @@ for(int i = 0; i < code.size(); ++i)
     int v = indexOf(variables, variable);
     for (Register r : Register.ASSIGNABLE)
       if(allocation.column(VAR_IN_REG_AT_INSTR, v, r.ordinal(), controlFlow.prevNode[i]).getValue() > 0.5) { // huge tolerance for 0-1 integer
+
         code.set(i, code.get(i).resolve(variable, r)); break;
       }
   } 
 ~~~~
-
 The stack. We'll keep it sorted so it has a predicable order (?)
 
 ~~~~
