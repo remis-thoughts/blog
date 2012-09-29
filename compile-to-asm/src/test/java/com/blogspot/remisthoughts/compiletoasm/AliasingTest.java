@@ -1,5 +1,6 @@
 package com.blogspot.remisthoughts.compiletoasm;
 
+import static com.blogspot.remisthoughts.compiletoasm.Compiler.move;
 import static com.blogspot.remisthoughts.compiletoasm.Compiler.ret;
 import static org.junit.Assert.assertEquals;
 
@@ -32,11 +33,11 @@ public class AliasingTest {
 		 */
 		List<Instruction> code = Arrays.asList(
 				new Definition(new Label("one_plus_one"), false),
-				Op.movq.with(one, a),
-				Op.movq.with(a, b),
+				move(one, a),
+				move(a, b),
 				Op.addq.with(one, b),
-				Op.movq.with(b, a),
-				Op.movq.with(a, Register.rax),
+				move(b, a),
+				move(a, Register.rax),
 				ret);
 
 		ControlFlowGraph cfg = new ControlFlowGraph(vars, code);

@@ -1,5 +1,6 @@
 package com.blogspot.remisthoughts.compiletoasm;
 
+import static com.blogspot.remisthoughts.compiletoasm.Compiler.move;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 
@@ -20,10 +21,10 @@ public class LivenessTest {
 	public void testcfg() throws Exception {
 		Variable[] vars = {new Variable("a"), new Variable("b")};
 		List<Instruction> code = Lists.newArrayList(
-				Op.movq.with(Register.rax, vars[0]),
-				Op.movq.with(Register.rbx, vars[1]),
+				move(Register.rax, vars[0]),
+				move(Register.rbx, vars[1]),
 				Op.addq.with(vars[0], vars[1]),
-				Op.movq.with(vars[1], Register.rax),
+				move(vars[1], Register.rax),
 				Compiler.ret);
 
 		ControlFlowGraph cfg = new ControlFlowGraph(vars, code);
@@ -52,11 +53,11 @@ public class LivenessTest {
 	public void testOverlapping() throws Exception {
 		Variable[] vars = {new Variable("a"), new Variable("b")};
 		List<Instruction> code = Lists.newArrayList(
-				Op.movq.with(new Immediate(2), vars[0]), // mov 2, a
-				Op.movq.with(vars[0], vars[1]), // mov a, b
+				move(new Immediate(2), vars[0]), // mov 2, a
+				move(vars[0], vars[1]), // mov a, b
 				Op.addq.with(new Immediate(3), vars[1]), // add 3, b
-				Op.movq.with(vars[1], vars[0]), // mov b, a
-				Op.movq.with(vars[0], Register.rax), // mov a, %rax
+				move(vars[1], vars[0]), // mov b, a
+				move(vars[0], Register.rax), // mov a, %rax
 				Compiler.ret);
 
 		ControlFlowGraph cfg = new ControlFlowGraph(vars, code);

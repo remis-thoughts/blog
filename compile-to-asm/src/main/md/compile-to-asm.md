@@ -6,7 +6,7 @@ http://www.antlr.org/wiki/display/~admin/2008/11/30/Example+tree+rewriting+with+
 ~~~~
 @Antlr Parse Rules@ +=
 eval : ((statement SC) | fundef)+ -> ^(Root fundef* ^(Definition ^(Name Global["main"]) ^(Parameters) ^(Body statement*)));
-statement : funcall | ret | assign;
+statement : funcall | ret | assign | whileloop | ifelse;
 expression : variable | Number | funcall | intrinsic;
 variable : Local | Global;
 ret : Return expression -> ^(Return expression);
@@ -14,7 +14,13 @@ assign : variable Assign expression -> ^(Assign variable expression);
 funcall : variable LP (expression (C expression)*)? RP -> ^(Call variable ^(Parameters expression*));
 parameters : (Local (C Local)*)? -> ^(Parameters Local+);
 intrinsic : Intrinsic LP expression (C expression)? RP -> ^(Intrinsic expression+);
-fundef : Definition variable? LP parameters RP LB (statement SC)* RB -> ^(Definition ^(Name variable) parameters ^(Body statement*));
+iftrue : (statement SC)*; iffalse : (statement SC)*;
+ifelse : If expression LB iftrue RB (Else RB iffalse RB)? 
+  -> ^(If ^(Test expression) ^(IfTrue iftrue) ^(IfFalse iffalse));
+fundef : Definition variable? LP parameters RP LB (statement SC)* RB 
+  -> ^(Definition ^(Name variable) parameters ^(Body statement*));
+whileloop : While expression LB (statement SC)* RB
+  -> ^(While ^(Test expression) ^(Body statement*));
 ~~~~
 
 _Globals_ are going to end up in the exported symbols of the compiled binary, so have a different set of restrictions on what characters they can contain. _Locals_ are source-level and private symbols so they are essentially arbitrary (but I'm going to enforce a ruby-style variable naming convention). 
@@ -22,14 +28,15 @@ _Globals_ are going to end up in the exported symbols of the compiled binary, so
 ~~~~
 @Antlr Tokens@ +=
 LP : '('; RP : ')'; C : ','; SC : ';'; LB : '{'; RB : '}'; 
-Definition : 'fn'; Return : 'return'; Assign : '=';
+Definition : 'fn'; Return : 'return'; Assign : '='; 
+If : 'if'; Else : 'else'; While : 'while';
 Local : ('a'..'z') ('a'..'z'|'_'|'0'..'9')*;
 Global : ('A'..'Z'|'_') ('A'..'Z'|'_'|'0'..'9')*;
 Number : ('0'..'9')+;
 Intrinsic : '+' | '-' | '*';
 WS : (' ' | '\t' | '\r' | '\n') {$channel=HIDDEN;};
 @Synthetic Tokens@ +=
-tokens { Parameters; Call; Body; Root; Name; } // for AST re-writing
+tokens { Parameters; Call; Body; Root; Name; Test; IfTrue; IfFalse; } // for AST re-writing
 ~~~~
 
 Overall structure of the Java code
@@ -78,7 +85,6 @@ static final class Definition extends Instruction {
 }
 enum Op { 
   addq("+") { @ADDQ@ }, 
-  movq("⇒") { @MOVQ@ }, 
   subq("-") { @SUBQ@ },
   divq("/") { @DIVQ@ },
   mulq("*") { @MULQ@ },
@@ -102,6 +108,43 @@ Maybe a note on (code) alignment?
 ~~~~
 @Other Helpers@ +=
 private static final Instruction align = new NoArgInstruction(@Align x86 Code@);
+~~~~
+
+Some instructions are conditional
+
+~~~~
+@Other Helpers@ +=
+enum Condition {
+  b, a, e, ne, be, ae;
+  Condition inverse() {
+    switch(this) {
+      case b:  return ae;
+      case a:  return be;
+      case e:  return ne;
+      case ne: return e;
+      case be: return a;
+      case ae: return b;
+    }
+    throw new IllegalStateException();
+  }
+}
+~~~~
+
+Moves can be conditional: [and apparently faster](https://mail.mozilla.org/pipermail/tamarin-devel/2008-April/000454.html)
+
+~~~~
+@Instruction Classes@ +=
+static final class Move extends Instruction {
+  final Value from; final ValueCanStoreInto to; final Condition cond;
+  Move(Value from, ValueCanStoreInto to, Condition cond) { 
+    this.from = from; this.to = to; this.cond = cond; 
+  }
+  public String toString() { @Move x86 Code@ }
+  @Move Members@
+}
+static Instruction move(Value from, ValueCanStoreInto to) {
+  return new Move(from, to, null);
+}
 ~~~~
 
 The two code sections
@@ -168,16 +211,16 @@ Calling functions [CDECL](http://en.wikipedia.org/wiki/X86_calling_conventions#c
 
 ~~~~
 @Parse A Call Statement@ +=
-call(statement, code, text, params, declaredVars);
+call(statement, @Parsing State@);
 @Other Helpers@ +=
-private static void call(Tree t, List<Instruction> code, List<List<Instruction>> text, Map<Variable, Parameter> params, Set<Variable> declaredVars) {
+private static void call(Tree t, @Parsing State Params@) {
   List<Value> values = Lists.newArrayList();
   for (Tree argument : children(t, 1)) {
-    values.add(getAsValue(argument, code, text, params, declaredVars));
+    values.add(getAsValue(argument, @Parsing State@));
   }
   int numParams = values.size(), maxInRegs = Register.PARAMETERS.length;
   for(int r = 0; r < Math.min(numParams, maxInRegs); ++r)
-    code.add(Op.movq.with(values.get(r), Register.PARAMETERS[r]));
+    code.add(move(values.get(r), Register.PARAMETERS[r]));
   @Before We Push Function Params Onto Stack@
   for(Value value : Lists.reverse(values.subList(Math.min(numParams, maxInRegs), numParams))) 
     code.add(@Push Value Onto The Stack@);
@@ -197,8 +240,8 @@ According to [the ABI (pdf)](http://www.x86-64.org/documentation/abi.pdf), value
 
 ~~~~
 @Parse A Return Statement@ +=
-Value ret = getAsValue(get(statement,0), code, text, params, declaredVars);
-code.add(Op.movq.with(ret, Register.rax));
+Value ret = getAsValue(get(statement,0), @Parsing State@);
+code.add(move(ret, Register.rax));
 @Returning From Function@
 ~~~~
 
@@ -206,9 +249,9 @@ code.add(Op.movq.with(ret, Register.rax));
 
 ~~~~
 @Call A Function And Keep the Return Value@ +=
-call(t, code, text, params, declaredVars);
+call(t, @Parsing State@);
 Variable var = new Variable();
-code.add(Op.movq.with(Register.rax, var));
+code.add(move(Register.rax, var));
 return var;
 ~~~~
 
@@ -216,7 +259,7 @@ Assignment (to locals and globals)
 
 ~~~~
 @Parse An Assign Statement@ +=
-Value expr = getAsValue(get(statement, 1), code, text, params, declaredVars);
+Value expr = getAsValue(get(statement, 1), @Parsing State@);
 ValueCanStoreInto to;
 if(type(statement, 0) == Global) {
     to = new Label(text(statement, 0));
@@ -224,7 +267,7 @@ if(type(statement, 0) == Global) {
     to = new Variable(text(statement, 0));
     @Assigned To A Local Variable@
 }
-code.add(Op.movq.with(expr, to));
+code.add(move(expr, to));
 ~~~~
 
 Built-ins: one symbol corresponds to an assembly instruction. We'll assume they only have two 
@@ -238,17 +281,17 @@ private static Op parse(String c) {
   throw new IllegalArgumentException();  
 }
 @Parse An Intrinsic Call@ +=
-Value arg1 = getAsValue(get(t, 0), code, text, params, declaredVars);
-Value arg2 = getAsValue(get(t, 1), code, text, params, declaredVars);
+Value arg1 = getAsValue(get(t, 0), @Parsing State@);
+Value arg2 = getAsValue(get(t, 1), @Parsing State@);
 Variable ret = new Variable();
-code.add(Op.movq.with(arg1, ret));
+code.add(move(arg1, ret));
 code.add(Op.parse(text(t)).with(arg2, ret));
 return ret;
 ~~~~
 
 ~~~~
 @Other Helpers@ += 
-private static Value getAsValue(Tree t, List<Instruction> code, List<List<Instruction>> text, Map<Variable, Parameter> params, Set<Variable> declaredVars) {
+private static Value getAsValue(Tree t, @Parsing State Params@) {
       switch (t.getType()) {
         case Definition:
             return parseDefinition(t, text);
@@ -289,16 +332,44 @@ private static Label parseDefinition(Tree def, List<List<Instruction>> text) {
   @Entering Function@
   @Parse Function Parameters@
   @Keep Track Of Declared Variables@
-  for (Tree statement : children(def, 2)) {
+  parseStatements(children(def, 2), @Parsing State@);
+  if(getLast(code) != ret) { @Returning From Function@ } 
+  @After Function Defined@
+  return myName;
+}
+~~~~
+
+These will come up a lot
+
+~~~~
+@Parsing State Params@ +=
+List<Instruction> code, 
+List<List<Instruction>> text, 
+Map<Variable, Parameter> params, 
+Set<Variable> declaredVars,
+Label myName
+@Parsing State@ +=
+code, 
+text, 
+params, 
+declaredVars,
+myName
+~~~~
+
+Parse a block of statements
+
+~~~~
+@Other Helpers@ +=
+private static void parseStatements(Iterable<Tree> statements, @Parsing State Params@) {
+  for (Tree statement : statements) {
     switch (type(statement)) {
       case Call :   @Parse A Call Statement@ break;
       case Return : @Parse A Return Statement@ break;
       case Assign : @Parse An Assign Statement@ break;
+      case While :  @Parse A While Statement@ break;
+      case If :     @Parse An If Statement@ break;
     }
   }
-  if(getLast(code) != ret) { @Returning From Function@ } 
-  @After Function Defined@
-  return myName;
 }
 ~~~~
 
@@ -320,10 +391,10 @@ Note that CALLEE_SAVE_VAR shouldn't be user-enterable or this will confuse thing
 static final Instruction ret = new NoArgInstruction(@Ret x86 Code@) { @Ret Members@ };
 @Entering Function@ +=
 for(Register r : Register.CALLEE_SAVES)
-  code.add(Op.movq.with(r, new Variable(CALLEE_SAVE_VAR + r)));
+  code.add(move(r, new Variable(CALLEE_SAVE_VAR + r)));
 @Returning From Function@ +=
 for(Register r : Register.CALLEE_SAVES)
-  code.add(Op.movq.with(new Variable(CALLEE_SAVE_VAR + r), r));
+  code.add(move(new Variable(CALLEE_SAVE_VAR + r), r));
 @Are We Returning From The Main Function@
 code.add(Compiler.ret);
 @Other Helpers@ +=
@@ -339,7 +410,7 @@ int number = 0;
 for(Tree param : children(def, 1)) {
   Variable v = new Variable(text(param));
   if(number < Register.PARAMETERS.length)
-    code.add(Op.movq.with(Register.PARAMETERS[number++], v));
+    code.add(move(Register.PARAMETERS[number++], v));
   else
     params.put(v, new Parameter(number++ - Register.PARAMETERS.length));
 }
@@ -357,6 +428,19 @@ public boolean equals(Object o) { return o instanceof Variable && ((Variable)o).
 public int compareTo(Variable o) { return name.compareTo(o.name); }
 ~~~~
 
+If statements 
+
+~~~~
+@Parse An If Statement@ +=
+Label endIf = parseIf(
+    get(statement, 0), // if
+    get(statement, 1), // then
+    numChildren(statement) == 2 ? get(statement, 2) : null, // else 
+    @Parsing State@);
+code.add(new DefineLabel(endIf));
+@Other Helpers@ +=
+~~~~
+
 Jumping about
 
 ~~~~
@@ -367,6 +451,23 @@ private static class DefineLabel extends Instruction {
   public String toString() { @Define Label x86 Code@ }
   public boolean equals(Object o) { return o instanceof DefineLabel && ((DefineLabel)o).label.equals(label); }
 }
+private static class Jump extends Instruction {
+  final Label to; final Condition cond;
+  Jump(Label to, Condition cond) { 
+    this.to = to; this.cond = cond; 
+  }
+  public String toString() { @Jump x86 Code@ }
+  @Jump Members@
+}
+~~~~
+
+A while loop is essentially an if block with an unconditional loop
+
+~~~~
+@Parse A While Statement@ +=
+Label l = new Label(); code.add(new DefineLabel(l));
+Label endWhile = parseIf(get(statement, 1), get(statement, 2), null, @Parsing State@);
+code.add(new Jump(l, null)); code.add(new DefineLabel(endWhile)); 
 ~~~~
 
 OSX demands16-byte alignment when we call a function. Unfortunately, when we start at the _main_ entrypoint, the stack is pretty arbitary:
@@ -451,6 +552,9 @@ boolean isNextInstructionReachable() { return true; }
 Label couldJumpTo() { return null; }
 @Ret Members@ +=
 boolean isNextInstructionReachable() { return false; }
+@Jump Members@ += 
+boolean isNextInstructionReachable() { return cond != null; }
+Label couldJumpTo() { return to; }
 ~~~~
 
 We need two separate bits of information from this graph; how the nodes relate to each other and how the instructions fit in between the nodes. 
@@ -564,13 +668,11 @@ Set<Value> readsFrom() { return Collections.emptySet(); }
 Set<ValueCanStoreInto> writesTo() { return Collections.emptySet(); }
 <E> Set<E> uses(Class<E> c) { return ImmutableSet.copyOf(filter(concat(readsFrom(), writesTo()), c)); }
 @BinaryOp Members@ +=
-Set<Value> readsFrom() { return op.readsFrom(arg1, arg2); }
-Set<ValueCanStoreInto> writesTo() { return op.writesTo(arg1, arg2); }
-@Op Members@ +=
-Set<Value> readsFrom(Value arg1, ValueCanStoreInto arg2) { return ImmutableSet.of(arg1, arg2); }
-Set<ValueCanStoreInto> writesTo(Value arg1, ValueCanStoreInto arg2) { return  ImmutableSet.of(arg2); }
-@MOVQ@ +=
-Set<Value> readsFrom(Value arg1, ValueCanStoreInto arg2) { return ImmutableSet.of(arg1); }
+Set<Value> readsFrom() { return ImmutableSet.of(arg1, arg2); }
+Set<ValueCanStoreInto> writesTo() { return ImmutableSet.of(arg2); }
+@Move Members@ +=
+Set<Value> readsFrom() { return ImmutableSet.of(from); }
+Set<ValueCanStoreInto> writesTo() { return ImmutableSet.of(to); }
 ~~~~
 
 We need to know all the variables we'll ever need to assign
@@ -721,7 +823,7 @@ for (int n = 0; n < numNodes; ++n) {
   Collection<Integer> instrsAfter = instructionsFollowingNode.get(n);
   if(instrsAfter.size() != 1) continue;
   int i = getOnlyElement(instrsAfter); Instruction instr = code.get(i); 
-  if(!isAMove(instr) || instr.uses(Variable.class).size() != 2) continue;
+  if(!(instr instanceof Move) || instr.uses(Variable.class).size() != 2) continue;
   int reads = indexOf(variables, getOnlyElement(instr.readsFrom()));
   int writes = indexOf(variables, getOnlyElement(instr.writesTo()));
   if(isLiveAt(reads, nextNode[i]) || isLiveAt(writes, n)) continue;
@@ -745,7 +847,7 @@ movl %ecx, %eax
 ~~~~
 @Add Objective Hints@ +=
 for(int i = 0; i < code.size(); ++i) {
-  if(!isAMove(code.get(i))) continue;
+  if(!(code.get(i) instanceof Move)) continue;
   for(Variable v : code.get(i).uses(Variable.class))
     for(Register r : code.get(i).uses(Register.class))
       for(int n : controlFlow.nodesAround(i)) 
@@ -753,9 +855,6 @@ for(int i = 0; i < code.size(); ++i) {
           allocation.objective().add(MOVE_NOP_HINT, VAR_IN_REG_AT_INSTR, indexOf(variables, v), r.ordinal(), n);
 }
 @Other Helpers@ +=
-private static boolean isAMove(Instruction i) {
-  return i instanceof BinaryOp && ((BinaryOp)i).op == Op.movq;
-}
 private static final double MOVE_NOP_HINT = -0.5;
 @Control Flow Graph Members@ +=
 List<Integer> nodesAround(int instruction) {
@@ -797,7 +896,7 @@ for(Integer node : controlFlow.aliasingVars.keys())
           add( 1.0, VAR_IN_REG_AT_INSTR, v, r.ordinal(), node);
       allocation.
         row(ALIASED_VAR_FLAG, node, r.ordinal()).
-        bounds(0.0, aliasedVars.size() - 1).
+        bounds(0.0, aliasedVars.size() - 1.0).
         add( -1.0 * aliasedVars.size(), ALIASED_IN_SAME_REG, node, r.ordinal());
     }
 @Other Helpers@ +=
@@ -905,10 +1004,18 @@ Now we know where to put variables, we can update the instructions. We'll make t
 
 ~~~~
 @Instruction Members@ +=
-Instruction resolve(Variable from, Register to) { return this; }
+Instruction resolve(Variable var, Register reg) { return this; }
 @BinaryOp Members@ +=
-Instruction resolve(Variable from, Register to) { 
-  return op.with(from.equals(arg1) ? to : arg1, from.equals(arg2) ? to : arg2); 
+Instruction resolve(Variable var, Register reg) { 
+  return op.with(resolveValue(arg1, var, reg), resolveValue(arg2, var, reg)); 
+}
+@Move Members@ +=
+Instruction resolve(Variable var, Register reg) {
+  return new Move(resolveValue(from, var, reg), resolveValue(to, var, reg), cond); 
+}
+@Other Helpers@ +=
+private static <V extends Value> V resolveValue(V from, Variable var, Register reg) {
+  return from.equals(var) ? (V) reg : from;
 }
 ~~~~
 
@@ -955,10 +1062,10 @@ for (int v = 0; v < variables.length; ++v)
       if(allocation.column(NEW_VAR_IN_REG_FLAG, v, Register.THESTACK.ordinal(), n).getValue() > 0.5) // v has moved 
         if(allocation.column(VAR_IN_REG_AT_INSTR, v, Register.THESTACK.ordinal(), n).getValue() > 0.5) // v now on stack
           for(int i : controlFlow.instructionsBeforeNode.get(n))
-            stackMovesAfter.put(i, Op.movq.with(whereAmI(allocation, v, controlFlow.prevNode[i]), onStack(stackVars, v)));
+            stackMovesAfter.put(i, move(whereAmI(allocation, v, controlFlow.prevNode[i]), onStack(stackVars, v)));
         else // v now in register
           for(int i : controlFlow.instructionsFollowingNode.get(n))
-            stackMovesBefore.put(i, Op.movq.with(onStack(stackVars, v), whereAmI(allocation, v, n)));
+            stackMovesBefore.put(i, move(onStack(stackVars, v), whereAmI(allocation, v, n)));
 ~~~~
 
 Inserting is a bit tricky as the indices will change
@@ -1041,6 +1148,12 @@ else
 @Define Label x86 Code@ += return String.format("%s:", label.name);
 @Immediate x86 Code@ += return String.format("$0x%s", value.toString(16));
 @Parameter x86 Code@ += return String.format("%s(%%rsp)", (number + offset + 1) * 8);
+@Jump x86 Code@ += return String.format("j%sq %s", cond == null ? "mp" : cond, to);
+@Move x86 Code@ += 
+if(cond == null)
+  return String.format("movq %s, %s", from, to);
+else
+  return String.format("cmov%sq %s, %s", cond, from, to);
 ~~~~
 
 We'll always write to UTF, even if our assembly only ever has ASCII characters in it. We won't bother indenting the code.
@@ -1065,7 +1178,7 @@ static final Predicate<Instruction> noNoOps = new Predicate<Instruction>() {
 boolean isNoOp() { return op.isNoOp(arg1, arg2); } 
 @Op Members@ +=
 public abstract boolean isNoOp(Value arg1, ValueCanStoreInto arg2);
-@MOVQ@ +=  
+@Move Members@ +=  
 public boolean isNoOp(Value arg1, ValueCanStoreInto arg2) { return arg1.equals(arg2); }
 @Zero Is Identity@ +=
 public boolean isNoOp(Value arg1, ValueCanStoreInto arg2) { return arg1.equals(new Immediate(0)); }
