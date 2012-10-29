@@ -15,8 +15,8 @@ funcall : variable LP (expression (C expression)*)? RP -> ^(Call variable ^(Para
 parameters : (Local (C Local)*)? -> ^(Parameters Local+);
 intrinsic : Intrinsic LP expression (C expression)? RP -> ^(Intrinsic expression+);
 iftrue : (statement SC)*; iffalse : (statement SC)*;
-ifelse : If expression LB iftrue RB (Else RB iffalse RB)? 
-  -> ^(If ^(Test expression) ^(IfTrue iftrue) ^(IfFalse iffalse));
+ifelse : If expression LB iftrue RB (Else LB iffalse RB)? 
+  -> ^(If ^(Test expression) ^(IfTrue iftrue) ^(IfFalse iffalse)?);
 fundef : Definition variable? LP parameters RP LB (statement SC)* RB 
   -> ^(Definition ^(Name variable) parameters ^(Body statement*));
 whileloop : While expression LB (statement SC)* RB
@@ -89,15 +89,16 @@ enum Op {
   divq("/") { @DIVQ@ },
   mulq("*") { @MULQ@ },
   andq("&") { @ANDQ@ },
-  orq("|")  { @ORQ@ };
-  Instruction with(Value arg1, ValueCanStoreInto arg2) { 
+  orq("|")  { @ORQ@  },
+  cmpq("?") { @CMPQ@ };
+  Instruction with(Value arg1, StorableValue arg2) { 
     return new BinaryOp(this, arg1, arg2); 
   }
   @Op Members@
 };
 static final class BinaryOp extends Instruction {
-  final Value arg1; final ValueCanStoreInto arg2; final Op op;
-  BinaryOp(Op op, Value arg1, ValueCanStoreInto arg2) { this.op = op; this.arg1 = arg1; this.arg2 = arg2; }
+  final Value arg1; final StorableValue arg2; final Op op;
+  BinaryOp(Op op, Value arg1, StorableValue arg2) { this.op = op; this.arg1 = arg1; this.arg2 = arg2; }
   public String toString() { @BinaryOp x86 Code@ }
   @BinaryOp Members@
 }
@@ -135,14 +136,14 @@ Moves can be conditional: [and apparently faster](https://mail.mozilla.org/piper
 ~~~~
 @Instruction Classes@ +=
 static final class Move extends Instruction {
-  final Value from; final ValueCanStoreInto to; final Condition cond;
-  Move(Value from, ValueCanStoreInto to, Condition cond) { 
+  final Value from; final StorableValue to; final Condition cond;
+  Move(Value from, StorableValue to, Condition cond) { 
     this.from = from; this.to = to; this.cond = cond; 
   }
   public String toString() { @Move x86 Code@ }
   @Move Members@
 }
-static Instruction move(Value from, ValueCanStoreInto to) {
+static Instruction move(Value from, StorableValue to) {
   return new Move(from, to, null);
 }
 ~~~~
@@ -166,7 +167,7 @@ Generate x86 GAS code - you could probably use a factory to create the _Instruct
 @Static Classes@ +=
 interface Value {}
 @Value Classes@
-static final class Label implements ValueCanStoreInto {
+static final class Label implements StorableValue {
   final String name;
   Label(String name) { this.name = name; }
   Label() { this( "LABEL" + uniqueness.getAndIncrement()); } // for anonymous fns
@@ -179,8 +180,8 @@ static final class Immediate implements Value {
   public boolean equals(Object o) { return o instanceof Immediate && ((Immediate)o).value.equals(value);}
   public String toString() { @Immediate x86 Code@ }
 }
-private interface ValueCanStoreInto extends Value {}
-static final class Variable implements ValueCanStoreInto, Comparable<Variable> {
+private interface StorableValue extends Value {}
+static final class Variable implements StorableValue, Comparable<Variable> {
   final String name;
   Variable(String name) { this.name = name; }
   Variable() { this("VAR" + uniqueness.getAndIncrement()); };
@@ -194,7 +195,7 @@ The registers (and their types). NB: omit frame pointer here - and add _THESTACK
 
 ~~~~
 @Value Classes@ +=
-enum Register implements ValueCanStoreInto {
+enum Register implements StorableValue {
   rax, rbx, rcx, rdx, rsp /*stack pointer*/, 
   rbp /*frame pointer*/, rsi, rdi, r8, r9, 
   r10, r11, r12, r13, r14, r15, THESTACK;
@@ -211,22 +212,26 @@ Calling functions [CDECL](http://en.wikipedia.org/wiki/X86_calling_conventions#c
 
 ~~~~
 @Parse A Call Statement@ +=
-call(statement, @Parsing State@);
+call(statement, state);
 @Other Helpers@ +=
-private static void call(Tree t, @Parsing State Params@) {
+private static void call(Tree t, ParsingState state) {
   List<Value> values = Lists.newArrayList();
   for (Tree argument : children(t, 1)) {
-    values.add(getAsValue(argument, @Parsing State@));
+    values.add(getAsValue(argument, state));
   }
   int numParams = values.size(), maxInRegs = Register.PARAMETERS.length;
   for(int r = 0; r < Math.min(numParams, maxInRegs); ++r)
-    code.add(move(values.get(r), Register.PARAMETERS[r]));
+    state.code.add(move(values.get(r), Register.PARAMETERS[r]));
   @Before We Push Function Params Onto Stack@
   for(Value value : Lists.reverse(values.subList(Math.min(numParams, maxInRegs), numParams))) 
-    code.add(@Push Value Onto The Stack@);
-  Variable fnName = new Variable(text(t, 0));
-  code.add(new Call(declaredVars.contains(fnName) ? fnName : new Label("_" + fnName.name)));
+    state.code.add(@Push Value Onto The Stack@);
+  state.code.add(state.callFn(text(t, 0)));
   if(numParams > maxInRegs) { @Remove Function Call Params From Stack@ }
+}
+@Parsing State Members@ +=
+Instruction callFn(String text) {
+  Variable fnName = new Variable(text);
+  return new Call(declaredVars.contains(fnName) ? fnName : new Label("_" + text));
 }
 @Instruction Classes@ +=
 private static final class Call extends Instruction {
@@ -240,8 +245,8 @@ According to [the ABI (pdf)](http://www.x86-64.org/documentation/abi.pdf), value
 
 ~~~~
 @Parse A Return Statement@ +=
-Value ret = getAsValue(get(statement,0), @Parsing State@);
-code.add(move(ret, Register.rax));
+Value ret = getAsValue(get(statement,0), state);
+state.code.add(move(ret, Register.rax));
 @Returning From Function@
 ~~~~
 
@@ -249,9 +254,9 @@ code.add(move(ret, Register.rax));
 
 ~~~~
 @Call A Function And Keep the Return Value@ +=
-call(t, @Parsing State@);
+call(t, state);
 Variable var = new Variable();
-code.add(move(Register.rax, var));
+state.code.add(move(Register.rax, var));
 return var;
 ~~~~
 
@@ -259,15 +264,15 @@ Assignment (to locals and globals)
 
 ~~~~
 @Parse An Assign Statement@ +=
-Value expr = getAsValue(get(statement, 1), @Parsing State@);
-ValueCanStoreInto to;
+Value expr = getAsValue(get(statement, 1), state);
+StorableValue to;
 if(type(statement, 0) == Global) {
     to = new Label(text(statement, 0));
 } else {
     to = new Variable(text(statement, 0));
     @Assigned To A Local Variable@
 }
-code.add(move(expr, to));
+state.code.add(move(expr, to));
 ~~~~
 
 Built-ins: one symbol corresponds to an assembly instruction. We'll assume they only have two 
@@ -281,26 +286,24 @@ private static Op parse(String c) {
   throw new IllegalArgumentException();  
 }
 @Parse An Intrinsic Call@ +=
-Value arg1 = getAsValue(get(t, 0), @Parsing State@);
-Value arg2 = getAsValue(get(t, 1), @Parsing State@);
+Value arg1 = getAsValue(get(t, 0), state);
+Value arg2 = getAsValue(get(t, 1), state);
 Variable ret = new Variable();
-code.add(move(arg1, ret));
-code.add(Op.parse(text(t)).with(arg2, ret));
+state.code.add(move(arg1, ret));
+state.code.add(Op.parse(text(t)).with(arg2, ret));
 return ret;
 ~~~~
 
 ~~~~
 @Other Helpers@ += 
-private static Value getAsValue(Tree t, @Parsing State Params@) {
+private static Value getAsValue(Tree t, ParsingState state) {
       switch (t.getType()) {
         case Definition:
-            return parseDefinition(t, text);
+            return parseDefinition(t, state.text);
         case Global:
             return new Label(text(t));
         case Local:
-            Value v = new Variable(text(t));
-            @Check If Variable Is A Parameter@
-            return v;
+            return state.resolveVar(text(t));
         case Call:
             @Call A Function And Keep the Return Value@ 
         case Intrinsic:
@@ -311,6 +314,13 @@ private static Value getAsValue(Tree t, @Parsing State Params@) {
             throw new IllegalArgumentException();
     }
 }
+private static StorableValue getAsStorableValue(Tree t, ParsingState state) {
+  Value v = getAsValue(t, state);
+  if(v instanceof StorableValue) return (StorableValue) v;
+  Variable var = new Variable();
+  state.code.add(move(v, var));
+  return var;
+}
 ~~~~
 
 Functions
@@ -319,7 +329,7 @@ What if they're anonymous? Need "_" for C linkage
 
 ~~~~
 @Get Function Name@ +=
-Label myName = hasChildren(def, 0) ? new Label("_" + text(def, 0, 0)) : new Label();
+myName = hasChildren(def, 0) ? new Label("_" + text(def, 0, 0)) : new Label();
 code.add(new Definition(myName, hasChildren(def, 0) && type(def, 0, 0) == Global));
 @Is This The Main Function@
 ~~~~
@@ -327,40 +337,40 @@ code.add(new Definition(myName, hasChildren(def, 0) && type(def, 0, 0) == Global
 ~~~~
 @Other Helpers@ +=
 private static Label parseDefinition(Tree def, List<List<Instruction>> text) {
-  List<Instruction> code = Lists.newArrayList(); text.add(code);
-  @Get Function Name@
-  @Entering Function@
-  @Parse Function Parameters@
-  @Keep Track Of Declared Variables@
-  parseStatements(children(def, 2), @Parsing State@);
-  if(getLast(code) != ret) { @Returning From Function@ } 
+  ParsingState state = new ParsingState(def, text);  
+  parseStatements(children(def, 2), state);
+  if(getLast(state.code) != ret) { @Returning From Function@ } 
   @After Function Defined@
-  return myName;
+  return state.myName;
 }
 ~~~~
 
 These will come up a lot
 
 ~~~~
-@Parsing State Params@ +=
-List<Instruction> code, 
-List<List<Instruction>> text, 
-Map<Variable, Parameter> params, 
-Set<Variable> declaredVars,
-Label myName
-@Parsing State@ +=
-code, 
-text, 
-params, 
-declaredVars,
-myName
+@Other Helpers@ +=
+static final class ParsingState {
+  List<Instruction> code = Lists.newArrayList();
+  List<List<Instruction>> text;
+  Map<Variable, Parameter> params = Maps.newTreeMap(); 
+  Set<Variable> declaredVars;
+  Label myName;
+  ParsingState(Tree def, List<List<Instruction>> text) {
+    (this.text = text).add(code);
+    @Get Function Name@
+    @Entering Function@
+    @Parse Function Parameters@
+    @Keep Track Of Declared Variables@
+  }
+  @Parsing State Members@
+}
 ~~~~
 
 Parse a block of statements
 
 ~~~~
 @Other Helpers@ +=
-private static void parseStatements(Iterable<Tree> statements, @Parsing State Params@) {
+private static void parseStatements(Iterable<Tree> statements, ParsingState state) {
   for (Tree statement : statements) {
     switch (type(statement)) {
       case Call :   @Parse A Call Statement@ break;
@@ -377,9 +387,9 @@ Keeping track of user-specified (not auto-inserted) variables in the code. This 
 
 ~~~~
 @Keep Track Of Declared Variables@ +=
-Set<Variable> declaredVars = Sets.newTreeSet(params.keySet());
+declaredVars = Sets.newTreeSet(params.keySet());
 @Assigned To A Local Variable@ +=
-declaredVars.add((Variable)to);
+state.declaredVars.add((Variable)to);
 ~~~~
 
 Stack frames. [Enter](http://www.read.seas.harvard.edu/~kohler/class/04f-aos/ref/i386/ENTER.htm)
@@ -394,9 +404,9 @@ for(Register r : Register.CALLEE_SAVES)
   code.add(move(r, new Variable(CALLEE_SAVE_VAR + r)));
 @Returning From Function@ +=
 for(Register r : Register.CALLEE_SAVES)
-  code.add(move(new Variable(CALLEE_SAVE_VAR + r), r));
+  state.code.add(move(new Variable(CALLEE_SAVE_VAR + r), r));
 @Are We Returning From The Main Function@
-code.add(Compiler.ret);
+state.code.add(Compiler.ret);
 @Other Helpers@ +=
 private static final String CALLEE_SAVE_VAR = "save!";
 ~~~~
@@ -405,7 +415,6 @@ Dealing with parameters. Make _Variable_ comparable and add _equals_ methods so 
 
 ~~~~
 @Parse Function Parameters@ +=
-Map<Variable, Parameter> params = Maps.newTreeMap();
 int number = 0;
 for(Tree param : children(def, 1)) {
   Variable v = new Variable(text(param));
@@ -415,14 +424,17 @@ for(Tree param : children(def, 1)) {
     params.put(v, new Parameter(number++ - Register.PARAMETERS.length));
 }
 @Static Classes@ +=
-private static final class Parameter implements ValueCanStoreInto {
+private static final class Parameter implements StorableValue {
   final int number; // 0..n-1
   Parameter(int number) { this.number = number; }
   public String toString() { @Parameter x86 Code@ }
   @Parameter Members@
 }
-@Check If Variable Is A Parameter@ +=
-v = params.containsKey(v) ? params.get(v) : v;
+@Parsing State Members@ +=
+StorableValue resolveVar(String text) {
+  Variable v = new Variable(text);
+  return params.containsKey(v) ? params.get(v) : v;
+}
 @Variable Members@ +=
 public boolean equals(Object o) { return o instanceof Variable && ((Variable)o).name.equals(name);}
 public int compareTo(Variable o) { return name.compareTo(o.name); }
@@ -433,12 +445,45 @@ If statements
 ~~~~
 @Parse An If Statement@ +=
 Label endIf = parseIf(
-    get(statement, 0), // if
-    get(statement, 1), // then
-    numChildren(statement) == 2 ? get(statement, 2) : null, // else 
-    @Parsing State@);
-code.add(new DefineLabel(endIf));
+  get(statement, 0), // if
+  get(statement, 1), // then
+  numChildren(statement) == 3 ? get(statement, 2) : null, // else 
+  state);
+if(endIf != null)
+  state.code.add(new DefineLabel(endIf));
 @Other Helpers@ +=
+private static Label parseIf(Tree test, Tree ifTrue, Tree ifFalse, ParsingState state) {
+  StorableValue trueOrFalse = getAsStorableValue(get(test, 0), state);
+  state.code.add(Op.cmpq.with(new Immediate(0), trueOrFalse));
+  Label end = new Label();
+  if(ifFalse == null) {
+    @Parse An If With No Else@
+  } else {
+    @Parse An If With An Else@
+  }
+  return end;
+}
+~~~~
+
+~~~~
+@Parse An If With No Else@ +=
+state.code.add(new Jump(end, Condition.e));
+parseStatements(children(ifTrue), state);
+~~~~
+
+We may not need a final jump from the if-true block as the last instruction could be a _ret_.
+
+~~~~
+@Parse An If With An Else@ +=
+Label ifFalseLabel = new Label();
+state.code.add(new Jump(ifFalseLabel, Condition.e));
+parseStatements(children(ifTrue), state);
+if(getLast(state.code).isNextInstructionReachable())
+  state.code.add(new Jump(end, null));
+else
+  end = null;
+state.code.add(new DefineLabel(ifFalseLabel));
+parseStatements(children(ifFalse), state);
 ~~~~
 
 Jumping about
@@ -465,9 +510,10 @@ A while loop is essentially an if block with an unconditional loop
 
 ~~~~
 @Parse A While Statement@ +=
-Label l = new Label(); code.add(new DefineLabel(l));
-Label endWhile = parseIf(get(statement, 1), get(statement, 2), null, @Parsing State@);
-code.add(new Jump(l, null)); code.add(new DefineLabel(endWhile)); 
+Label l = new Label(); state.code.add(new DefineLabel(l));
+Label endWhile = parseIf(get(statement, 1), get(statement, 2), null, state);
+state.code.add(new Jump(l, null)); 
+state.code.add(new DefineLabel(endWhile)); 
 ~~~~
 
 OSX demands16-byte alignment when we call a function. Unfortunately, when we start at the _main_ entrypoint, the stack is pretty arbitary:
@@ -483,13 +529,17 @@ rsp            0x7fff5fbff858   0x7fff5fbff858
 However, when we return from main we should restore the original _rsp_ (regardless of its alignment) otherwise we'll segfault.
 
 ~~~~
+@Parsing State Members@ +=
+boolean isMainFn() {
+  return myName.name.equals("_main");
+}
 @Is This The Main Function@ +=
-if(myName.name.equals("_main")) {
+if(isMainFn()) {
   code.add(new Push(rsp));
   code.add(Op.andq.with(new Immediate(0xFFFFFFFFFFFFFFF0L), rsp));
 }
 @Are We Returning From The Main Function@ +=
-if(myName.name.equals("_main")) code.add(new Pop(rsp));
+if(state.isMainFn()) state.code.add(new Pop(rsp));
 @Instruction Classes@ +=
 private static final class Push extends Instruction {
   final Value value;
@@ -498,8 +548,8 @@ private static final class Push extends Instruction {
   @Push Members@
 }
 private static final class Pop extends Instruction {
-  final ValueCanStoreInto value;
-  Pop(ValueCanStoreInto value) { this.value = value; }
+  final StorableValue value;
+  Pop(StorableValue value) { this.value = value; }
   public String toString() { @Pop x86 Code@ }
 }
 ~~~~
@@ -509,11 +559,11 @@ private static final class Pop extends Instruction {
 ~~~~
 @Before We Push Function Params Onto Stack@ += 
 if(numParams > maxInRegs && (numParams - maxInRegs) % 2 != 0)
-  code.add(Op.subq.with(new Immediate(8), rsp));
+  state.code.add(Op.subq.with(new Immediate(8), rsp));
 @Remove Function Call Params From Stack@ +=
 int correction = 0;
 if((numParams - maxInRegs) % 2 != 0) correction = 1;
-code.add(Op.addq.with(new Immediate((numParams - maxInRegs + correction) * 8), rsp));
+state.code.add(Op.addq.with(new Immediate((numParams - maxInRegs + correction) * 8), rsp));
 ~~~~
 
 ## (II) Register Allocation via Linear Programming ##
@@ -523,7 +573,7 @@ http://www.xypron.de/projects/linopt/apidocs/index.html (the paper)[http://groth
 
 ~~~~
 @After Function Defined@ +=
-code = registerAllocation(code);
+state.code = registerAllocation(state.code);
 @Other Helpers@ +=
 static List<Instruction> registerAllocation(final List<Instruction> code) {
   @Get Variables Used@
@@ -665,14 +715,14 @@ Data dependencies - will let us calculate liveness
 ~~~~
 @Instruction Members@ +=
 Set<Value> readsFrom() { return Collections.emptySet(); }
-Set<ValueCanStoreInto> writesTo() { return Collections.emptySet(); }
+Set<StorableValue> writesTo() { return Collections.emptySet(); }
 <E> Set<E> uses(Class<E> c) { return ImmutableSet.copyOf(filter(concat(readsFrom(), writesTo()), c)); }
 @BinaryOp Members@ +=
 Set<Value> readsFrom() { return ImmutableSet.of(arg1, arg2); }
-Set<ValueCanStoreInto> writesTo() { return ImmutableSet.of(arg2); }
+Set<StorableValue> writesTo() { return ImmutableSet.of(arg2); }
 @Move Members@ +=
 Set<Value> readsFrom() { return ImmutableSet.of(from); }
-Set<ValueCanStoreInto> writesTo() { return ImmutableSet.of(to); }
+Set<StorableValue> writesTo() { return ImmutableSet.of(to); }
 ~~~~
 
 We need to know all the variables we'll ever need to assign
@@ -1039,13 +1089,13 @@ The stack. We'll keep it sorted so it has a predicable order (?)
 @LP Initialisation@ +=
 List<Integer> stackVars = Lists.newArrayList();
 @Value Classes@ +=
-static final class StackVar implements ValueCanStoreInto {
+static final class StackVar implements StorableValue {
   final int var;
   StackVar(int var) { this.var = var; }
   public String toString() { @StackVar x86 Code@ }
 }
 @Other Helpers@ +=
-private static ValueCanStoreInto onStack(List<Integer> stackVars, int v) {
+private static StorableValue onStack(List<Integer> stackVars, int v) {
   if(!stackVars.contains(v)) stackVars.add(v); 
   return new StackVar(stackVars.indexOf(v));
 }
@@ -1148,7 +1198,7 @@ else
 @Define Label x86 Code@ += return String.format("%s:", label.name);
 @Immediate x86 Code@ += return String.format("$0x%s", value.toString(16));
 @Parameter x86 Code@ += return String.format("%s(%%rsp)", (number + offset + 1) * 8);
-@Jump x86 Code@ += return String.format("j%sq %s", cond == null ? "mp" : cond, to);
+@Jump x86 Code@ += return String.format("j%s %s", cond == null ? "mp" : cond, to);
 @Move x86 Code@ += 
 if(cond == null)
   return String.format("movq %s, %s", from, to);
@@ -1177,21 +1227,24 @@ static final Predicate<Instruction> noNoOps = new Predicate<Instruction>() {
 @BinaryOp Members@ +=
 boolean isNoOp() { return op.isNoOp(arg1, arg2); } 
 @Op Members@ +=
-public abstract boolean isNoOp(Value arg1, ValueCanStoreInto arg2);
+public abstract boolean isNoOp(Value arg1, StorableValue arg2);
 @Move Members@ +=  
-public boolean isNoOp(Value arg1, ValueCanStoreInto arg2) { return arg1.equals(arg2); }
+public boolean isNoOp() { return from.equals(to); }
 @Zero Is Identity@ +=
-public boolean isNoOp(Value arg1, ValueCanStoreInto arg2) { return arg1.equals(new Immediate(0)); }
+public boolean isNoOp(Value arg1, StorableValue arg2) { return arg1.equals(new Immediate(0)); }
 @ADDQ@ += @Zero Is Identity@
 @SUBQ@ += @Zero Is Identity@
 @ORQ@ += @Zero Is Identity@
 @One Is Identity@ +=
-public boolean isNoOp(Value arg1, ValueCanStoreInto arg2) { return arg1.equals(new Immediate(1)); }
+public boolean isNoOp(Value arg1, StorableValue arg2) { return arg1.equals(new Immediate(1)); }
 @DIVQ@ += @One Is Identity@
 @MULQ@ += @One Is Identity@
 @All Bits Set Is Identity@ +=
-public boolean isNoOp(Value arg1, ValueCanStoreInto arg2) { return arg1.equals(new Immediate(0xFFFFFFFFFFFFFFFFL)); }
+public boolean isNoOp(Value arg1, StorableValue arg2) { return arg1.equals(new Immediate(0xFFFFFFFFFFFFFFFFL)); }
 @ANDQ@ += @All Bits Set Is Identity@
+@No Identity@ +=
+public boolean isNoOp(Value arg1, StorableValue arg2) { return false; }
+@CMPQ@ += @No Identity@
 ~~~~
 
 ## Appendices ##

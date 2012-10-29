@@ -47,7 +47,7 @@
 				<artifactId>maven-surefire-plugin</artifactId>
 				<configuration>
 					<forkMode>once</forkMode>
-					<argLine>-Djava.library.path=/usr/local/lib:/usr/local/lib/jni</argLine>
+					<argLine>-Djava.library.path=${env.LD_LIBRARY_PATH}</argLine>
 				</configuration>
 			</plugin>
 		</plugins>
