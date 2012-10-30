@@ -88,8 +88,6 @@ static final class Definition extends Instruction {
 enum Op { 
   addq("+") { @ADDQ@ }, 
   subq("-") { @SUBQ@ },
-  divq("/") { @DIVQ@ },
-  mulq("*") { @MULQ@ },
   andq("&") { @ANDQ@ },
   orq("|")  { @ORQ@  },
   cmpq("?") { @CMPQ@ };
@@ -482,7 +480,7 @@ if(endIf != null)
 @Other Helpers@ +=
 private static Label parseIf(Tree test, Tree ifTrue, Tree ifFalse, ParsingState state) {
   StorableValue trueOrFalse = getAsStorableValue(get(test, 0), state);
-  state.code.add(Op.cmpq.with(new Immediate(0), trueOrFalse));
+  @Do If Comparison Check@
   Label end = new Label();
   if(ifFalse == null) {
     @Parse An If With No Else@
@@ -493,9 +491,23 @@ private static Label parseIf(Tree test, Tree ifTrue, Tree ifFalse, ParsingState 
 }
 ~~~~
 
+We can save a few instructions if we have already done a conditional move
+
+~~~~
+@Do If Comparison Check@ +=
+Condition jumpCond;
+if(getLast(state.code) instanceof Move && ((Move)getLast(state.code)).cond != null) {
+  jumpCond = ((Move)getLast(state.code)).cond;
+  state.code.subList(state.code.size() - 3, state.code.size()).clear();
+} else {
+  jumpCond = Condition.e;
+  state.code.add(Op.cmpq.with(new Immediate(0), trueOrFalse));
+}
+~~~~
+
 ~~~~
 @Parse An If With No Else@ +=
-state.code.add(new Jump(end, Condition.e));
+state.code.add(new Jump(end, jumpCond));
 parseStatements(children(ifTrue), state);
 ~~~~
 
@@ -504,7 +516,7 @@ We may not need a final jump from the if-true block as the last instruction coul
 ~~~~
 @Parse An If With An Else@ +=
 Label ifFalseLabel = new Label();
-state.code.add(new Jump(ifFalseLabel, Condition.e));
+state.code.add(new Jump(ifFalseLabel, jumpCond));
 parseStatements(children(ifTrue), state);
 if(getLast(state.code).isNextInstructionReachable())
   state.code.add(new Jump(end, null));
@@ -1271,10 +1283,6 @@ public boolean isNoOp(Value arg1, StorableValue arg2) { return arg1.equals(new I
 @ADDQ@ += @Zero Is Identity@
 @SUBQ@ += @Zero Is Identity@
 @ORQ@ += @Zero Is Identity@
-@One Is Identity@ +=
-public boolean isNoOp(Value arg1, StorableValue arg2) { return arg1.equals(new Immediate(1)); }
-@DIVQ@ += @One Is Identity@
-@MULQ@ += @One Is Identity@
 @All Bits Set Is Identity@ +=
 public boolean isNoOp(Value arg1, StorableValue arg2) { return arg1.equals(new Immediate(0xFFFFFFFFFFFFFFFFL)); }
 @ANDQ@ += @All Bits Set Is Identity@
