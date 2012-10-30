@@ -1,0 +1,5 @@
+if <(2, 3) {
+	return 15;
+} else {
+	return 0;
+};

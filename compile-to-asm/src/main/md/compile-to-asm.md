@@ -7,13 +7,14 @@ http://www.antlr.org/wiki/display/~admin/2008/11/30/Example+tree+rewriting+with+
 @Antlr Parse Rules@ +=
 eval : ((statement SC) | fundef)+ -> ^(Root fundef* ^(Definition ^(Name Global["main"]) ^(Parameters) ^(Body statement*)));
 statement : funcall | ret | assign | whileloop | ifelse;
-expression : variable | Number | funcall | intrinsic;
+expression : variable | Number | funcall | intrinsic_funcall;
 variable : Local | Global;
+intrinsic : Intrinsic | Conditional;
 ret : Return expression -> ^(Return expression);
 assign : variable Assign expression -> ^(Assign variable expression);
 funcall : variable LP (expression (C expression)*)? RP -> ^(Call variable ^(Parameters expression*));
 parameters : (Local (C Local)*)? -> ^(Parameters Local+);
-intrinsic : Intrinsic LP expression (C expression)? RP -> ^(Intrinsic expression+);
+intrinsic_funcall : intrinsic LP expression (C expression)? RP -> ^(intrinsic expression+);
 iftrue : (statement SC)*; iffalse : (statement SC)*;
 ifelse : If expression LB iftrue RB (Else LB iffalse RB)? 
   -> ^(If ^(Test expression) ^(IfTrue iftrue) ^(IfFalse iffalse)?);
@@ -34,6 +35,7 @@ Local : ('a'..'z') ('a'..'z'|'_'|'0'..'9')*;
 Global : ('A'..'Z'|'_') ('A'..'Z'|'_'|'0'..'9')*;
 Number : ('0'..'9')+;
 Intrinsic : '+' | '-' | '*';
+Conditional : '<' | '<=' | '==' | '!=' | '>=' | '>';
 WS : (' ' | '\t' | '\r' | '\n') {$channel=HIDDEN;};
 @Synthetic Tokens@ +=
 tokens { Parameters; Call; Body; Root; Name; Test; IfTrue; IfFalse; } // for AST re-writing
@@ -111,12 +113,12 @@ Maybe a note on (code) alignment?
 private static final Instruction align = new NoArgInstruction(@Align x86 Code@);
 ~~~~
 
-Some instructions are conditional
+Some instructions are conditional. Overload this to represent condition intrinsics.
 
 ~~~~
 @Other Helpers@ +=
 enum Condition {
-  b, a, e, ne, be, ae;
+  b("<"), a(">"), e("=="), ne("!="), be("<="), ae(">=");
   Condition inverse() {
     switch(this) {
       case b:  return ae;
@@ -128,6 +130,7 @@ enum Condition {
     }
     throw new IllegalStateException();
   }
+  @Condition Members@
 }
 ~~~~
 
@@ -294,6 +297,29 @@ state.code.add(Op.parse(text(t)).with(arg2, ret));
 return ret;
 ~~~~
 
+Some build-ins are conditional
+
+~~~~
+@Condition Members@ +=
+String c; 
+Condition(String c) { this.c = c; }
+private static Condition parse(String c) { 
+  for(Condition cond : values()) if(Objects.equal(cond.c, c)) return cond;
+  throw new IllegalArgumentException();  
+}
+@Parse A Conditional Call@ +=
+Condition cond = Condition.parse(text(t));
+Value arg1 = getAsValue(get(t, 1), state);
+StorableValue arg2 = getAsStorableValue(get(t, 0), state);
+state.code.add(Op.cmpq.with(arg1, arg2));
+Variable ret = new Variable();
+state.code.add(move(new Immediate(1), ret));
+Variable zero = new Variable();
+state.code.add(move(new Immediate(0), zero));
+state.code.add(new Move(zero, ret, cond.inverse()));
+return ret;
+~~~~
+
 ~~~~
 @Other Helpers@ += 
 private static Value getAsValue(Tree t, ParsingState state) {
@@ -305,9 +331,11 @@ private static Value getAsValue(Tree t, ParsingState state) {
         case Local:
             return state.resolveVar(text(t));
         case Call:
-            @Call A Function And Keep the Return Value@ 
+            { @Call A Function And Keep the Return Value@ } 
         case Intrinsic:
-            @Parse An Intrinsic Call@
+            { @Parse An Intrinsic Call@ }
+        case Conditional:
+        	{ @Parse A Conditional Call@ }
         case Number :
             return new Immediate(UnsignedLong.valueOf(t.getText()));
         default :
@@ -693,7 +721,7 @@ for(int i = 0; i < code.size(); ++i )
 for(Entry<Integer, Collection<Integer>> next : instructionsFollowingNode.asMap().entrySet()) { // not empty
   Set<Variable> varsSet = Sets.newTreeSet(Arrays.asList(variables)); 
   for(int i : next.getValue())
-    varsSet.retainAll(Sets.newTreeSet(filter(code.get(i).writesTo(), Variable.class)));
+    varsSet.retainAll(Sets.newTreeSet(filter(code.get(i).willWriteTo(), Variable.class)));
   for(Variable variable : varsSet)
     varsWrittenNext.set(next.getKey() * variables.length + indexOf(variables, variable));
 }
@@ -710,19 +738,24 @@ for(int i = 0; i < code.size(); ++i )
     nodesBeforeFnCalls.set(prevNode[i]);
 ~~~~
 
-Data dependencies - will let us calculate liveness
+Data dependencies - will let us calculate liveness. Can write to is a subset (but not a strict subset) of will write to
 
 ~~~~
 @Instruction Members@ +=
 Set<Value> readsFrom() { return Collections.emptySet(); }
-Set<StorableValue> writesTo() { return Collections.emptySet(); }
-<E> Set<E> uses(Class<E> c) { return ImmutableSet.copyOf(filter(concat(readsFrom(), writesTo()), c)); }
+Set<StorableValue> canWriteTo() {  return Collections.emptySet(); }
+Set<StorableValue> willWriteTo() { return Collections.emptySet(); }
+<E> Set<E> uses(Class<E> c) { return ImmutableSet.copyOf(filter(concat(readsFrom(), canWriteTo()), c)); }
 @BinaryOp Members@ +=
 Set<Value> readsFrom() { return ImmutableSet.of(arg1, arg2); }
-Set<StorableValue> writesTo() { return ImmutableSet.of(arg2); }
+Set<StorableValue> canWriteTo() {  return ImmutableSet.of(arg2); }
+Set<StorableValue> willWriteTo() { return ImmutableSet.of(arg2); }
 @Move Members@ +=
 Set<Value> readsFrom() { return ImmutableSet.of(from); }
-Set<StorableValue> writesTo() { return ImmutableSet.of(to); }
+Set<StorableValue> canWriteTo() { return ImmutableSet.of(to); }
+Set<StorableValue> willWriteTo() { 
+  return cond == null ? ImmutableSet.of(to) : Collections.<StorableValue>emptySet(); 
+}
 ~~~~
 
 We need to know all the variables we'll ever need to assign
@@ -732,7 +765,7 @@ We need to know all the variables we'll ever need to assign
 Set<Variable> allVariables = Sets.newTreeSet();
 for(Instruction i : code) {
   addAll(allVariables, filter(i.readsFrom(), Variable.class));
-  addAll(allVariables, filter(i.writesTo(), Variable.class));
+  addAll(allVariables, filter(i.canWriteTo(), Variable.class));
 }
 if(allVariables.isEmpty()) { @No Stack Variables@ return code; }
 Variable[] variables = allVariables.toArray(new Variable[allVariables.size()]);
@@ -873,9 +906,12 @@ for (int n = 0; n < numNodes; ++n) {
   Collection<Integer> instrsAfter = instructionsFollowingNode.get(n);
   if(instrsAfter.size() != 1) continue;
   int i = getOnlyElement(instrsAfter); Instruction instr = code.get(i); 
-  if(!(instr instanceof Move) || instr.uses(Variable.class).size() != 2) continue;
+  if(!(instr instanceof Move) 
+  || instr.uses(Variable.class).size() != 2 
+  || ((Move)instr).cond != null) 
+    continue;
   int reads = indexOf(variables, getOnlyElement(instr.readsFrom()));
-  int writes = indexOf(variables, getOnlyElement(instr.writesTo()));
+  int writes = indexOf(variables, getOnlyElement(instr.willWriteTo()));
   if(isLiveAt(reads, nextNode[i]) || isLiveAt(writes, n)) continue;
   aliasingVars.putAll(n, Arrays.asList(reads, writes));
 }
@@ -1203,7 +1239,7 @@ else
 if(cond == null)
   return String.format("movq %s, %s", from, to);
 else
-  return String.format("cmov%sq %s, %s", cond, from, to);
+  return String.format("cmov%s %s, %s", cond, from, to);
 ~~~~
 
 We'll always write to UTF, even if our assembly only ever has ASCII characters in it. We won't bother indenting the code.

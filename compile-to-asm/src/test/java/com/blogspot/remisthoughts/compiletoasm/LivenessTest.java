@@ -1,6 +1,7 @@
 package com.blogspot.remisthoughts.compiletoasm;
 
 import static com.blogspot.remisthoughts.compiletoasm.Compiler.move;
+import static org.junit.Assert.*;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 
@@ -8,9 +9,11 @@ import java.util.List;
 
 import org.junit.Test;
 
+import com.blogspot.remisthoughts.compiletoasm.Compiler.Condition;
 import com.blogspot.remisthoughts.compiletoasm.Compiler.ControlFlowGraph;
 import com.blogspot.remisthoughts.compiletoasm.Compiler.Immediate;
 import com.blogspot.remisthoughts.compiletoasm.Compiler.Instruction;
+import com.blogspot.remisthoughts.compiletoasm.Compiler.Move;
 import com.blogspot.remisthoughts.compiletoasm.Compiler.Op;
 import com.blogspot.remisthoughts.compiletoasm.Compiler.Register;
 import com.blogspot.remisthoughts.compiletoasm.Compiler.Variable;
@@ -79,5 +82,50 @@ public class LivenessTest {
 		assertFalse(cfg.isLiveAt(1, 5));
 		assertFalse(cfg.isLiveAt(1, 6));
 		assertFalse(cfg.isLiveAt(1, 1));
+	}
+	
+	/**
+	 * x = >(2, 3)
+	 */
+	@Test
+	public void testConditionalMoves() throws Exception {
+		Variable[] vars = {new Variable("x"), new Variable("zero"),  new Variable("ret")};
+		List<Instruction> code = Lists.newArrayList(
+				move(new Immediate(2), vars[0]), // mov 2, a
+				Op.cmpq.with(new Immediate(3), vars[0]), // cmp 3, a
+				move(new Immediate(1), vars[2]), // mov 1, ret
+				move(new Immediate(0), vars[1]), // mov 0, zero
+				new Move(vars[1], vars[2], Condition.b), // cmovb zero, ret
+				move(vars[2], Register.rax), 
+				Compiler.ret);
+
+		ControlFlowGraph cfg = new ControlFlowGraph(vars, code);
+
+		// vars[0]: "x"
+		assertFalse(cfg.isLiveAt(0, 0));
+		assertTrue(cfg.isLiveAt(0, 2));
+		assertFalse(cfg.isLiveAt(0, 3));
+		assertFalse(cfg.isLiveAt(0, 4));
+		assertFalse(cfg.isLiveAt(0, 5));
+		assertFalse(cfg.isLiveAt(0, 6));
+		assertFalse(cfg.isLiveAt(0, 1));
+
+		// vars[1]: "zero"
+		assertFalse(cfg.isLiveAt(1, 0));
+		assertFalse(cfg.isLiveAt(1, 2));
+		assertFalse(cfg.isLiveAt(1, 3));
+		assertFalse(cfg.isLiveAt(1, 4));
+		assertTrue(cfg.isLiveAt(1, 5));
+		assertFalse(cfg.isLiveAt(1, 6));
+		assertFalse(cfg.isLiveAt(1, 1));
+		
+		// vars[2]: "ret"
+		assertFalse(cfg.isLiveAt(2, 0));
+		assertFalse(cfg.isLiveAt(2, 2));
+		assertFalse(cfg.isLiveAt(2, 3));
+		assertTrue(cfg.isLiveAt(2, 4));
+		assertTrue(cfg.isLiveAt(2, 5));
+		assertTrue(cfg.isLiveAt(2, 6));
+		assertFalse(cfg.isLiveAt(2, 1));
 	}
 }
