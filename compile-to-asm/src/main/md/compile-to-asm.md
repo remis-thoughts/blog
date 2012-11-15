@@ -34,8 +34,8 @@ If : 'if'; Else : 'else'; While : 'while';
 Local : ('a'..'z') ('a'..'z'|'_'|'0'..'9')*;
 Global : ('A'..'Z'|'_') ('A'..'Z'|'_'|'0'..'9')*;
 Number : ('0'..'9')+;
-Intrinsic : '+' | '-' | '*';
-Conditional : '<' | '<=' | '==' | '!=' | '>=' | '>';
+Intrinsic : '+' | '-' | '&' | '|';
+Conditional : '<' | '>' | '\u2261' | '\u2260' | '\u2264' | '\u2265';
 WS : (' ' | '\t' | '\r' | '\n') {$channel=HIDDEN;};
 @Synthetic Tokens@ +=
 tokens { Parameters; Call; Body; Root; Name; Test; IfTrue; IfFalse; } // for AST re-writing
@@ -50,6 +50,7 @@ package com.blogspot.remisthoughts.compiletoasm;
 public final class Compiler {
   public static void compile(InputStream srcIn, OutputStream asmOut) throws Exception {
     @Build The AST@ 
+    ProgramState program = new ProgramState();
     @First Pass@
     @Write The Output@
   }
@@ -67,10 +68,9 @@ The first pass: turning an AST into pseudo-assembly, with variables, not registe
 
 ~~~~
 @First Pass@ +=
-List<List<Instruction>> text = Lists.newArrayList();
-text.add(Arrays.asList(Compiler.text, Compiler.align));
+program.text.add(Arrays.asList(Compiler.text, Compiler.align));
 for(Tree child : children(ast)) {
-  parseDefinition(child, text);
+  parseDefinition(child, program);
 }
 ~~~~
 
@@ -80,9 +80,8 @@ Objects to represent the subset of assembly we'll generate. Note that these may 
 @Instruction Classes@ +=
 abstract static class Instruction { @Instruction Members@ }
 static final class Definition extends Instruction {
-  final Label name; final boolean isGlobal; 
-  @Definition Members@
-  Definition(Label name, boolean isGlobal) { this.name = name; this.isGlobal = isGlobal; }
+  final Label label; final boolean isGlobal; 
+  Definition(Label label, boolean isGlobal) { this.label = label; this.isGlobal = isGlobal; }
   public String toString() { @Definition x86 Code@ }
 }
 enum Op { 
@@ -111,12 +110,27 @@ Maybe a note on (code) alignment?
 private static final Instruction align = new NoArgInstruction(@Align x86 Code@);
 ~~~~
 
+The data section
+
+~~~~
+@Static Classes@ +=
+static final class Label implements StorableValue, Comparable<Label> {
+  final String name;
+  Label(String name) { this.name = name; }
+  Label() { this("L" + uniqueness.getAndIncrement()); } // for anonymous fns
+  public int compareTo(Label other) {
+    return name.compareTo(other.name);
+  }
+  public String toString() { @Label x86 Code@ }
+}
+~~~~
+
 Some instructions are conditional. Overload this to represent condition intrinsics.
 
 ~~~~
 @Other Helpers@ +=
 enum Condition {
-  b("<"), a(">"), e("=="), ne("!="), be("<="), ae(">=");
+  b("<"), a(">"), e("≡"), ne("≠"), be("≤"), ae("≥");
   Condition inverse() {
     switch(this) {
       case b:  return ae;
@@ -159,7 +173,6 @@ private static class NoArgInstruction extends Instruction {
   public String toString() { return x86Code; }
 }
 private static final Instruction text = new NoArgInstruction(@Text x86 Code@);
-private static final Instruction data = new NoArgInstruction(@Data x86 Code@);
 ~~~~
 
 Generate x86 GAS code - you could probably use a factory to create the _Instruction_ objects if you wanted to support more than one architecture. See [this](http://stackoverflow.com/a/2752639/42543) for why _.type_ isn't supported on mac. See [lib-c free](https://blogs.oracle.com/ksplice/entry/hello_from_a_libc_free). https://developer.apple.com/library/mac/#documentation/DeveloperTools/Reference/Assembler/000-Introduction/introduction.html . [Instruction set (pdf)](http://download.intel.com/design/intarch/manuals/24319101.pdf). 
@@ -168,12 +181,6 @@ Generate x86 GAS code - you could probably use a factory to create the _Instruct
 @Static Classes@ +=
 interface Value {}
 @Value Classes@
-static final class Label implements StorableValue {
-  final String name;
-  Label(String name) { this.name = name; }
-  Label() { this( "LABEL" + uniqueness.getAndIncrement()); } // for anonymous fns
-  public String toString() { return name; }
-}
 static final class Immediate implements Value {
   final UnsignedLong value;
   Immediate(UnsignedLong value) { this.value = value; }
@@ -266,14 +273,17 @@ Assignment (to locals and globals)
 ~~~~
 @Parse An Assign Statement@ +=
 Value expr = getAsValue(get(statement, 1), state);
-StorableValue to;
 if(type(statement, 0) == Global) {
-    to = new Label(text(statement, 0));
+  Label to = new Label(text(statement, 0));
+  if(expr instanceof Immediate && !state.program.globals.containsKey(to))
+    state.program.globals.put(to, (Immediate)expr);
+  else
+    state.code.add(move(expr, to));
 } else {
-    to = new Variable(text(statement, 0));
+    StorableValue to = new Variable(text(statement, 0));
     @Assigned To A Local Variable@
+    state.code.add(move(expr, to));
 }
-state.code.add(move(expr, to));
 ~~~~
 
 Built-ins: one symbol corresponds to an assembly instruction. We'll assume they only have two 
@@ -323,9 +333,9 @@ return ret;
 private static Value getAsValue(Tree t, ParsingState state) {
       switch (t.getType()) {
         case Definition:
-            return parseDefinition(t, state.text);
+            return parseDefinition(t, state.program);
         case Global:
-            return new Label(text(t));
+            { @Get A Global@ }
         case Local:
             return state.resolveVar(text(t));
         case Call:
@@ -362,8 +372,8 @@ code.add(new Definition(myName, hasChildren(def, 0) && type(def, 0, 0) == Global
 
 ~~~~
 @Other Helpers@ +=
-private static Label parseDefinition(Tree def, List<List<Instruction>> text) {
-  ParsingState state = new ParsingState(def, text);  
+private static Label parseDefinition(Tree def, ProgramState program) {
+  ParsingState state = new ParsingState(def, program);  
   parseStatements(children(def, 2), state);
   if(getLast(state.code) != ret) { @Returning From Function@ } 
   @After Function Defined@
@@ -375,14 +385,18 @@ These will come up a lot
 
 ~~~~
 @Other Helpers@ +=
+static final class ProgramState {
+  final List<List<Instruction>> text = Lists.newArrayList();
+  final Map<Label, Immediate> globals = Maps.newTreeMap();
+}
 static final class ParsingState {
   List<Instruction> code = Lists.newArrayList();
-  List<List<Instruction>> text;
   Map<Variable, Parameter> params = Maps.newTreeMap(); 
+  ProgramState program;
   Set<Variable> declaredVars;
   Label myName;
-  ParsingState(Tree def, List<List<Instruction>> text) {
-    (this.text = text).add(code);
+  ParsingState(Tree def, ProgramState program) {
+    (this.program = program).text.add(code);
     @Get Function Name@
     @Entering Function@
     @Parse Function Parameters@
@@ -407,6 +421,14 @@ private static void parseStatements(Iterable<Tree> statements, ParsingState stat
     }
   }
 }
+~~~~
+
+~~~~
+@Get A Global@ +=
+Label ret = new Label(text(t));
+if(!state.program.globals.containsKey(ret))
+  state.program.globals.put(ret, new Immediate(0));
+return ret;
 ~~~~
 
 Keeping track of user-specified (not auto-inserted) variables in the code. This is for function calls - how do we tell if the string function "name" is a symbol or a variable for dynamic dispatch? We'll assume symbol unless clearly a var as we don't have imports or other ways to tell what symbols can be dynamically linked
@@ -532,7 +554,7 @@ Jumping about
 @Instruction Classes@ +=
 private static class DefineLabel extends Instruction {
   final Label label;
-  DefineLabel( Label label ) { this.label = label; }
+  DefineLabel(Label label) { this.label = label; }
   public String toString() { @Define Label x86 Code@ }
   public boolean equals(Object o) { return o instanceof DefineLabel && ((DefineLabel)o).label.equals(label); }
 }
@@ -1228,30 +1250,34 @@ if(!stackVars.isEmpty())
 The x86 syntax we'll use: [addl](http://stackoverflow.com/questions/1619131/addl-instruction-x86) [all instructions](http://en.wikipedia.org/wiki/X86_instruction_listings)
 
 ~~~~
-@Definition x86 Code@ += return isGlobal ? String.format( ".globl %s\n%s:", name, name) : String.format("%s:", name); 
+@Definition x86 Code@ += 
+if(isGlobal)
+  return String.format( ".globl %s\n%s:", label.name, label.name);
+else
+  return String.format("%s:", label.name); 
 @BinaryOp x86 Code@ += return String.format( "%s %s, %s", op, arg1, arg2);
 @Push x86 Code@ += return String.format( "pushq %s", value);
 @Pop x86 Code@ += return String.format( "popq %s", value);
 @Call x86 Code@ +=
 if(name instanceof Label)
-  return String.format( "call %s", name); // call a label
+  return String.format( "call %s", ((Label)name).name); // call a label
 else
   return String.format( "call *%s", name); // indirect function call - code address in a register
 @Section x86 Code@ += return String.format( ".%s", name()); 
 @StackVar x86 Code@ += return String.format("%s(%%rsp)", var * 8);
 @Align x86 Code@ += ".align 8"
 @Text x86 Code@ += ".text"
-@Data x86 Code@ += ".data"
 @Ret x86 Code@ += "ret"
 @Define Label x86 Code@ += return String.format("%s:", label.name);
 @Immediate x86 Code@ += return String.format("$0x%s", value.toString(16));
 @Parameter x86 Code@ += return String.format("%s(%%rsp)", (number + offset + 1) * 8);
-@Jump x86 Code@ += return String.format("j%s %s", cond == null ? "mp" : cond, to);
+@Jump x86 Code@ += return String.format("j%s %s", cond == null ? "mp" : cond, to.name);
 @Move x86 Code@ += 
 if(cond == null)
   return String.format("movq %s, %s", from, to);
 else
   return String.format("cmov%s %s, %s", cond, from, to);
+@Label x86 Code@ += return String.format("%s(%%rip)", name);
 ~~~~
 
 We'll always write to UTF, even if our assembly only ever has ASCII characters in it. We won't bother indenting the code.
@@ -1259,7 +1285,15 @@ We'll always write to UTF, even if our assembly only ever has ASCII characters i
 ~~~~
 @Write The Output@ +=
 Writer writer = new OutputStreamWriter(asmOut, Charsets.UTF_8); 
-for(Instruction i : filter(concat(text), noNoOps)) writer.append(i + "\n");
+if(!program.globals.isEmpty()) {
+  writer.append(".data\n");
+  for(Entry<Label, Immediate> global : program.globals.entrySet()) 
+    writer
+      .append(global.getKey().name).append(": .long 0x")
+      .append(global.getValue().value.toString(16)).append("\n");
+}
+for(Instruction i : filter(concat(program.text), noNoOps)) 
+  writer.append(i + "\n");
 writer.close();
 ~~~~
 
@@ -1315,6 +1349,7 @@ import de.xypron.linopt.Problem.*;
 ~~~~
 
 Antlr code to build AST
+[unicode](http://stackoverflow.com/questions/2081862/how-do-i-match-unicode-characters-in-antlr) [charVocabulary not in 3.3](http://antlr.1301665.n2.nabble.com/UTF-8-charVocabulary-in-options-in-3-3-td7578297.html)
 
 ~~~~
 @Antlr Options@ +=
@@ -1329,7 +1364,7 @@ options {
 CommonTree ast = new UnsignedParser(
   new CommonTokenStream(
     new UnsignedLexer(
-      new ANTLRInputStream(srcIn)))).eval().tree;
+      new ANTLRInputStream(srcIn, "UTF-8")))).eval().tree;
 ~~~~
 
 stackoverflow.com/questions/2445008/how-to-get-antlr-3-2-to-exit-upon-first-error

@@ -1,0 +1,5 @@
+if ≡(3, 3) {
+	return 19;
+} else {
+	return 0;
+};

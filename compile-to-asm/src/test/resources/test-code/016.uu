@@ -1,4 +1,4 @@
-if >=(2, 3) {
+if ≥(2, 3) {
 	return 0;
 } else {
 	return 16;
