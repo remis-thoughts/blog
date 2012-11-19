@@ -7,14 +7,13 @@ http://www.antlr.org/wiki/display/~admin/2008/11/30/Example+tree+rewriting+with+
 @Antlr Parse Rules@ +=
 eval : ((statement SC) | fundef)+ -> ^(Root fundef* ^(Definition ^(Name Global["main"]) ^(Parameters) ^(Body statement*)));
 statement : funcall | ret | assign | whileloop | ifelse;
-expression : variable | Number | funcall | intrinsic_funcall;
+expression : variable | Number | funcall;
 variable : Local | Global;
-intrinsic : Intrinsic | Conditional;
+callable : variable| Intrinsic | Conditional;
 ret : Return expression -> ^(Return expression);
 assign : variable Assign expression -> ^(Assign variable expression);
-funcall : variable LP (expression (C expression)*)? RP -> ^(Call variable ^(Parameters expression*));
+funcall : callable LP (expression (C expression)*)? RP -> ^(Call callable ^(Parameters expression*));
 parameters : (Local (C Local)*)? -> ^(Parameters Local+);
-intrinsic_funcall : intrinsic LP expression (C expression)? RP -> ^(intrinsic expression+);
 iftrue : (statement SC)*; iffalse : (statement SC)*;
 ifelse : If expression LB iftrue RB (Else LB iffalse RB)? 
   -> ^(If ^(Test expression) ^(IfTrue iftrue) ^(IfFalse iffalse)?);
@@ -68,7 +67,7 @@ The first pass: turning an AST into pseudo-assembly, with variables, not registe
 
 ~~~~
 @First Pass@ +=
-program.text.add(Arrays.asList(Compiler.text, Compiler.align));
+program.text.add(Arrays.asList(Compiler.align));
 for(Tree child : children(ast)) {
   parseDefinition(child, program);
 }
@@ -106,8 +105,10 @@ static final class BinaryOp extends Instruction {
 Maybe a note on (code) alignment?
 
 ~~~~
-@Other Helpers@ +=
-private static final Instruction align = new NoArgInstruction(@Align x86 Code@);
+@Instruction Classes@ +=
+private static final Instruction align = new Instruction() {
+  public String toString() { return @Align x86 Code@; }
+};
 ~~~~
 
 The data section
@@ -161,18 +162,6 @@ static final class Move extends Instruction {
 static Instruction move(Value from, StorableValue to) {
   return new Move(from, to, null);
 }
-~~~~
-
-The two code sections
-
-~~~~
-@Instruction Classes@ +=
-private static class NoArgInstruction extends Instruction {
-  private final String x86Code;
-  NoArgInstruction( String x86Code ) { this.x86Code = x86Code; }
-  public String toString() { return x86Code; }
-}
-private static final Instruction text = new NoArgInstruction(@Text x86 Code@);
 ~~~~
 
 Generate x86 GAS code - you could probably use a factory to create the _Instruction_ objects if you wanted to support more than one architecture. See [this](http://stackoverflow.com/a/2752639/42543) for why _.type_ isn't supported on mac. See [lib-c free](https://blogs.oracle.com/ksplice/entry/hello_from_a_libc_free). https://developer.apple.com/library/mac/#documentation/DeveloperTools/Reference/Assembler/000-Introduction/introduction.html . [Instruction set (pdf)](http://download.intel.com/design/intarch/manuals/24319101.pdf). 
@@ -297,11 +286,11 @@ private static Op parse(String c) {
   throw new IllegalArgumentException();  
 }
 @Parse An Intrinsic Call@ +=
-Value arg1 = getAsValue(get(t, 0), state);
-Value arg2 = getAsValue(get(t, 1), state);
+Value arg1 = getAsValue(get(t, 1, 0), state);
+Value arg2 = getAsValue(get(t, 1, 1), state);
 Variable ret = new Variable();
 state.code.add(move(arg1, ret));
-state.code.add(Op.parse(text(t)).with(arg2, ret));
+state.code.add(Op.parse(text(t, 0)).with(arg2, ret));
 return ret;
 ~~~~
 
@@ -316,9 +305,9 @@ private static Condition parse(String c) {
   throw new IllegalArgumentException();  
 }
 @Parse A Conditional Call@ +=
-Condition cond = Condition.parse(text(t));
-Value arg1 = getAsValue(get(t, 1), state);
-StorableValue arg2 = getAsStorableValue(get(t, 0), state);
+Condition cond = Condition.parse(text(t, 0));
+Value arg1 = getAsValue(get(t, 1, 1), state);
+StorableValue arg2 = getAsStorableValue(get(t, 1, 0), state);
 state.code.add(Op.cmpq.with(arg1, arg2));
 Variable ret = new Variable();
 state.code.add(move(new Immediate(1), ret));
@@ -339,11 +328,15 @@ private static Value getAsValue(Tree t, ParsingState state) {
         case Local:
             return state.resolveVar(text(t));
         case Call:
-            { @Call A Function And Keep the Return Value@ } 
-        case Intrinsic:
-            { @Parse An Intrinsic Call@ }
-        case Conditional:
-        	{ @Parse A Conditional Call@ }
+            switch(type(t, 0)) {
+            	case Local:
+            	case Global:
+	            	{ @Call A Function And Keep the Return Value@ }
+	            case Intrinsic: 
+		            { @Parse An Intrinsic Call@ }
+		        case Conditional:
+        			{ @Parse A Conditional Call@ }
+            }
         case Number :
             return new Immediate(UnsignedLong.valueOf(t.getText()));
         default :
@@ -446,7 +439,10 @@ Note that CALLEE_SAVE_VAR shouldn't be user-enterable or this will confuse thing
 
 ~~~~
 @Instruction Classes@ +=
-static final Instruction ret = new NoArgInstruction(@Ret x86 Code@) { @Ret Members@ };
+static final Instruction ret = new Instruction() {
+  @Ret Members@
+  public String toString() { return @Ret x86 Code@; }
+};
 @Entering Function@ +=
 for(Register r : Register.CALLEE_SAVES)
   code.add(move(r, new Variable(CALLEE_SAVE_VAR + r)));
@@ -1292,6 +1288,7 @@ if(!program.globals.isEmpty()) {
       .append(global.getKey().name).append(": .long 0x")
       .append(global.getValue().value.toString(16)).append("\n");
 }
+writer.append(".text\n");
 for(Instruction i : filter(concat(program.text), noNoOps)) 
   writer.append(i + "\n");
 writer.close();
