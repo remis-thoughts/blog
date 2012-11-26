@@ -1,0 +1,3 @@
+ABC = 23;
+a = ABC;
+return @(a);

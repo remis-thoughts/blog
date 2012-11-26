@@ -9,9 +9,10 @@ eval : ((statement SC) | fundef)+ -> ^(Root fundef* ^(Definition ^(Name Global["
 statement : funcall | ret | assign | whileloop | ifelse;
 expression : variable | Number | funcall;
 variable : Local | Global;
-callable : variable| Intrinsic | Conditional;
+callable : variable| Intrinsic | Conditional | Deref;
+assignable : variable | Deref assignable -> ^(Deref assignable);
 ret : Return expression -> ^(Return expression);
-assign : variable Assign expression -> ^(Assign variable expression);
+assign : assignable Assign expression -> ^(Assign assignable expression);
 funcall : callable LP (expression (C expression)*)? RP -> ^(Call callable ^(Parameters expression*));
 parameters : (Local (C Local)*)? -> ^(Parameters Local+);
 iftrue : (statement SC)*; iffalse : (statement SC)*;
@@ -33,7 +34,7 @@ If : 'if'; Else : 'else'; While : 'while';
 Local : ('a'..'z') ('a'..'z'|'_'|'0'..'9')*;
 Global : ('A'..'Z'|'_') ('A'..'Z'|'_'|'0'..'9')*;
 Number : ('0'..'9')+;
-Intrinsic : '+' | '-' | '&' | '|';
+Intrinsic : '+' | '-' | '&' | '|'; Deref : '@';
 Conditional : '<' | '>' | '\u2261' | '\u2260' | '\u2264' | '\u2265';
 WS : (' ' | '\t' | '\r' | '\n') {$channel=HIDDEN;};
 @Synthetic Tokens@ +=
@@ -123,6 +124,7 @@ static final class Label implements StorableValue, Comparable<Label> {
     return name.compareTo(other.name);
   }
   public String toString() { @Label x86 Code@ }
+  @Label Members@
 }
 ~~~~
 
@@ -168,7 +170,8 @@ Generate x86 GAS code - you could probably use a factory to create the _Instruct
 
 ~~~~
 @Static Classes@ +=
-interface Value {}
+interface Value { @Value Members@ }
+interface StorableValue extends Value { @StorableValue Members@ }
 @Value Classes@
 static final class Immediate implements Value {
   final UnsignedLong value;
@@ -177,8 +180,7 @@ static final class Immediate implements Value {
   public boolean equals(Object o) { return o instanceof Immediate && ((Immediate)o).value.equals(value);}
   public String toString() { @Immediate x86 Code@ }
 }
-private interface StorableValue extends Value {}
-static final class Variable implements StorableValue, Comparable<Variable> {
+static final class Variable implements StorableValue, Resolvable, Comparable<Variable> {
   final String name;
   Variable(String name) { this.name = name; }
   Variable() { this("VAR" + uniqueness.getAndIncrement()); };
@@ -187,6 +189,13 @@ static final class Variable implements StorableValue, Comparable<Variable> {
 }
 private static final AtomicInteger uniqueness = new AtomicInteger();
 ~~~~
+
+The types of values
+
+|| Type || Can Be A Memory Address ||
+| Immediate | No (absolute addressing not supported on OSX x86-64) |
+| Register | No (it's an absolute address) |
+| Label | Always a memory address |
 
 The registers (and their types). NB: omit frame pointer here - and add _THESTACK_ as a synthetic var.
 
@@ -262,16 +271,29 @@ Assignment (to locals and globals)
 ~~~~
 @Parse An Assign Statement@ +=
 Value expr = getAsValue(get(statement, 1), state);
+int numDerefs = 0;
+while(type(statement, 0) == Deref) {
+  ++numDerefs; statement = get(statement, 0);
+}
+StorableValue to;
 if(type(statement, 0) == Global) {
-  Label to = new Label(text(statement, 0));
-  if(expr instanceof Immediate && !state.program.globals.containsKey(to))
-    state.program.globals.put(to, (Immediate)expr);
-  else
-    state.code.add(move(expr, to));
+  Label label = new Label(text(statement, 0));
+  to = new AtLabel(label); // must be at least one Deref
+  @Shortcut For Global Initialisation@
 } else {
-    StorableValue to = new Variable(text(statement, 0));
-    @Assigned To A Local Variable@
-    state.code.add(move(expr, to));
+  Variable var = new Variable(text(statement, 0));
+  to = numDerefs > 0 ? new AtAddress(var) : var;
+  @Assigned To A Local Variable@
+}
+for(; numDerefs > 1; -- numDerefs) {
+  throw new IllegalStateException();
+}
+state.code.add(move(expr, to));
+@Shortcut For Global Initialisation@ +=
+if(numDerefs == 1 
+&& expr instanceof Immediate 
+&& !state.program.globals.containsKey(label)) {
+  state.program.globals.put(label, (Immediate)expr); continue;
 }
 ~~~~
 
@@ -336,6 +358,8 @@ private static Value getAsValue(Tree t, ParsingState state) {
 		            { @Parse An Intrinsic Call@ }
 		        case Conditional:
         			{ @Parse A Conditional Call@ }
+		        case Deref:
+        			{ @Parse A Dereference@ }
             }
         case Number :
             return new Immediate(UnsignedLong.valueOf(t.getText()));
@@ -430,7 +454,7 @@ Keeping track of user-specified (not auto-inserted) variables in the code. This 
 @Keep Track Of Declared Variables@ +=
 declaredVars = Sets.newTreeSet(params.keySet());
 @Assigned To A Local Variable@ +=
-state.declaredVars.add((Variable)to);
+state.declaredVars.add(var);
 ~~~~
 
 Stack frames. [Enter](http://www.read.seas.harvard.edu/~kohler/class/04f-aos/ref/i386/ENTER.htm)
@@ -624,6 +648,38 @@ if((numParams - maxInRegs) % 2 != 0) correction = 1;
 state.code.add(Op.addq.with(new Immediate((numParams - maxInRegs + correction) * 8), rsp));
 ~~~~
 
+Memory stuff. Need _MemoryAddress_ interface as we can't have x86 instructions like _movq (%rax), (%rdi)_
+
+~~~~
+@Static Classes@ +=
+private interface MemoryAddress {}
+private static final class AtAddress implements StorableValue, Resolvable {
+  final StorableValue at;
+  AtAddress(StorableValue at) { this.at = at; }
+  public String toString() { @At Address x86 Code@ }
+  public boolean equals(Object o) {
+  	return o instanceof AtAddress && ((AtAddress)o).at.equals(at);
+  }
+  @At Address Members@
+}
+private static final class AtLabel implements StorableValue {
+  final Label at;
+  AtLabel(Label at) { this.at = at; }
+  public String toString() { @At Label x86 Code@ }
+}
+@Parse A Dereference@ +=
+StorableValue val = getAsStorableValue(get(t, 1, 0), state);
+if(val instanceof Label)
+  return new AtLabel((Label)val);
+else if(val instanceof Variable)
+  return new AtAddress((Variable)val);
+else {
+  Variable ret = new Variable();
+  state.code.add(move(val, ret));
+  return new AtAddress(ret);
+} 
+~~~~
+
 ## (II) Register Allocation via Linear Programming ##
 
 We'll do this function-by-function
@@ -775,11 +831,13 @@ Data dependencies - will let us calculate liveness. Can write to is a subset (bu
 Set<Value> readsFrom() { return Collections.emptySet(); }
 Set<StorableValue> canWriteTo() {  return Collections.emptySet(); }
 Set<StorableValue> willWriteTo() { return Collections.emptySet(); }
-<E> Set<E> uses(Class<E> c) { return ImmutableSet.copyOf(filter(concat(readsFrom(), canWriteTo()), c)); }
+<E> Set<E> uses(Class<E> c) { 
+  return ImmutableSet.copyOf(filter(concat(readsFrom(), canWriteTo()), c)); 
+}
 @BinaryOp Members@ +=
 Set<Value> readsFrom() { return ImmutableSet.of(arg1, arg2); }
 Set<StorableValue> canWriteTo() {  return ImmutableSet.of(arg2); }
-Set<StorableValue> willWriteTo() { return ImmutableSet.of(arg2); }
+Set<StorableValue> willWriteTo() { return canWriteTo(); }
 @Move Members@ +=
 Set<Value> readsFrom() { return ImmutableSet.of(from); }
 Set<StorableValue> canWriteTo() { return ImmutableSet.of(to); }
@@ -1123,15 +1181,30 @@ Now we know where to put variables, we can update the instructions. We'll make t
 Instruction resolve(Variable var, Register reg) { return this; }
 @BinaryOp Members@ +=
 Instruction resolve(Variable var, Register reg) { 
-  return op.with(resolveValue(arg1, var, reg), resolveValue(arg2, var, reg)); 
+  return op.with(Compiler.resolve(arg1, var, reg), Compiler.resolve(arg2, var, reg)); 
 }
 @Move Members@ +=
 Instruction resolve(Variable var, Register reg) {
-  return new Move(resolveValue(from, var, reg), resolveValue(to, var, reg), cond); 
+  return new Move(Compiler.resolve(from, var, reg), Compiler.resolve(to, var, reg), cond); 
+}
+~~~~
+
+~~~~
+@Static Classes@ +=
+interface Resolvable {
+  StorableValue resolve(Register reg);
+}
+@At Address Members@ +=
+public StorableValue resolve(Register reg) { 
+  return new AtAddress(reg); 
+}
+@Variable Members@ += 
+public StorableValue resolve(Register reg) { 
+  return reg; 
 }
 @Other Helpers@ +=
-private static <V extends Value> V resolveValue(V from, Variable var, Register reg) {
-  return from.equals(var) ? (V) reg : from;
+private static <E> E resolve(E from, Variable var, Register reg) {
+  return from instanceof Resolvable && from.equals(var) ? (E)((Resolvable)from).resolve(reg) : from;
 }
 ~~~~
 
@@ -1157,13 +1230,11 @@ List<Integer> stackVars = Lists.newArrayList();
 @Value Classes@ +=
 static final class StackVar implements StorableValue {
   final int var;
-  StackVar(int var) { this.var = var; }
+  StackVar(List<Integer> stackVars, int v) { 
+    if(!stackVars.contains(v)) stackVars.add(v); 
+    this.var = stackVars.indexOf(v); 
+  }
   public String toString() { @StackVar x86 Code@ }
-}
-@Other Helpers@ +=
-private static StorableValue onStack(List<Integer> stackVars, int v) {
-  if(!stackVars.contains(v)) stackVars.add(v); 
-  return new StackVar(stackVars.indexOf(v));
 }
 ~~~~
 
@@ -1178,10 +1249,10 @@ for (int v = 0; v < variables.length; ++v)
       if(allocation.column(NEW_VAR_IN_REG_FLAG, v, Register.THESTACK.ordinal(), n).getValue() > 0.5) // v has moved 
         if(allocation.column(VAR_IN_REG_AT_INSTR, v, Register.THESTACK.ordinal(), n).getValue() > 0.5) // v now on stack
           for(int i : controlFlow.instructionsBeforeNode.get(n))
-            stackMovesAfter.put(i, move(whereAmI(allocation, v, controlFlow.prevNode[i]), onStack(stackVars, v)));
+            stackMovesAfter.put(i, move(whereAmI(allocation, v, controlFlow.prevNode[i]), new StackVar(stackVars, v)));
         else // v now in register
           for(int i : controlFlow.instructionsFollowingNode.get(n))
-            stackMovesBefore.put(i, move(onStack(stackVars, v), whereAmI(allocation, v, n)));
+            stackMovesBefore.put(i, move(new StackVar(stackVars, v), whereAmI(allocation, v, n)));
 ~~~~
 
 Inserting is a bit tricky as the indices will change
@@ -1273,7 +1344,9 @@ if(cond == null)
   return String.format("movq %s, %s", from, to);
 else
   return String.format("cmov%s %s, %s", cond, from, to);
-@Label x86 Code@ += return String.format("%s(%%rip)", name);
+@Label x86 Code@ += return String.format("%s@GOTPCREL(%%rip)", name);
+@At Label x86 Code@ += return String.format("%s(%%rip)", at.name);
+@At Address x86 Code@ += return String.format("(%s)", at);
 ~~~~
 
 We'll always write to UTF, even if our assembly only ever has ASCII characters in it. We won't bother indenting the code.
@@ -1446,4 +1519,5 @@ port install binutils
 
 examining
 nm -m -U /System/Library/Frameworks/QTKit.framework/QTKit
-gobjdump -f /opt/local/lib/gcc47/libgcc_ext.10.5.dylib 
+gobjdump -f /opt/local/lib/gcc47/libgcc_ext.10.5.dylib
+llvm-objdump-mp-3.1 -disassemble $(which gcc)  

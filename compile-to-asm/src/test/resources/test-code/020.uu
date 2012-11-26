@@ -1,2 +1,2 @@
-GLOB=20;
-return GLOB;
+@GLOB=20;
+return @(GLOB);

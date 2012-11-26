@@ -63,7 +63,7 @@ public class CompilerTest {
 			try {
 				Compiler.compile(in = new FileInputStream(src), out);
 			} catch (Exception e) {
-				throw new AssertionError(Strings.isNullOrEmpty(e.getMessage()) ? e.toString() : e.getMessage());
+				fail(Strings.isNullOrEmpty(e.getMessage()) ? e.toString() : e.getMessage());
 			} finally {
 				Closeables.closeQuietly(out); // flushes too
 			}

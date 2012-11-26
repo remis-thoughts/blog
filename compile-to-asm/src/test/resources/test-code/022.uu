@@ -1,0 +1,6 @@
+a = malloc(8);
+@a = 20;
+@a = +(@(a), 2);
+ret = @(a);
+free(a);
+return ret;
