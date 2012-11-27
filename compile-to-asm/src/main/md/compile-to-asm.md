@@ -504,7 +504,8 @@ StorableValue resolveVar(String text) {
   return params.containsKey(v) ? params.get(v) : v;
 }
 @Variable Members@ +=
-public boolean equals(Object o) { return o instanceof Variable && ((Variable)o).name.equals(name);}
+public boolean equals(Object o) { return o instanceof Variable && ((Variable)o).name.equals(name); }
+public int hashCode() { return name.hashCode(); }
 public int compareTo(Variable o) { return name.compareTo(o.name); }
 ~~~~
 
@@ -652,14 +653,14 @@ Memory stuff. Need _MemoryAddress_ interface as we can't have x86 instructions l
 
 ~~~~
 @Static Classes@ +=
-private interface MemoryAddress {}
-private static final class AtAddress implements StorableValue, Resolvable {
+static final class AtAddress implements StorableValue, Resolvable {
   final StorableValue at;
   AtAddress(StorableValue at) { this.at = at; }
   public String toString() { @At Address x86 Code@ }
   public boolean equals(Object o) {
   	return o instanceof AtAddress && ((AtAddress)o).at.equals(at);
   }
+  public int hashCode() { return at.hashCode(); }
   @At Address Members@
 }
 private static final class AtLabel implements StorableValue {
@@ -672,7 +673,7 @@ StorableValue val = getAsStorableValue(get(t, 1, 0), state);
 if(val instanceof Label)
   return new AtLabel((Label)val);
 else if(val instanceof Variable)
-  return new AtAddress((Variable)val);
+  return new AtAddress(val);
 else {
   Variable ret = new Variable();
   state.code.add(move(val, ret));
@@ -802,12 +803,12 @@ Which variables are used in any of the instructions following this node? We can'
 BitSet varsReadNext = new BitSet(), varsWrittenNext = new BitSet();
 @Variables Used At Next Instruction@ +=
 for(int i = 0; i < code.size(); ++i )
-  for(Variable variable : filter(code.get(i).readsFrom(), Variable.class))
+  for(Variable variable : code.get(i).readsFrom(Variable.class))
     varsReadNext.set(prevNode[i] * variables.length + indexOf(variables, variable));
 for(Entry<Integer, Collection<Integer>> next : instructionsFollowingNode.asMap().entrySet()) { // not empty
-  Set<Variable> varsSet = Sets.newTreeSet(Arrays.asList(variables)); 
+  Set<Variable> varsSet = Sets.newHashSet(variables); 
   for(int i : next.getValue())
-    varsSet.retainAll(Sets.newTreeSet(filter(code.get(i).willWriteTo(), Variable.class)));
+    varsSet.retainAll(code.get(i).willWriteTo(Variable.class));
   for(Variable variable : varsSet)
     varsWrittenNext.set(next.getKey() * variables.length + indexOf(variables, variable));
 }
@@ -828,21 +829,20 @@ Data dependencies - will let us calculate liveness. Can write to is a subset (bu
 
 ~~~~
 @Instruction Members@ +=
-Set<Value> readsFrom() { return Collections.emptySet(); }
-Set<StorableValue> canWriteTo() {  return Collections.emptySet(); }
-Set<StorableValue> willWriteTo() { return Collections.emptySet(); }
-<E> Set<E> uses(Class<E> c) { 
-  return ImmutableSet.copyOf(filter(concat(readsFrom(), canWriteTo()), c)); 
-}
+<VAL> Set<VAL> readsFrom(Class<VAL> c) { return Collections.emptySet(); }
+<VAL> Set<VAL> willWriteTo(Class<VAL> c) { return Collections.emptySet(); }
+<VAL> Set<VAL> uses(Class<VAL> c) { return Collections.emptySet(); }
 @BinaryOp Members@ +=
-Set<Value> readsFrom() { return ImmutableSet.of(arg1, arg2); }
-Set<StorableValue> canWriteTo() {  return ImmutableSet.of(arg2); }
-Set<StorableValue> willWriteTo() { return canWriteTo(); }
+<VAL> Set<VAL> readsFrom(Class<VAL> c) { return setOf(c, arg1, arg2); }
+<VAL> Set<VAL> willWriteTo(Class<VAL> c) { return setOf(c, arg2); }
+<VAL> Set<VAL> uses(Class<VAL> c) { return setOf(c, arg1, arg2); }
 @Move Members@ +=
-Set<Value> readsFrom() { return ImmutableSet.of(from); }
-Set<StorableValue> canWriteTo() { return ImmutableSet.of(to); }
-Set<StorableValue> willWriteTo() { 
-  return cond == null ? ImmutableSet.of(to) : Collections.<StorableValue>emptySet(); 
+<VAL> Set<VAL> readsFrom(Class<VAL> c) { return setOf(c, from); }
+<VAL> Set<VAL> willWriteTo(Class<VAL> c) { return cond == null ? setOf(c, to) : setOf(c); }
+<VAL> Set<VAL> uses(Class<VAL> c) { return setOf(c, from, to); }
+@Other Helpers@ +=
+private static <VAL> Set<VAL> setOf(Class<VAL> c, Object... objs) {
+  return ImmutableSet.copyOf(filter(Arrays.asList(objs), c));
 }
 ~~~~
 
@@ -852,11 +852,10 @@ We need to know all the variables we'll ever need to assign
 @Get Variables Used@ +=
 Set<Variable> allVariables = Sets.newTreeSet();
 for(Instruction i : code) {
-  addAll(allVariables, filter(i.readsFrom(), Variable.class));
-  addAll(allVariables, filter(i.canWriteTo(), Variable.class));
+  addAll(allVariables, i.uses(Variable.class));
 }
 if(allVariables.isEmpty()) { @No Stack Variables@ return code; }
-Variable[] variables = allVariables.toArray(new Variable[allVariables.size()]);
+Variable[] variables = toArray(allVariables, Variable.class);
 ~~~~
 
 Liveness...as a BitSet. A variable is not live at the node before the instruction where it's created and is not live at the node after the instruction where it's last read.
@@ -998,8 +997,8 @@ for (int n = 0; n < numNodes; ++n) {
   || instr.uses(Variable.class).size() != 2 
   || ((Move)instr).cond != null) 
     continue;
-  int reads = indexOf(variables, getOnlyElement(instr.readsFrom()));
-  int writes = indexOf(variables, getOnlyElement(instr.willWriteTo()));
+  int reads = indexOf(variables, getOnlyElement(instr.readsFrom(Variable.class)));
+  int writes = indexOf(variables, getOnlyElement(instr.willWriteTo(Variable.class)));
   if(isLiveAt(reads, nextNode[i]) || isLiveAt(writes, n)) continue;
   aliasingVars.putAll(n, Arrays.asList(reads, writes));
 }
@@ -1181,30 +1180,26 @@ Now we know where to put variables, we can update the instructions. We'll make t
 Instruction resolve(Variable var, Register reg) { return this; }
 @BinaryOp Members@ +=
 Instruction resolve(Variable var, Register reg) { 
-  return op.with(Compiler.resolve(arg1, var, reg), Compiler.resolve(arg2, var, reg)); 
+  return op.with(resolve(arg1, var, reg), resolve(arg2, var, reg)); 
 }
 @Move Members@ +=
 Instruction resolve(Variable var, Register reg) {
-  return new Move(Compiler.resolve(from, var, reg), Compiler.resolve(to, var, reg), cond); 
+  return new Move(resolve(from, var, reg), resolve(to, var, reg), cond); 
 }
 ~~~~
 
 ~~~~
 @Static Classes@ +=
 interface Resolvable {
-  StorableValue resolve(Register reg);
+  StorableValue resolve(Variable var, Register reg);
 }
 @At Address Members@ +=
-public StorableValue resolve(Register reg) { 
-  return new AtAddress(reg); 
-}
+public StorableValue resolve(Variable var, Register reg) { return at.equals(var) ? new AtAddress(reg) : this; }
 @Variable Members@ += 
-public StorableValue resolve(Register reg) { 
-  return reg; 
-}
-@Other Helpers@ +=
-private static <E> E resolve(E from, Variable var, Register reg) {
-  return from instanceof Resolvable && from.equals(var) ? (E)((Resolvable)from).resolve(reg) : from;
+public StorableValue resolve(Variable var, Register reg) { return equals(var) ? reg : this; }
+@Instruction Members@ +=
+protected <E> E resolve(E from, Variable var, Register reg) {
+  return from instanceof Resolvable ? (E) ((Resolvable) from).resolve(var, reg) : from;
 }
 ~~~~
 
@@ -1217,7 +1212,6 @@ for(int i = 0; i < code.size(); ++i)
     int v = indexOf(variables, variable);
     for (Register r : Register.ASSIGNABLE)
       if(allocation.column(VAR_IN_REG_AT_INSTR, v, r.ordinal(), controlFlow.prevNode[i]).getValue() > 0.5) { // huge tolerance for 0-1 integer
-
         code.set(i, code.get(i).resolve(variable, r)); break;
       }
   } 
