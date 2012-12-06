@@ -1,7 +1,6 @@
 package com.blogspot.remisthoughts.compiletoasm;
 
 import static com.blogspot.remisthoughts.compiletoasm.Compiler.move;
-import static org.junit.Assert.*;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 
@@ -22,7 +21,7 @@ import com.google.common.collect.Lists;
 public class LivenessTest {
 	@Test
 	public void testcfg() throws Exception {
-		Variable[] vars = {new Variable("a"), new Variable("b")};
+		Variable[] vars = { new Variable("a"), new Variable("b") };
 		List<Instruction> code = Lists.newArrayList(
 				move(Register.rax, vars[0]),
 				move(Register.rbx, vars[1]),
@@ -30,7 +29,7 @@ public class LivenessTest {
 				move(vars[1], Register.rax),
 				Compiler.ret);
 
-		ControlFlowGraph cfg = new ControlFlowGraph(vars, code);
+		ControlFlowGraph cfg = new ControlFlowGraph(code);
 
 		// vars[0]: "a"
 		assertFalse(cfg.isLiveAt(0, 0));
@@ -54,7 +53,7 @@ public class LivenessTest {
 	 */
 	@Test
 	public void testOverlapping() throws Exception {
-		Variable[] vars = {new Variable("a"), new Variable("b")};
+		Variable[] vars = { new Variable("a"), new Variable("b") };
 		List<Instruction> code = Lists.newArrayList(
 				move(new Immediate(2), vars[0]), // mov 2, a
 				move(vars[0], vars[1]), // mov a, b
@@ -63,7 +62,7 @@ public class LivenessTest {
 				move(vars[0], Register.rax), // mov a, %rax
 				Compiler.ret);
 
-		ControlFlowGraph cfg = new ControlFlowGraph(vars, code);
+		ControlFlowGraph cfg = new ControlFlowGraph(code);
 
 		// vars[0]: "a"
 		assertFalse(cfg.isLiveAt(0, 0));
@@ -83,23 +82,23 @@ public class LivenessTest {
 		assertFalse(cfg.isLiveAt(1, 6));
 		assertFalse(cfg.isLiveAt(1, 1));
 	}
-	
+
 	/**
 	 * x = >(2, 3)
 	 */
 	@Test
 	public void testConditionalMoves() throws Exception {
-		Variable[] vars = {new Variable("x"), new Variable("zero"),  new Variable("ret")};
+		Variable[] vars = { new Variable("x"), new Variable("zero"), new Variable("ret") };
 		List<Instruction> code = Lists.newArrayList(
 				move(new Immediate(2), vars[0]), // mov 2, a
 				Op.cmpq.with(new Immediate(3), vars[0]), // cmp 3, a
 				move(new Immediate(1), vars[2]), // mov 1, ret
 				move(new Immediate(0), vars[1]), // mov 0, zero
 				new Move(vars[1], vars[2], Condition.b), // cmovb zero, ret
-				move(vars[2], Register.rax), 
+				move(vars[2], Register.rax),
 				Compiler.ret);
 
-		ControlFlowGraph cfg = new ControlFlowGraph(vars, code);
+		ControlFlowGraph cfg = new ControlFlowGraph(code);
 
 		// vars[0]: "x"
 		assertFalse(cfg.isLiveAt(0, 0));
@@ -118,7 +117,7 @@ public class LivenessTest {
 		assertTrue(cfg.isLiveAt(1, 5));
 		assertFalse(cfg.isLiveAt(1, 6));
 		assertFalse(cfg.isLiveAt(1, 1));
-		
+
 		// vars[2]: "ret"
 		assertFalse(cfg.isLiveAt(2, 0));
 		assertFalse(cfg.isLiveAt(2, 2));

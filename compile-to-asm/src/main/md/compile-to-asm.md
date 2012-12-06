@@ -206,11 +206,11 @@ enum Register implements StorableValue {
   rbp /*frame pointer*/, rsi, rdi, r8, r9, 
   r10, r11, r12, r13, r14, r15, THESTACK;
   public String toString() { return String.format("%%%s", name()); }
-  private static final Register[] ASSIGNABLE = { 
+  static final Register[] ASSIGNABLE = { 
     rax, rbx, rcx, rdx, rbp, rsi, rdi, r8, r9, r10, r11, r12, r13, r14, r15, THESTACK 
   };
-  private static final Register[] CALLEE_SAVES = { rbx, rbp, r12, r13, r14, r15 };
-  private static final Register[] PARAMETERS = { rdi, rsi, rdx, rcx, r8, r9 };
+  static final Register[] CALLEE_SAVES = { rbx, rbp, r12, r13, r14, r15 };
+  static final Register[] PARAMETERS = { rdi, rsi, rdx, rcx, r8, r9 };
 }
 ~~~~
 
@@ -240,7 +240,7 @@ Instruction callFn(String text) {
   return new Call(declaredVars.contains(fnName) ? fnName : new Label("_" + text));
 }
 @Instruction Classes@ +=
-private static final class Call extends Instruction {
+static final class Call extends Instruction {
   final Value name;
   Call(Value name) { this.name = name; }
   public String toString() { @Call x86 Code@ }
@@ -280,6 +280,8 @@ if(type(statement, 0) == Global) {
   Label label = new Label(text(statement, 0));
   to = new AtLabel(label); // must be at least one Deref
   @Shortcut For Global Initialisation@
+  if(!state.program.globals.containsKey(label))
+    state.program.globals.put(label, new Immediate(0));
 } else {
   Variable var = new Variable(text(statement, 0));
   to = numDerefs > 0 ? new AtAddress(var) : var;
@@ -294,7 +296,7 @@ if(numDerefs == 1
 && expr instanceof Immediate 
 && !state.program.globals.containsKey(label)) {
   state.program.globals.put(label, (Immediate)expr); continue;
-}
+} 
 ~~~~
 
 Built-ins: one symbol corresponds to an assembly instruction. We'll assume they only have two 
@@ -384,16 +386,16 @@ What if they're anonymous? Need "_" for C linkage
 @Get Function Name@ +=
 myName = hasChildren(def, 0) ? new Label("_" + text(def, 0, 0)) : new Label();
 code.add(new Definition(myName, hasChildren(def, 0) && type(def, 0, 0) == Global));
-@Is This The Main Function@
 ~~~~
 
 ~~~~
 @Other Helpers@ +=
-private static Label parseDefinition(Tree def, ProgramState program) {
+static Label parseDefinition(Tree def, ProgramState program) {
   ParsingState state = new ParsingState(def, program);  
   parseStatements(children(def, 2), state);
   if(getLast(state.code) != ret) { @Returning From Function@ } 
-  @After Function Defined@
+  @Do Register Allocation@
+  @Is This The Main Function@
   return state.myName;
 }
 ~~~~
@@ -473,7 +475,6 @@ for(Register r : Register.CALLEE_SAVES)
 @Returning From Function@ +=
 for(Register r : Register.CALLEE_SAVES)
   state.code.add(move(new Variable(CALLEE_SAVE_VAR + r), r));
-@Are We Returning From The Main Function@
 state.code.add(Compiler.ret);
 @Other Helpers@ +=
 private static final String CALLEE_SAVE_VAR = "save!";
@@ -492,7 +493,7 @@ for(Tree param : children(def, 1)) {
     params.put(v, new Parameter(number++ - Register.PARAMETERS.length));
 }
 @Static Classes@ +=
-private static final class Parameter implements StorableValue {
+static final class Parameter implements StorableValue {
   final int number; // 0..n-1
   Parameter(int number) { this.number = number; }
   public String toString() { @Parameter x86 Code@ }
@@ -612,17 +613,14 @@ rsp            0x7fff5fbff858   0x7fff5fbff858
 However, when we return from main we should restore the original _rsp_ (regardless of its alignment) otherwise we'll segfault.
 
 ~~~~
-@Parsing State Members@ +=
-boolean isMainFn() {
-  return myName.name.equals("_main");
-}
 @Is This The Main Function@ +=
-if(isMainFn()) {
-  code.add(new Push(rsp));
-  code.add(Op.andq.with(new Immediate(0xFFFFFFFFFFFFFFF0L), rsp));
+if(state.myName.name.equals("_main")) {
+  state.code.addAll(1, Arrays.asList(
+    new Push(rsp),
+    Op.andq.with(new Immediate(0xFFFFFFFFFFFFFFF0L), rsp)));
+  for(int i = 0; i < state.code.size(); ++i)
+    if(state.code.get(i) == ret) state.code.add(i++, new Pop(rsp));
 }
-@Are We Returning From The Main Function@ +=
-if(state.isMainFn()) state.code.add(new Pop(rsp));
 @Instruction Classes@ +=
 private static final class Push extends Instruction {
   final Value value;
@@ -687,21 +685,23 @@ We'll do this function-by-function
 http://www.xypron.de/projects/linopt/apidocs/index.html (the paper)[http://grothoff.org/christian/lcpc2006.pdf]
 
 ~~~~
-@After Function Defined@ +=
-state.code = registerAllocation(state.code);
+@Do Register Allocation@ +=
+ControlFlowGraph controlFlow = new ControlFlowGraph(state.code);
+if(controlFlow.variables.length > 0) {
+  @Solve@
+}
 @Other Helpers@ +=
-static List<Instruction> registerAllocation(final List<Instruction> code) {
-  @Get Variables Used@
-  @Build Control Flow Graph@
-  @LP Initialisation@
+static Problem getLPproblem(ControlFlowGraph controlFlow, List<Instruction> code) {
+  Problem allocation = new Problem();
   @Set Up Columns@
   @Set Up Objective@
   @Set Up Constraints@
-  @Solve@
+  return allocation;
+}
+static void copySolutionIntoCode(Problem allocation, ControlFlowGraph controlFlow, List<Instruction> code) {
   @Copy Solution Into Code@
   @Insert Stack Moves@
-  @After Register Allocation@
-  return code;
+  @Allocate Stack Space For Variables@
 }
 ~~~~
 
@@ -728,8 +728,8 @@ We need two separate bits of information from this graph; how the nodes relate t
 @Other Helpers@ +=
 static final class ControlFlowGraph {
   @Control Flow Graph Members@
-  ControlFlowGraph(Variable[] variables, List<Instruction> code) {
-    @Store Number Of Variables@
+  ControlFlowGraph(List<Instruction> code) {
+    @Get Variables Used@
     @Fit Instructions Between Nodes@
     @Map Nodes To Instructions@
     @Join Nodes Together@
@@ -739,8 +739,6 @@ static final class ControlFlowGraph {
     @Mark Aliased Variables@
   }
 }
-@Build Control Flow Graph@ +=
-ControlFlowGraph controlFlow = new ControlFlowGraph(variables, code);
 ~~~~
 
 Firstly: how nodes relate to the graph. This will create new nodes (i.e. increment _highestNode_) as needed. It's important we check both branches, as even though we'll only set our next node once (even if we branch) we want to make sure every node has a previous node set.
@@ -803,12 +801,12 @@ Which variables are used in any of the instructions following this node? We can'
 BitSet varsReadNext = new BitSet(), varsWrittenNext = new BitSet();
 @Variables Used At Next Instruction@ +=
 for(int i = 0; i < code.size(); ++i )
-  for(Variable variable : code.get(i).readsFrom(Variable.class))
+  for(Variable variable : code.get(i).readsFrom())
     varsReadNext.set(prevNode[i] * variables.length + indexOf(variables, variable));
 for(Entry<Integer, Collection<Integer>> next : instructionsFollowingNode.asMap().entrySet()) { // not empty
   Set<Variable> varsSet = Sets.newHashSet(variables); 
   for(int i : next.getValue())
-    varsSet.retainAll(code.get(i).willWriteTo(Variable.class));
+    varsSet.retainAll(code.get(i).willWriteTo());
   for(Variable variable : varsSet)
     varsWrittenNext.set(next.getKey() * variables.length + indexOf(variables, variable));
 }
@@ -829,21 +827,33 @@ Data dependencies - will let us calculate liveness. Can write to is a subset (bu
 
 ~~~~
 @Instruction Members@ +=
-<VAL> Set<VAL> readsFrom(Class<VAL> c) { return Collections.emptySet(); }
-<VAL> Set<VAL> willWriteTo(Class<VAL> c) { return Collections.emptySet(); }
+Set<Variable> readsFrom() { return noVars; }
+Set<Variable> willWriteTo() { return noVars; }
 <VAL> Set<VAL> uses(Class<VAL> c) { return Collections.emptySet(); }
 @BinaryOp Members@ +=
-<VAL> Set<VAL> readsFrom(Class<VAL> c) { return setOf(c, arg1, arg2); }
-<VAL> Set<VAL> willWriteTo(Class<VAL> c) { return setOf(c, arg2); }
+Set<Variable> readsFrom() { return setOf(Variable.class, arg1, arg2); }
+Set<Variable> willWriteTo() { 
+  return arg2 instanceof Variable ? setOf(Variable.class, arg2) : noVars; 
+}
 <VAL> Set<VAL> uses(Class<VAL> c) { return setOf(c, arg1, arg2); }
 @Move Members@ +=
-<VAL> Set<VAL> readsFrom(Class<VAL> c) { return setOf(c, from); }
-<VAL> Set<VAL> willWriteTo(Class<VAL> c) { return cond == null ? setOf(c, to) : setOf(c); }
+Set<Variable> readsFrom() { 
+  return to instanceof AtAddress ? setOf(Variable.class, from, to) : setOf(Variable.class, from); 
+}
+Set<Variable> willWriteTo() {
+  return to instanceof Variable && cond == null ? setOf(Variable.class, to) : noVars; 
+}
 <VAL> Set<VAL> uses(Class<VAL> c) { return setOf(c, from, to); }
 @Other Helpers@ +=
 private static <VAL> Set<VAL> setOf(Class<VAL> c, Object... objs) {
-  return ImmutableSet.copyOf(filter(Arrays.asList(objs), c));
+  return ImmutableSet.copyOf(filter(transform(Arrays.asList(objs), unwrap), c));
 }
+private static Function<Object, Object> unwrap = new Function<Object, Object>() {
+  public Object apply(Object v) { 
+    return v instanceof AtAddress ? ((AtAddress)v).at : v;
+  }
+};
+private static final Set<Variable> noVars = Collections.emptySet();
 ~~~~
 
 We need to know all the variables we'll ever need to assign
@@ -854,8 +864,7 @@ Set<Variable> allVariables = Sets.newTreeSet();
 for(Instruction i : code) {
   addAll(allVariables, i.uses(Variable.class));
 }
-if(allVariables.isEmpty()) { @No Stack Variables@ return code; }
-Variable[] variables = toArray(allVariables, Variable.class);
+variables = toArray(allVariables, Variable.class);
 ~~~~
 
 Liveness...as a BitSet. A variable is not live at the node before the instruction where it's created and is not live at the node after the instruction where it's last read.
@@ -894,8 +903,6 @@ boolean needsAssigning(int variable, int node, Register r) {
   boolean ifUsedNotOnStack = !(isVarUsedNext(node, variable) && r == Register.THESTACK);
   return isLive && thisRegPreserved && ifUsedNotOnStack;
 }
-@Store Number Of Variables@ +=
-this.variables = variables; 
 @Other Helpers@ += 
 private static final BitSet calleeSavesRegisterIndices = new BitSet();
 static {
@@ -907,35 +914,30 @@ static {
 
 Now we can start setting up the problem. Note that some constraints refer to just the assignable registers, and others refer to our dummy register indicating the stack:
 
-~~~~
-@LP Initialisation@ += 
-Problem allocation = new Problem();
-~~~~ 
-
 The first (and most important) set of unknowns are the _VAR_IN_REG_AT_INSTR_ columns: which register each variable is in at each node in the control flow graph, assuming it's live. 
 
 ~~~~
 @Set Up Columns@ +=
-for (int v = 0; v < variables.length; ++v)
+for (int v = 0; v < controlFlow.variables.length; ++v)
   for(int n = 0; n < controlFlow.numNodes; ++n)
     for (Register r : Register.ASSIGNABLE)
       if(controlFlow.needsAssigning(v, n, r))
         allocation.column(VAR_IN_REG_AT_INSTR, v, r.ordinal(), n).type(ColumnType.BINARY);
 @Other Helpers@ +=
-private static final String VAR_IN_REG_AT_INSTR = "x";
+static final String VAR_IN_REG_AT_INSTR = "x";
 ~~~~
 
 The next set of unknowns are used to work out the cost of a given assignment. We'll use constraints to ensure that the _NEW_VAR_IN_REG_FLAG_ columns have a one for node _n_, register _r_ and variable _v_ if register _r_ had a different variable in before node _n_ and now has variable _v_ in, and in all other circumstances _NEW_VAR_IN_REG_FLAG_ is zero. This makes the variable an indicator of whether we've loaded a variable into a register from the stack, so it'll be an important part of the objective function (as we want to minimise stack usage).
 
 ~~~~
 @Set Up Columns@ +=
-for (int v = 0; v < variables.length; ++v)
+for (int v = 0; v < controlFlow.variables.length; ++v)
   for(int n = 0; n < controlFlow.numNodes; ++n)
     for (Register r : Register.ASSIGNABLE)
       if(controlFlow.needsAssigning(v, n, r))
         allocation.column(NEW_VAR_IN_REG_FLAG, v, r.ordinal(), n).type(ColumnType.BINARY);
 @Other Helpers@ +=
-private static final String NEW_VAR_IN_REG_FLAG = "c";
+static final String NEW_VAR_IN_REG_FLAG = "c";
 ~~~~
 
 The cost of register access, _mu_ in (the paper)[http://grothoff.org/christian/lcpc2006.pdf], can be a function of the register and the instruction. This gives us the option of discouraging moves in frequently-used instructions (such as those in the body of a loop). Note that we don't check for liveness here as we don't even think about preserving a non-live variable.
@@ -969,7 +971,7 @@ The objective: minimise spillage at each node.
 @Set Up Objective@ +=
 allocation.objective("spillage", Direction.MINIMIZE);
 @Minimise Number Of Spills@
-for (int v = 0; v < variables.length; ++v)
+for (int v = 0; v < controlFlow.variables.length; ++v)
   for (int n = 0; n < controlFlow.numNodes; ++n)
     for (Register r : Register.ASSIGNABLE)
       if(controlFlow.needsAssigning(v, n, r))
@@ -979,7 +981,7 @@ for (int v = 0; v < variables.length; ++v)
 
 ~~~~
 @Minimise Number Of Spills@ +=
-for (int v = 0; v < variables.length; ++v)
+for (int v = 0; v < controlFlow.variables.length; ++v)
   for (int n = 0; n < controlFlow.numNodes; ++n)
     if(controlFlow.needsAssigning(v, n, Register.THESTACK))
       allocation.objective().add(spillCost(v, n, controlFlow), VAR_IN_REG_AT_INSTR, v, Register.THESTACK.ordinal(), n);
@@ -993,12 +995,13 @@ for (int n = 0; n < numNodes; ++n) {
   Collection<Integer> instrsAfter = instructionsFollowingNode.get(n);
   if(instrsAfter.size() != 1) continue;
   int i = getOnlyElement(instrsAfter); Instruction instr = code.get(i); 
-  if(!(instr instanceof Move) 
-  || instr.uses(Variable.class).size() != 2 
-  || ((Move)instr).cond != null) 
-    continue;
-  int reads = indexOf(variables, getOnlyElement(instr.readsFrom(Variable.class)));
-  int writes = indexOf(variables, getOnlyElement(instr.willWriteTo(Variable.class)));
+  if(!(instr instanceof Move)) continue;
+  Move move = (Move) instr;
+  if(move.uses(Variable.class).size() != 2) continue; 
+  if(move.cond != null) continue;
+  if(instr.readsFrom().size() == 2) continue; // reg->mem
+  int reads = indexOf(variables, getOnlyElement(instr.readsFrom()));
+  int writes = indexOf(variables, getOnlyElement(instr.willWriteTo()));
   if(isLiveAt(reads, nextNode[i]) || isLiveAt(writes, n)) continue;
   aliasingVars.putAll(n, Arrays.asList(reads, writes));
 }
@@ -1024,8 +1027,8 @@ for(int i = 0; i < code.size(); ++i) {
   for(Variable v : code.get(i).uses(Variable.class))
     for(Register r : code.get(i).uses(Register.class))
       for(int n : controlFlow.nodesAround(i)) 
-        if(controlFlow.needsAssigning(indexOf(variables, v), n, r))
-          allocation.objective().add(MOVE_NOP_HINT, VAR_IN_REG_AT_INSTR, indexOf(variables, v), r.ordinal(), n);
+        if(controlFlow.needsAssigning(indexOf(controlFlow.variables, v), n, r))
+          allocation.objective().add(MOVE_NOP_HINT, VAR_IN_REG_AT_INSTR, indexOf(controlFlow.variables, v), r.ordinal(), n);
 }
 @Other Helpers@ +=
 private static final double MOVE_NOP_HINT = -0.5;
@@ -1094,13 +1097,13 @@ for (int n = 0; n < controlFlow.numNodes; ++n) {
     if(r != Register.THESTACK)
       if(controlFlow.aliasingVars.containsKey(n)) {
         for(int avoid : controlFlow.aliasingVars.get(n))
-          for (int v = 0; v < variables.length; ++v)
+          for (int v = 0; v < controlFlow.variables.length; ++v)
             if(v != avoid && controlFlow.needsAssigning(v, n, r))
               allocation.row(ONE_VAR_PER_REG, r.ordinal(), n, avoid)
                 .bounds(0.0, 1.0)
                 .add(1.0, VAR_IN_REG_AT_INSTR, v, r.ordinal(), n);
       } else {
-        for (int v = 0; v < variables.length; ++v)
+        for (int v = 0; v < controlFlow.variables.length; ++v)
           if(controlFlow.needsAssigning(v, n, r))
             allocation.row(ONE_VAR_PER_REG, r.ordinal(), n)
               .bounds(0.0, 1.0)
@@ -1115,7 +1118,7 @@ Constraint: variables must not be lost; they must be in either the stack or exac
 
 ~~~~
 @Set Up Constraints@ +=
-for (int v = 0; v < variables.length; ++v)
+for (int v = 0; v < controlFlow.variables.length; ++v)
   for (int n = 0; n < controlFlow.numNodes; ++n)
     for (Register r : Register.ASSIGNABLE)
       if(controlFlow.needsAssigning(v, n, r))
@@ -1126,37 +1129,63 @@ for (int v = 0; v < variables.length; ++v)
 private static final String VARS_NOT_LOST = "vars_not_lost";
 ~~~~
 
-The last pair of constraints ensure that the _NEW_VAR_IN_REG_FLAG_ works as we want. What's the -1 for?
+The last pair of constraints ensure that the _NEW_VAR_IN_REG_FLAG_ works as we want. Note that we set the constraints in pairs of nodes, at least one of which _needsAssigning_. We have to overhang (i.e. we don't only add constraints if both nodes _needsAssigning_) as if we don't we'll miss some constraints on the border, and so the flag will be undefined. A NEW_VAR_IN_REG_FLAG value of 1 means the variable just arrived in this register from somewhere. 
 
 ~~~~
 @Set Up Constraints@ +=
-for (int v = 0; v < variables.length; ++v)
+for (int v = 0; v < controlFlow.variables.length; ++v)
   for (Register r : Register.ASSIGNABLE)
     for(Entry<Integer, Integer> n : controlFlow.nextNodes.entries()) {
-      if(!controlFlow.needsAssigning(v, n.getKey(), r) 
-      || !controlFlow.needsAssigning(v, n.getValue(), r)) 
-        continue;
-      allocation.
-        row(FLAG_SET_CORRECTLY, v, r.ordinal(), n.getKey(), n.getValue()).
-        bounds(0.0, null).
-        add( 1.0, VAR_IN_REG_AT_INSTR, v, r.ordinal(), n.getValue()).
-        add(-1.0, VAR_IN_REG_AT_INSTR, v, r.ordinal(), n.getKey()).
-        add( 1.0, NEW_VAR_IN_REG_FLAG, v, r.ordinal(), n.getValue());
-      allocation.
-        row(FLAG_SET_CORRECTLY, v, r.ordinal(), n.getValue()-1, n.getKey()).
-        bounds(0.0, null).
-        add(-1.0, VAR_IN_REG_AT_INSTR, v, r.ordinal(), n.getValue()).
-        add( 1.0, VAR_IN_REG_AT_INSTR, v, r.ordinal(), n.getKey()).
-        add( 1.0, NEW_VAR_IN_REG_FLAG, v, r.ordinal(), n.getValue());
+      if(controlFlow.needsAssigning(v, n.getKey(), r)
+      && controlFlow.needsAssigning(v, n.getValue(), r)) 
+        { @Add Constraints If Both Nodes Are Relevant@ }
+      else if(controlFlow.needsAssigning(v, n.getValue(), r))
+        { @Force When Variable First Live@ }
+      else if(controlFlow.needsAssigning(v, n.getKey(), r))
+        { @Force When Variable Dies@ }
     }
 @Other Helpers@ +=
 private static final String FLAG_SET_CORRECTLY = "var_in_reg_flag";
 ~~~~
 
 ~~~~
+@Add Constraints If Both Nodes Are Relevant@ +=
+allocation. // if R(n-1) = 1 then F(n) = 0
+  row(FLAG_SET_CORRECTLY, v, r.ordinal(), n.getKey(), n.getValue(), 0).
+  bounds(null, 1d).
+  add(1.0, VAR_IN_REG_AT_INSTR, v, r.ordinal(), n.getKey()).
+  add(1.0, NEW_VAR_IN_REG_FLAG, v, r.ordinal(), n.getValue());
+allocation. // if R(n) = 0 then F(n) = 0
+  row(FLAG_SET_CORRECTLY, v, r.ordinal(), n.getValue(), n.getKey(), 1).
+  bounds(0.0, null).
+  add( 1.0, VAR_IN_REG_AT_INSTR, v, r.ordinal(), n.getValue()).
+  add(-1.0, NEW_VAR_IN_REG_FLAG, v, r.ordinal(), n.getValue());
+allocation. // if R(n-1) - R(n) + F(n) >= 0 so when R(n) = 1 and R(n-1) = 0 then F(n) must be 1
+  row(FLAG_SET_CORRECTLY, v, r.ordinal(), n.getValue(), n.getKey(), 2).
+  bounds(0.0, null).
+  add( 1.0, VAR_IN_REG_AT_INSTR, v, r.ordinal(), n.getKey()).
+  add(-1.0, VAR_IN_REG_AT_INSTR, v, r.ordinal(), n.getValue()).
+  add( 1.0, NEW_VAR_IN_REG_FLAG, v, r.ordinal(), n.getValue());
+@Force When Variable First Live@ +=
+boolean setToOne = controlFlow.isLiveAt(v, n.getKey()) || r == Register.THESTACK;
+allocation.
+  row(FLAG_SET_CORRECTLY, v, r.ordinal(), n.getKey(), n.getValue()).
+  bounds(0d, 0d).
+  add(setToOne ? -1.0 : 0.0, VAR_IN_REG_AT_INSTR, v, r.ordinal(), n.getValue()).
+  add(1.0, NEW_VAR_IN_REG_FLAG, v, r.ordinal(), n.getValue());
+@Force When Variable Dies@ +=
+allocation.
+  row(FLAG_SET_CORRECTLY, v, r.ordinal(), n.getKey(), n.getValue()).
+  bounds(0d, 0d).
+  add(1.0, NEW_VAR_IN_REG_FLAG, v, r.ordinal(), n.getKey());
+~~~~
+
+~~~~
 @Solve@ +=
+Problem allocation = getLPproblem(controlFlow, state.code);
 if (!solver.solve(allocation))
   throw new IllegalStateException();
+copySolutionIntoCode(allocation, controlFlow, state.code);
 @Other Helpers@ +=
 private static final Solver solver = new SolverGlpk();
 ~~~~
@@ -1165,7 +1194,7 @@ We know which register each variable is in at each node now (assuming it's live)
 
 ~~~~
 @Other Helpers@ +=
-private static Register whereAmI(Problem allocation, int v, int n) {
+static Register whereAmI(Problem allocation, int v, int n) {
   for(Register r : Register.ASSIGNABLE)
     if(allocation.column(VAR_IN_REG_AT_INSTR, v, r.ordinal(), n).getValue() > 0.5)
         return r;
@@ -1209,7 +1238,7 @@ We'll iterate through the linear programming solution and resolve variables as n
 @Copy Solution Into Code@ +=
 for(int i = 0; i < code.size(); ++i)
   for(Variable variable : code.get(i).uses(Variable.class)) {
-    int v = indexOf(variables, variable);
+    int v = indexOf(controlFlow.variables, variable);
     for (Register r : Register.ASSIGNABLE)
       if(allocation.column(VAR_IN_REG_AT_INSTR, v, r.ordinal(), controlFlow.prevNode[i]).getValue() > 0.5) { // huge tolerance for 0-1 integer
         code.set(i, code.get(i).resolve(variable, r)); break;
@@ -1219,8 +1248,6 @@ for(int i = 0; i < code.size(); ++i)
 The stack. We'll keep it sorted so it has a predicable order (?)
 
 ~~~~
-@LP Initialisation@ +=
-List<Integer> stackVars = Lists.newArrayList();
 @Value Classes@ +=
 static final class StackVar implements StorableValue {
   final int var;
@@ -1237,17 +1264,35 @@ static final class StackVar implements StorableValue {
 Multimap<Integer, Instruction> 
   stackMovesBefore = HashMultimap.create(), 
   stackMovesAfter = HashMultimap.create();
-for (int v = 0; v < variables.length; ++v)
+List<Integer> stackVars = Lists.newArrayList();
+for (int v = 0; v < controlFlow.variables.length; ++v)
   for (int n = 0; n < controlFlow.numNodes; ++n)
-    if(controlFlow.needsAssigning(v, n, Register.THESTACK))
-      if(allocation.column(NEW_VAR_IN_REG_FLAG, v, Register.THESTACK.ordinal(), n).getValue() > 0.5) // v has moved 
-        if(allocation.column(VAR_IN_REG_AT_INSTR, v, Register.THESTACK.ordinal(), n).getValue() > 0.5) // v now on stack
-          for(int i : controlFlow.instructionsBeforeNode.get(n))
-            stackMovesAfter.put(i, move(whereAmI(allocation, v, controlFlow.prevNode[i]), new StackVar(stackVars, v)));
-        else // v now in register
-          for(int i : controlFlow.instructionsFollowingNode.get(n))
-            stackMovesBefore.put(i, move(new StackVar(stackVars, v), whereAmI(allocation, v, n)));
+    for(Register r : Register.ASSIGNABLE)
+      if(allocation.column(NEW_VAR_IN_REG_FLAG, v, r.ordinal(), n).getValue() > 0.5) // v has moved
+        if(r == Register.THESTACK)
+          @V Now On Stack@
+        else
+          @V Now In Register@
 ~~~~
+
+The != _THESTACK_ check catches newly-initialised variables and dead variables (which are forced onto the stack).
+
+~~~~
+@V Now On Stack@ +=
+for(int i : controlFlow.instructionsBeforeNode.get(n))
+  stackMovesAfter.put(i, move(
+    whereAmI(allocation, v, controlFlow.prevNode[i]), 
+    new StackVar(stackVars, v)));
+~~~~
+
+~~~~
+@V Now In Register@ +=
+for(int i : controlFlow.instructionsFollowingNode.get(n))
+  stackMovesBefore.put(i, move(
+    new StackVar(stackVars, v), 
+    whereAmI(allocation, v, n)));
+~~~~
+
 
 Inserting is a bit tricky as the indices will change
 
@@ -1262,12 +1307,13 @@ for(int i : Sets.newTreeSet(Sets.union(stackMovesBefore.keySet(), stackMovesAfte
 }
 ~~~~
 
-Now we know how many local vars we need, we can reserve the appropriate amount of space
+Now we know how many local vars we need, we can reserve the appropriate amount of space. However, we must preserve 16-byte alignment when we're making function calls, so rather than rounding the stack pointer before every function call we'll just over-allocate 8 bytes of stack space.
 
 ~~~~
-@After Register Allocation@ +=
+@Allocate Stack Space For Variables@ +=
 if(!stackVars.isEmpty()) {
-  Value incr = new Immediate(8 * stackVars.size());
+  int numVars = stackVars.size();
+  Value incr = new Immediate(8 * (numVars % 2 == 1 ? ++numVars : numVars));
   code.add(1, Op.subq.with(incr, Register.rsp));
   for(int i = 0; i < code.size(); ++i)
     if(code.get(i) == ret) code.add(i++, Op.addq.with(incr, Register.rsp));
@@ -1466,7 +1512,7 @@ grammar Unsigned;
 
 ~~~~
 @Antlr Helpers@ +=
-private static Tree get(Tree from, int... indices){
+static Tree get(Tree from, int... indices){
   for(int index : indices) from = from.getChild(index);
   return from;
 }
@@ -1484,7 +1530,7 @@ Some array helpers (we do a lot of linear searching, but not enough to warrant s
 
 ~~~~
 @Other Helpers@ +=
-private static <T> int indexOf(T[] ts, T t) {
+static <T> int indexOf(T[] ts, T t) {
   return Arrays.asList(ts).indexOf(t);
 }
 /** @return true if any changes */
