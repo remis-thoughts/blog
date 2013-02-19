@@ -8,7 +8,7 @@ http://www.antlr.org/wiki/display/~admin/2008/11/30/Example+tree+rewriting+with+
 eval : ((statement SC) | fundef)+ -> ^(Root fundef* ^(Definition ^(Name Global["main"]) ^(Parameters) ^(Body statement*)));
 statement : funcall | ret | assign | whileloop | ifelse;
 expression : variable | Number | funcall;
-variable : Local | Global;
+variable : Local | Global | FFI;
 callable : variable| Intrinsic | Conditional | Deref | StackAlloc;
 assignable : variable | Deref assignable -> ^(Deref assignable);
 ret : Return expression -> ^(Return expression);
@@ -31,8 +31,9 @@ _Globals_ are going to end up in the exported symbols of the compiled binary, so
 LP : '('; RP : ')'; C : ','; SC : ';'; LB : '{'; RB : '}'; 
 Definition : 'fn'; Return : 'return'; Assign : '=';
 If : 'if'; Else : 'else'; While : 'while';
-Local : ('a'..'z') ('a'..'z'|'_'|'0'..'9')*;
-Global : ('A'..'Z'|'_') ('A'..'Z'|'_'|'0'..'9')*;
+Local : '_'* ('a'..'z') ('a'..'z'|'_'|'0'..'9')*;
+Global : '_'* ('A'..'Z') ('A'..'Z'|'_'|'0'..'9')*;
+FFI : '#' ('a'..'z'|'A'..'Z'|'0'..'9'|'_')+;
 Number : ('0'..'9')+;
 Intrinsic : '+' | '-' | '&' | '|'; Deref : '@'; StackAlloc : '$';
 Conditional : '<' | '>' | '\u2261' | '\u2260' | '\u2264' | '\u2265';
@@ -407,10 +408,13 @@ private Value getAsValue(Tree t) {
             { @Get A Global@ }
         case Local:
             return resolveVar(text(t));
+        case FFI:
+            return new Label(text(t).substring(1));
         case Call:
             switch(type(t, 0)) {
             	case Local:
             	case Global:
+            	case FFI:
 	            	{ call(t); @Keep the Return Value@ }
 	            case Intrinsic: 
 		            { @Parse An Intrinsic Call@ }

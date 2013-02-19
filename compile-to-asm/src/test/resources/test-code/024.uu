@@ -1,0 +1,5 @@
+if >(#_read,0) {
+  return 24;
+} else {
+  return 1;
+};
