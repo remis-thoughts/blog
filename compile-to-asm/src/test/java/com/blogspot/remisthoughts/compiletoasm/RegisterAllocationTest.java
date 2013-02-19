@@ -19,6 +19,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 
+import org.antlr.runtime.tree.CommonTree;
 import org.junit.Test;
 
 import com.blogspot.remisthoughts.compiletoasm.Compiler.AtAddress;
@@ -29,6 +30,8 @@ import com.blogspot.remisthoughts.compiletoasm.Compiler.Immediate;
 import com.blogspot.remisthoughts.compiletoasm.Compiler.Instruction;
 import com.blogspot.remisthoughts.compiletoasm.Compiler.Label;
 import com.blogspot.remisthoughts.compiletoasm.Compiler.Op;
+import com.blogspot.remisthoughts.compiletoasm.Compiler.ParsingState;
+import com.blogspot.remisthoughts.compiletoasm.Compiler.ProgramState;
 import com.blogspot.remisthoughts.compiletoasm.Compiler.Register;
 import com.blogspot.remisthoughts.compiletoasm.Compiler.Variable;
 import com.google.common.base.Joiner;
@@ -104,7 +107,7 @@ public class RegisterAllocationTest {
 		 */
 		Variable a = new Variable("a"), ret = new Variable("ret"), var0 = new Variable("VAR0"), save_rbx = new Variable("save!%rbx"), save_rbp = new Variable("save!%rbp"), save_r12 = new Variable("save!%r12"), save_r13 = new Variable("save!%r13"), save_r14 = new Variable("save!%r14"), save_r15 = new Variable("save!%r15");
 		Immediate two = new Immediate(2), three = new Immediate(3);
-		AtAddress atA = new AtAddress(a);
+		AtAddress atA = new AtAddress(a, 0);
 
 		List<Instruction> code = Lists.newArrayList(
 				new Definition(new Label("_main"), false),
@@ -224,8 +227,10 @@ public class RegisterAllocationTest {
 	}
 
 	private static List<Instruction> afterSolve(List<Instruction> code, ControlFlowGraph cfg, Problem lpProblem) {
-		copySolutionIntoCode(lpProblem, cfg, code);
-		return Lists.newArrayList(Iterables.filter(code, Compiler.noNoOps));
+		ParsingState state = new ParsingState(new CommonTree(), new ProgramState());
+		state.code.addAll(code);
+		copySolutionIntoCode(lpProblem, cfg, state);
+		return Lists.newArrayList(Iterables.filter(state.code, Compiler.noNoOps));
 	}
 
 	private static Problem solve(ControlFlowGraph cfg, List<Instruction> code) {

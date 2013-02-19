@@ -7,6 +7,7 @@ import static org.junit.Assert.assertEquals;
 import java.util.Arrays;
 import java.util.List;
 
+import org.antlr.runtime.tree.CommonTree;
 import org.junit.Test;
 
 import com.blogspot.remisthoughts.compiletoasm.Compiler.AtAddress;
@@ -17,10 +18,14 @@ import com.blogspot.remisthoughts.compiletoasm.Compiler.Instruction;
 import com.blogspot.remisthoughts.compiletoasm.Compiler.Label;
 import com.blogspot.remisthoughts.compiletoasm.Compiler.Op;
 import com.blogspot.remisthoughts.compiletoasm.Compiler.Parameter;
+import com.blogspot.remisthoughts.compiletoasm.Compiler.ParsingState;
+import com.blogspot.remisthoughts.compiletoasm.Compiler.ProgramState;
 import com.blogspot.remisthoughts.compiletoasm.Compiler.Register;
 import com.blogspot.remisthoughts.compiletoasm.Compiler.Variable;
 
 public class AliasingTest {
+	private final ParsingState state = new ParsingState(new CommonTree(), new ProgramState());
+
 	@Test
 	public void testAliasing() throws Exception {
 		Variable a = new Variable("a");
@@ -56,10 +61,10 @@ public class AliasingTest {
 	@Test
 	public void testAliasingWithMemory1() throws Exception {
 		Variable a = new Variable("a");
-		AtAddress atA = new AtAddress(a);
+		AtAddress atA = new AtAddress(a, 0);
 		Variable b = new Variable("b");
 		Immediate one = new Immediate(1);
-		Parameter p = new Parameter(0);
+		Parameter p = new Parameter(state, 0);
 
 		/*
 		 * fn one_plus_one(a) { 
@@ -90,10 +95,10 @@ public class AliasingTest {
 	@Test
 	public void testAliasingWithMemory2() throws Exception {
 		Variable a = new Variable("a");
-		AtAddress atA = new AtAddress(a);
+		AtAddress atA = new AtAddress(a, 0);
 		Variable b = new Variable("b");
 		Immediate one = new Immediate(1);
-		Parameter p = new Parameter(0);
+		Parameter p = new Parameter(state, 0);
 
 		/*
 		 * fn one_plus_one(a) { 

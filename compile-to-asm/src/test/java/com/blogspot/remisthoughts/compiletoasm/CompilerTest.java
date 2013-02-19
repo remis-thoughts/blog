@@ -38,7 +38,7 @@ public class CompilerTest {
 		File folder = new File(Resources.getResource("test-code").getFile());
 		List<Object[]> ret = Lists.newArrayList();
 		for (File file : folder.listFiles()) {
-			ret.add(new Object[]{file});
+			ret.add(new Object[] { file });
 		}
 		return ret;
 	}
@@ -75,7 +75,7 @@ public class CompilerTest {
 				System.out.println(Files.toString(asmFile, Charsets.UTF_8));
 				print(System.out, gcc.getInputStream());
 				print(System.err, gcc.getErrorStream());
-				fail("gcc must compile successfully");
+				fail("gcc must compile " + src.getName() + " successfully");
 			}
 			System.out.println(asmFile.getAbsolutePath());
 			System.out.println(Files.toString(asmFile, Charsets.UTF_8));

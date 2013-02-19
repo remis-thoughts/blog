@@ -6,7 +6,7 @@ import java.util.List;
 
 import com.blogspot.remisthoughts.compiletoasm.Compiler.Instruction;
 import com.blogspot.remisthoughts.compiletoasm.Compiler.Move;
-import com.blogspot.remisthoughts.compiletoasm.Compiler.StackVar;
+import com.blogspot.remisthoughts.compiletoasm.Compiler.StaticStackVar;
 import com.blogspot.remisthoughts.compiletoasm.Compiler.Variable;
 
 public class TestUtils {
@@ -27,7 +27,7 @@ public class TestUtils {
 	private static int stackReads(List<Instruction> code) {
 		int ret = 0;
 		for (Instruction i : code) {
-			if (i instanceof Move && ((Move) i).from instanceof StackVar) {
+			if (i instanceof Move && ((Move) i).from instanceof StaticStackVar) {
 				++ret;
 			}
 		}
@@ -37,7 +37,7 @@ public class TestUtils {
 	private static int stackWrites(List<Instruction> code) {
 		int ret = 0;
 		for (Instruction i : code) {
-			if (i instanceof Move && ((Move) i).to instanceof StackVar) {
+			if (i instanceof Move && ((Move) i).to instanceof StaticStackVar) {
 				++ret;
 			}
 		}
