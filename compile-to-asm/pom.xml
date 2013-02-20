@@ -71,9 +71,9 @@
 			<scope>test</scope>
 		</dependency>
 		<dependency>
-			<groupId>de.xypron.linopt</groupId>
-			<artifactId>linopt</artifactId>
-			<version>1.3</version>
+			<groupId>org.gnu.glpk</groupId>
+			<artifactId>glpk-java</artifactId>
+			<version>1.0.21</version>
 		</dependency>
 	</dependencies>
 </project>

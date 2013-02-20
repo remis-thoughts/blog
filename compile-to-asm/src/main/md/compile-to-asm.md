@@ -7,10 +7,10 @@ http://www.antlr.org/wiki/display/~admin/2008/11/30/Example+tree+rewriting+with+
 @Antlr Parse Rules@ +=
 eval : ((statement SC) | fundef)+ -> ^(Root fundef* ^(Definition ^(Name Global["main"]) ^(Parameters) ^(Body statement*)));
 statement : funcall | ret | assign | whileloop | ifelse;
-expression : variable | Number | funcall;
-variable : Local | Global | FFI;
-callable : variable| Intrinsic | Conditional | Deref | StackAlloc;
-assignable : variable | Deref assignable -> ^(Deref assignable);
+expression : variable | Number | funcall | FFI;
+variable : Local | Global;
+callable : variable| Intrinsic | Conditional | Deref | StackAlloc | FFI;
+assignable : variable | Deref assignable -> ^(Deref assignable) | FFI;
 ret : Return expression -> ^(Return expression);
 assign : assignable Assign expression -> ^(Assign assignable expression);
 funcall : callable LP (expression (C expression)*)? RP -> ^(Call callable ^(Parameters expression*));
@@ -844,14 +844,14 @@ if(controlFlow.variables.length > 0) {
   @Solve@
 }
 @Other Helpers@ +=
-static Problem getLPproblem(ControlFlowGraph controlFlow, List<Instruction> code) {
-  Problem allocation = new Problem();
-  @Set Up Columns@
+static glp_prob getLPproblem(ControlFlowGraph controlFlow, List<Instruction> code) {
+  glp_prob allocation = glp_create_prob();
+  @Determine Rows And Columns@
   @Set Up Objective@
-  @Set Up Constraints@
+  @Finalise Problem@
   return allocation;
 }
-static void copySolutionIntoCode(Problem allocation, ControlFlowGraph controlFlow, ParsingState state) {
+static void copySolutionIntoCode(glp_prob allocation, ControlFlowGraph controlFlow, ParsingState state) {
   @Copy Solution Into Code@
   @Insert Stack Moves@
   @Allocate Stack Space For Variables@
@@ -890,6 +890,7 @@ static final class ControlFlowGraph {
     @Identify Function Calls@
     @Calculate Liveness@
     @Mark Aliased Variables@
+    @Generate GLPK Mappings@
   }
 }
 ~~~~
@@ -1070,37 +1071,93 @@ static {
 
 Now we can start setting up the problem. Note that some constraints refer to just the assignable registers, and others refer to our dummy register indicating the stack:
 
-The first (and most important) set of unknowns are the _VAR_IN_REG_AT_INSTR_ columns: which register each variable is in at each node in the control flow graph, assuming it's live. 
+~~~~
+@Other Helpers@ +=
+static abstract class CellKey implements Comparable<CellKey> {
+  final int v; final Register r; final int n;
+  CellKey(int v, Register r, int n) { 
+    this.v = v; this.n = n; this.r = r;
+  }
+  public int compareTo(CellKey o) {
+    return ComparisonChain.start().
+      compare(getClass().getName(), o.getClass().getName()).
+      compare(v, o.v).
+      compare(r, o.r).
+      compare(n, o.n).result();
+  }
+}
+private static final int NONE = -1;
+~~~~
+
+First: columns. They make up part of the objective function
 
 ~~~~
-@Set Up Columns@ +=
-for (int v = 0; v < controlFlow.variables.length; ++v)
-  for(int n = 0; n < controlFlow.numNodes; ++n)
-    for (Register r : Register.ASSIGNABLE)
-      if(controlFlow.needsAssigning(v, n, r))
-        allocation.column(VAR_IN_REG_AT_INSTR, v, r.ordinal(), n).type(ColumnType.BINARY);
 @Other Helpers@ +=
-static final String VAR_IN_REG_AT_INSTR = "x";
+static abstract class ColumnKey extends CellKey {
+  ColumnKey(int v, Register r, int n) { super(v, r, n); }
+  abstract void addToObjective(glp_prob allocation, int columnIndex, ControlFlowGraph cfg);
+}
+@Control Flow Graph Members@ +=
+final List<ColumnKey> columns = Lists.newArrayList();
+@Generate GLPK Mappings@ +=
+@Add Column Keys@
+Collections.sort(columns);
+~~~~
+
+The first (and most important) set of unknowns are the _VarInRegAtInstr_ columns: which register each variable is in at each node in the control flow graph, assuming it's live. 
+
+~~~~~
+@Other Helpers@ +=
+static final class VarInRegAtInstr extends ColumnKey {
+  VarInRegAtInstr(int v, Register r, int n) { super(v, r, n); }
+  void addToObjective(glp_prob allocation, int columnIndex, ControlFlowGraph cfg) {
+    double coefficient = 0d;
+    @Determine VarInRegAtInstr Coefficient@
+    glp_set_obj_coef(allocation, columnIndex + 1, coefficient);
+  }
+}
+@Add Column Keys@ +=
+for (int v = 0; v < variables.length; ++v)
+  for(int n = 0; n < numNodes; ++n)
+    for (Register r : Register.ASSIGNABLE)
+      if(needsAssigning(v, n, r))
+        columns.add(new VarInRegAtInstr(v, r, n));
 ~~~~
 
 The next set of unknowns are used to work out the cost of a given assignment. We'll use constraints to ensure that the _NEW_VAR_IN_REG_FLAG_ columns have a one for node _n_, register _r_ and variable _v_ if register _r_ had a different variable in before node _n_ and now has variable _v_ in, and in all other circumstances _NEW_VAR_IN_REG_FLAG_ is zero. This makes the variable an indicator of whether we've loaded a variable into a register from the stack, so it'll be an important part of the objective function (as we want to minimise stack usage).
 
-~~~~
-@Set Up Columns@ +=
-for (int v = 0; v < controlFlow.variables.length; ++v)
-  for(int n = 0; n < controlFlow.numNodes; ++n)
-    for (Register r : Register.ASSIGNABLE)
-      if(controlFlow.needsAssigning(v, n, r))
-        allocation.column(NEW_VAR_IN_REG_FLAG, v, r.ordinal(), n).type(ColumnType.BINARY);
-@Other Helpers@ +=
-static final String NEW_VAR_IN_REG_FLAG = "c";
-~~~~
-
 The cost of register access, _mu_ in (the paper)[http://grothoff.org/christian/lcpc2006.pdf], can be a function of the register and the instruction. This gives us the option of discouraging moves in frequently-used instructions (such as those in the body of a loop). Note that we don't check for liveness here as we don't even think about preserving a non-live variable.
 
+~~~~    
+@Other Helpers@ +=
+static final class NewVarInRegFlag extends ColumnKey {
+  NewVarInRegFlag(int v, Register r, int n) { super(v, r, n); }
+  void addToObjective(glp_prob allocation, int columnIndex, ControlFlowGraph cfg) {
+    glp_set_obj_coef(allocation, columnIndex + 1, COST_OF_REG_ACCESS);
+  }
+}
+private static final double COST_OF_REG_ACCESS = 1.0;
+@Add Column Keys@ +=
+for (int v = 0; v < variables.length; ++v)
+  for(int n = 0; n < numNodes; ++n)
+    for (Register r : Register.ASSIGNABLE)
+      if(needsAssigning(v, n, r))
+        columns.add(new NewVarInRegFlag( v, r, n));
+~~~~
+
+
+Let's tell GLPK how many columns we'll need in total
+
+~~~~
+@Determine Rows And Columns@ +=
+glp_add_cols(allocation, controlFlow.columns.size());
+glp_add_rows(allocation, controlFlow.rows.size());
+for(int c = 0; c < controlFlow.columns.size(); ++c)
+  glp_set_col_kind(allocation, c + 1, GLP_BV);
+~~~~
+
 ~~~~
 @Other Helpers@ +=
-private static final double COST_OF_REG_ACCESS = 1.0;
 private static double spillCost(int variable, int node, ControlFlowGraph controlFlow) {
   double ret = 0.0;
   if(controlFlow.isVarUsedNext(variable, node)) ret += COST_OF_SPILL;
@@ -1119,28 +1176,18 @@ boolean isVarUsedPrev(int variable, int node) {
       return true;
   return false;
 }
+@Determine VarInRegAtInstr Coefficient@ +=
+if(r == Register.THESTACK) coefficient += spillCost(v, n, cfg);
 ~~~~
 
 The objective: minimise spillage at each node. 
 
 ~~~~
 @Set Up Objective@ +=
-allocation.objective("spillage", Direction.MINIMIZE);
-@Minimise Number Of Spills@
-for (int v = 0; v < controlFlow.variables.length; ++v)
-  for (int n = 0; n < controlFlow.numNodes; ++n)
-    for (Register r : Register.ASSIGNABLE)
-      if(controlFlow.needsAssigning(v, n, r))
-        allocation.objective().add(COST_OF_REG_ACCESS, NEW_VAR_IN_REG_FLAG, v, r.ordinal(), n);
-@Add Objective Hints@
-~~~~
-
-~~~~
-@Minimise Number Of Spills@ +=
-for (int v = 0; v < controlFlow.variables.length; ++v)
-  for (int n = 0; n < controlFlow.numNodes; ++n)
-    if(controlFlow.needsAssigning(v, n, Register.THESTACK))
-      allocation.objective().add(spillCost(v, n, controlFlow), VAR_IN_REG_AT_INSTR, v, Register.THESTACK.ordinal(), n);
+glp_set_obj_name(allocation, "spillage");
+glp_set_obj_dir(allocation, GLP_MIN);
+for(int c = 0; c < controlFlow.columns.size(); ++c)
+  controlFlow.columns.get(c).addToObjective(allocation, c, controlFlow);
 ~~~~
 
 ~~~~
@@ -1177,62 +1224,121 @@ movl %ecx, %eax
 </pre>
 
 ~~~~
-@Add Objective Hints@ +=
-for(int i = 0; i < code.size(); ++i) {
-  if(!(code.get(i) instanceof Move)) continue;
-  for(Variable v : code.get(i).uses(Variable.class))
-    for(Register r : code.get(i).uses(Register.class))
-      for(int n : controlFlow.nodesAround(i)) 
-        if(controlFlow.needsAssigning(indexOf(controlFlow.variables, v), n, r))
-          allocation.objective().add(MOVE_NOP_HINT, VAR_IN_REG_AT_INSTR, indexOf(controlFlow.variables, v), r.ordinal(), n);
-}
-@Other Helpers@ +=
-private static final double MOVE_NOP_HINT = -0.5;
 @Control Flow Graph Members@ +=
+private final Set<ColumnKey> shouldBeNoOp = Sets.newTreeSet();
 List<Integer> nodesAround(int instruction) {
   return Arrays.asList(prevNode[instruction], nextNode[instruction]);
 }
+@Generate GLPK Mappings@ +=
+for(int i = 0; i < code.size(); ++i) {
+  if(!(code.get(i) instanceof Move)) continue;
+  for(Variable variable : code.get(i).uses(Variable.class)) {
+    int v = indexOf(variables, variable);
+    for(Register r : code.get(i).uses(Register.class))
+      for(int n : nodesAround(i)) 
+        if(needsAssigning(v, n, r))
+          shouldBeNoOp.add(new VarInRegAtInstr(v, r, n));
+  }
+}
+@Determine VarInRegAtInstr Coefficient@ +=
+if(cfg.shouldBeNoOp.contains(this)) coefficient += MOVE_NOP_HINT;
+@Other Helpers@ +=
+private static final double MOVE_NOP_HINT = -0.5;
 ~~~~
 
 Let's also encourage putting aliased vars in the same register. For that we'll need another flag:
 
 ~~~~
-@Set Up Columns@ +=
-for(Integer n : controlFlow.aliasingVars.keys())
-  for (Register r : Register.ASSIGNABLE)
-    if(r != Register.THESTACK)
-        allocation.column(ALIASED_IN_SAME_REG, n, r.ordinal()).type(ColumnType.BINARY);
 @Other Helpers@ +=
-private static final String ALIASED_IN_SAME_REG = "a";
-~~~~
-
-~~~~
-@Add Objective Hints@ +=
-for(Integer node : controlFlow.aliasingVars.keys())
-  for (Register r : Register.ASSIGNABLE)
-    if(r != Register.THESTACK)
-      allocation.objective().add(ALIASED_VAR_HINT, ALIASED_IN_SAME_REG, node, r.ordinal());
-@Other Helpers@ +=
+static final class AliasedInSameReg extends ColumnKey {
+  AliasedInSameReg(Register r, int n) { super(NONE, r, n); }
+  void addToObjective(glp_prob allocation, int columnIndex, ControlFlowGraph cfg) {
+    glp_set_obj_coef(allocation, columnIndex + 1, ALIASED_VAR_HINT);
+  }
+}
 private static final double ALIASED_VAR_HINT = -0.5;
+@Add Column Keys@ +=
+for(Integer n : aliasingVars.keys())
+  for (Register r : Register.ASSIGNABLE)
+    if(r != Register.THESTACK)
+      columns.add(new AliasedInSameReg(r, n));
+~~~~
+
+Now, onto the rows. Similar to column keys...
+
+~~~~
+@Other Helpers@ +=
+static abstract class RowKey extends CellKey {
+  RowKey(int v, Register r, int n) { super(v, r, n); }
+  abstract void addConstraints(
+    glp_prob allocation,
+    int row,
+    List<Constraint> constraints,
+    ControlFlowGraph cfg);
+}
+@Control Flow Graph Members@ +=
+final List<RowKey> rows = Lists.newArrayList();
+@Generate GLPK Mappings@ +=
+@Add Row Keys@
+Collections.sort(rows);
+~~~~
+
+Constraints:
+
+~~~~
+@Other Helpers@ +=
+static final class Constraint {
+  final int row; final int column; final double value;
+  Constraint(int row, int column, double value) {
+    this.row = row; this.column = column; this.value = value;
+  } 
+}
+@Determine Rows And Columns@ +=
+List<Constraint> constraints = Lists.newArrayList();
+for(int row = 0; row < controlFlow.rows.size(); ++row)
+  controlFlow.rows.get(row).addConstraints(allocation, row, constraints, controlFlow);
+@Finalise Problem@ +=
+SWIGTYPE_p_int constraintCols = new_intArray(constraints.size());
+SWIGTYPE_p_int constraintRows = new_intArray(constraints.size());
+SWIGTYPE_p_double constraintVals = new_doubleArray(constraints.size());
+for(int i = 0; i < constraints.size(); ++i) {
+  Constraint c = constraints.get(i);
+  intArray_setitem(constraintCols, i, c.column + 1);
+  intArray_setitem(constraintRows, i, c.row + 1);
+  doubleArray_setitem(constraintVals, i, c.value);
+}
+glp_load_matrix(
+  allocation,
+  constraints.size() - 1,
+  constraintRows,
+  constraintCols,
+  constraintVals);
 ~~~~
 
 ~~~~
-@Set Up Constraints@ +=
-for(Integer node : controlFlow.aliasingVars.keys())
-  for (Register r : Register.ASSIGNABLE)
-    if(r != Register.THESTACK) {
-      Collection<Integer> aliasedVars = controlFlow.aliasingVars.get(node);
-      for(int v : aliasedVars)
-        allocation.
-          row(ALIASED_VAR_FLAG, node, r.ordinal()).
-          add( 1.0, VAR_IN_REG_AT_INSTR, v, r.ordinal(), node);
-      allocation.
-        row(ALIASED_VAR_FLAG, node, r.ordinal()).
-        bounds(0.0, aliasedVars.size() - 1.0).
-        add( -1.0 * aliasedVars.size(), ALIASED_IN_SAME_REG, node, r.ordinal());
-    }
 @Other Helpers@ +=
-private static final String ALIASED_VAR_FLAG = "aliased_var_flag";
+static final class AliasedVarFlag extends RowKey {
+  AliasedVarFlag(Register r, int n) { super(NONE, r, n); }
+  void addConstraints(glp_prob allocation, int row, List<Constraint> constraints, ControlFlowGraph cfg) {
+    int numAliasingVars = cfg.aliasingVars.size(),
+    constraintType = numAliasingVars == 1 ? GLP_FX : GLP_DB;
+    glp_set_row_bnds(allocation, row + 1, constraintType, 0.0, numAliasingVars - 1.0);
+    constraints.add(new Constraint(
+      row, 
+      Collections.binarySearch(cfg.columns, new AliasedInSameReg(r, n)),
+      -1.0 * numAliasingVars));
+    for(int v : cfg.aliasingVars.get(n))
+      constraints.add(new Constraint(
+        row, 
+        Collections.binarySearch(cfg.columns, new VarInRegAtInstr(v, r, n)),
+        1.0));
+  }
+}
+@Add Row Keys@ +=
+for(Integer n : aliasingVars.keys())
+  for (Register r : Register.ASSIGNABLE)
+    if(r != Register.THESTACK)
+      rows.add(new AliasedVarFlag(r, n));
 ~~~~
 
 We now get 
@@ -1247,113 +1353,234 @@ movl %eax, %eax
 Constraint: registers can only ever hold one variable at once (apart from the stack). 
 
 ~~~~
-@Set Up Constraints@ +=
-for (int n = 0; n < controlFlow.numNodes; ++n) {
+@Other Helpers@ +=
+static final class OneVarPerReg extends RowKey {
+  final Set<Integer> vars = Sets.newTreeSet();
+  OneVarPerReg(int avoid, Register r, int n) { super(avoid, r, n); }
+  void addConstraints(glp_prob allocation, int row, List<Constraint> constraints, ControlFlowGraph cfg) {
+    glp_set_row_bnds(allocation, row + 1, GLP_DB, 0.0, 1.0);
+    for(int v : vars)
+      constraints.add(new Constraint(
+        row, 
+        Collections.binarySearch(cfg.columns, new VarInRegAtInstr(v, r, n)),
+        1.0));
+  }
+}
+@Add Row Keys@ +=
+for (int n = 0; n < numNodes; ++n)
   for (Register r : Register.ASSIGNABLE)
     if(r != Register.THESTACK)
-      if(controlFlow.aliasingVars.containsKey(n)) {
-        for(int avoid : controlFlow.aliasingVars.get(n))
-          for (int v = 0; v < controlFlow.variables.length; ++v)
-            if(v != avoid && controlFlow.needsAssigning(v, n, r))
-              allocation.row(ONE_VAR_PER_REG, r.ordinal(), n, avoid)
-                .bounds(0.0, 1.0)
-                .add(1.0, VAR_IN_REG_AT_INSTR, v, r.ordinal(), n);
+      if(aliasingVars.containsKey(n)) {
+        for(int avoid : aliasingVars.get(n)) {
+          OneVarPerReg constraint = new OneVarPerReg(avoid, r, n);
+          for (int v = 0; v < variables.length; ++v)
+            if(v != avoid && needsAssigning(v, n, r))
+              constraint.vars.add(v);
+        }
       } else {
-        for (int v = 0; v < controlFlow.variables.length; ++v)
-          if(controlFlow.needsAssigning(v, n, r))
-            allocation.row(ONE_VAR_PER_REG, r.ordinal(), n)
-              .bounds(0.0, 1.0)
-              .add(1.0, VAR_IN_REG_AT_INSTR, v, r.ordinal(), n);
+        OneVarPerReg constraint = new OneVarPerReg(NONE, r, n);
+        for (int v = 0; v < variables.length; ++v)
+          if(needsAssigning(v, n, r))
+            constraint.vars.add(v);
+        rows.add(constraint);
       }
-  }
-@Other Helpers@ +=
-private static final String ONE_VAR_PER_REG = "one_var_per_reg";
 ~~~~
 
 Constraint: variables must not be lost; they must be in either the stack or exactly one register. While technically we could put the variable on stack as well as in more than one register, this makes the LP solver much slower as there are so many more possible combinations of assignments to narrow down. Also, if a variable's not live then force it on the stack.
 
 ~~~~
-@Set Up Constraints@ +=
-for (int v = 0; v < controlFlow.variables.length; ++v)
-  for (int n = 0; n < controlFlow.numNodes; ++n)
-    for (Register r : Register.ASSIGNABLE)
-      if(controlFlow.needsAssigning(v, n, r))
-        allocation.row(VARS_NOT_LOST, v, n)
-          .bounds(1.0, 1.0)
-          .add(1.0, VAR_IN_REG_AT_INSTR, v, r.ordinal(), n);
 @Other Helpers@ +=
-private static final String VARS_NOT_LOST = "vars_not_lost";
+static final class VarsNotLost extends RowKey {
+  Set<Register> registers = EnumSet.noneOf(Register.class);
+  VarsNotLost(int v, int n) { super(v, Register.THESTACK, n); }
+  void addConstraints(glp_prob allocation, int row, List<Constraint> constraints, ControlFlowGraph cfg) {
+    glp_set_row_bnds(allocation, row + 1, GLP_FX, 1.0, 1.0);
+    for(Register r : registers)
+      constraints.add(new Constraint(
+        row, 
+        Collections.binarySearch(cfg.columns, new VarInRegAtInstr(v, r, n)),
+        1.0));
+  }
+}
+@Add Row Keys@ +=
+for (int v = 0; v < variables.length; ++v)
+  for (int n = 0; n < numNodes; ++n) {
+    VarsNotLost constraint = new VarsNotLost(v, n);
+    for (Register r : Register.ASSIGNABLE)
+      if(needsAssigning(v, n, r))
+        constraint.registers.add(r);
+    if(!constraint.registers.isEmpty())
+      rows.add(constraint);
+  }
 ~~~~
 
 The last pair of constraints ensure that the _NEW_VAR_IN_REG_FLAG_ works as we want. Note that we set the constraints in pairs of nodes, at least one of which _needsAssigning_. We have to overhang (i.e. we don't only add constraints if both nodes _needsAssigning_) as if we don't we'll miss some constraints on the border, and so the flag will be undefined. A NEW_VAR_IN_REG_FLAG value of 1 means the variable just arrived in this register from somewhere. 
 
 ~~~~
-@Set Up Constraints@ +=
-for (int v = 0; v < controlFlow.variables.length; ++v)
+@Add Row Keys@ +=
+for (int v = 0; v < variables.length; ++v)
   for (Register r : Register.ASSIGNABLE)
-    for(Entry<Integer, Integer> n : controlFlow.nextNodes.entries()) {
-      if(controlFlow.needsAssigning(v, n.getKey(), r)
-      && controlFlow.needsAssigning(v, n.getValue(), r)) 
+    for(Entry<Integer, Integer> n : this.nextNodes.entries()) {
+      if(needsAssigning(v, n.getKey(), r)
+      && needsAssigning(v, n.getValue(), r)) 
         { @Add Constraints If Both Nodes Are Relevant@ }
-      else if(controlFlow.needsAssigning(v, n.getValue(), r))
+      else if(needsAssigning(v, n.getValue(), r))
         { @Force When Variable First Live@ }
-      else if(controlFlow.needsAssigning(v, n.getKey(), r))
-        { @Force When Variable Dies@ }
+      else if(needsAssigning(v, n.getKey(), r))
+        { @Force Zero When Variable Dies@ }
     }
-@Other Helpers@ +=
-private static final String FLAG_SET_CORRECTLY = "var_in_reg_flag";
 ~~~~
 
 ~~~~
-@Add Constraints If Both Nodes Are Relevant@ +=
-allocation. // if R(n-1) = 1 then F(n) = 0
-  row(FLAG_SET_CORRECTLY, v, r.ordinal(), n.getKey(), n.getValue(), 0).
-  bounds(null, 1d).
-  add(1.0, VAR_IN_REG_AT_INSTR, v, r.ordinal(), n.getKey()).
-  add(1.0, NEW_VAR_IN_REG_FLAG, v, r.ordinal(), n.getValue());
-allocation. // if R(n) = 0 then F(n) = 0
-  row(FLAG_SET_CORRECTLY, v, r.ordinal(), n.getValue(), n.getKey(), 1).
-  bounds(0.0, null).
-  add( 1.0, VAR_IN_REG_AT_INSTR, v, r.ordinal(), n.getValue()).
-  add(-1.0, NEW_VAR_IN_REG_FLAG, v, r.ordinal(), n.getValue());
-allocation. // if R(n-1) - R(n) + F(n) >= 0 so when R(n) = 1 and R(n-1) = 0 then F(n) must be 1
-  row(FLAG_SET_CORRECTLY, v, r.ordinal(), n.getValue(), n.getKey(), 2).
-  bounds(0.0, null).
-  add( 1.0, VAR_IN_REG_AT_INSTR, v, r.ordinal(), n.getKey()).
-  add(-1.0, VAR_IN_REG_AT_INSTR, v, r.ordinal(), n.getValue()).
-  add( 1.0, NEW_VAR_IN_REG_FLAG, v, r.ordinal(), n.getValue());
-@Force When Variable First Live@ +=
-boolean setToOne = controlFlow.isLiveAt(v, n.getKey()) || r == Register.THESTACK;
-allocation.
-  row(FLAG_SET_CORRECTLY, v, r.ordinal(), n.getKey(), n.getValue()).
-  bounds(0d, 0d).
-  add(setToOne ? -1.0 : 0.0, VAR_IN_REG_AT_INSTR, v, r.ordinal(), n.getValue()).
-  add(1.0, NEW_VAR_IN_REG_FLAG, v, r.ordinal(), n.getValue());
-@Force When Variable Dies@ +=
-allocation.
-  row(FLAG_SET_CORRECTLY, v, r.ordinal(), n.getKey(), n.getValue()).
-  bounds(0d, 0d).
-  add(1.0, NEW_VAR_IN_REG_FLAG, v, r.ordinal(), n.getKey());
+@Other Helpers@ +=
+static final class ForceZeroWhenVariableDies extends RowKey {
+  ForceZeroWhenVariableDies(int v, Register r, int n) { super(v, r, n); }
+  void addConstraints(glp_prob allocation, int row, List<Constraint> constraints, ControlFlowGraph cfg) {
+    glp_set_row_bnds(allocation, row + 1, GLP_FX, 0.0, 0.0);
+    constraints.add(new Constraint(
+      row, 
+      Collections.binarySearch(cfg.columns, new NewVarInRegFlag(v, r, n)),
+      1.0));
+  }
+}
+@Force Zero When Variable Dies@ +=
+rows.add(new ForceZeroWhenVariableDies(v, r, n.getKey()));
 ~~~~
+
+~~~~
+@Other Helpers@ +=
+static final class ForceWhenVariableFirstLive extends RowKey {
+  final boolean setToOne;
+  ForceWhenVariableFirstLive(int v, Register r, int n, boolean setToOne) { 
+    super(v, r, n); this.setToOne = setToOne;
+  }
+  void addConstraints(glp_prob allocation, int row, List<Constraint> constraints, ControlFlowGraph cfg) {
+    glp_set_row_bnds(allocation, row + 1, GLP_FX, 0.0, 0.0);
+    constraints.add(new Constraint(
+      row, 
+      Collections.binarySearch(cfg.columns, new VarInRegAtInstr(v, r, n)),
+      setToOne ? -1.0 : 0.0));
+    constraints.add(new Constraint(
+      row, 
+      Collections.binarySearch(cfg.columns, new NewVarInRegFlag(v, r, n)),
+      1.0));
+  }
+}
+@Force When Variable First Live@ +=
+boolean setToOne = isLiveAt(v, n.getKey()) || r == Register.THESTACK;
+rows.add(new ForceWhenVariableFirstLive(v, r, n.getValue(), setToOne));
+~~~~
+
+~~~~
+@Other Helpers@ +=
+static final class ZeroIfInRegisterPreviously extends RowKey {
+  final int nTo;
+  ZeroIfInRegisterPreviously(int v, Register r, int nFrom, int nTo) { 
+    super(v, r, nFrom); this.nTo = nTo;
+  }
+  /** if R(n-1) = 1 then F(n) = 0 */
+  void addConstraints(glp_prob allocation, int row, List<Constraint> constraints, ControlFlowGraph cfg) {
+    glp_set_row_bnds(allocation, row + 1, GLP_UP, 0.0, 1.0);
+    constraints.add(new Constraint(
+      row, 
+      Collections.binarySearch(cfg.columns, new VarInRegAtInstr(v, r, n)),
+      1.0));
+    constraints.add(new Constraint(
+      row, 
+      Collections.binarySearch(cfg.columns, new NewVarInRegFlag(v, r, nTo)),
+      1.0));
+  }
+  public int compareTo(CellKey o) {
+    return ComparisonChain.start().
+      compare(super.compareTo(o), 0).
+      compare(nTo, o instanceof ZeroIfInRegisterPreviously ? ((ZeroIfInRegisterPreviously)o).nTo : NONE).
+      result();
+  }
+}
+@Add Constraints If Both Nodes Are Relevant@ +=
+rows.add(new ZeroIfInRegisterPreviously(v, r, n.getKey(), n.getValue()));
+~~~~
+
+~~~~
+@Other Helpers@ +=
+static final class ZeroIfNotInRegister extends RowKey {
+  ZeroIfNotInRegister(int v, Register r, int n) { super(v, r, n); }
+  /** if R(n) = 0 then F(n) = 0 */
+  void addConstraints(glp_prob allocation, int row, List<Constraint> constraints, ControlFlowGraph cfg) {
+    glp_set_row_bnds(allocation, row + 1, GLP_LO, 0.0, 0.0);
+    constraints.add(new Constraint(
+      row, 
+      Collections.binarySearch(cfg.columns, new VarInRegAtInstr(v, r, n)),
+      1.0));
+    constraints.add(new Constraint(
+      row, 
+      Collections.binarySearch(cfg.columns, new NewVarInRegFlag(v, r, n)),
+      -1.0));
+  }
+}
+@Add Constraints If Both Nodes Are Relevant@ +=
+rows.add(new ZeroIfNotInRegister(v, r, n.getValue()));
+~~~~
+
+~~~~
+@Other Helpers@ +=
+static final class SetFlagOnChange extends RowKey {
+  final int nTo;
+  SetFlagOnChange(int v, Register r, int nFrom, int nTo) { 
+    super(v, r, nFrom); this.nTo = nTo;
+  }
+  /** if R(n-1) - R(n) + F(n) >= 0 so when R(n) = 1 and R(n-1) = 0 then F(n) must be 1 */
+  void addConstraints(glp_prob allocation, int row, List<Constraint> constraints, ControlFlowGraph cfg) {
+    glp_set_row_bnds(allocation, row + 1, GLP_LO, 0.0, 0.0);
+    constraints.add(new Constraint(
+      row, 
+      Collections.binarySearch(cfg.columns, new VarInRegAtInstr(v, r, n)),
+      1.0));
+    constraints.add(new Constraint(
+      row, 
+      Collections.binarySearch(cfg.columns, new VarInRegAtInstr(v, r, nTo)),
+      -1.0));
+    constraints.add(new Constraint(
+      row, 
+      Collections.binarySearch(cfg.columns, new NewVarInRegFlag(v, r, nTo)),
+      1.0));
+  }
+  public int compareTo(CellKey o) {
+    return ComparisonChain.start().
+      compare(super.compareTo(o), 0).
+      compare(nTo, o instanceof SetFlagOnChange ? ((SetFlagOnChange)o).nTo : NONE).
+      result();
+  }
+}
+@Add Constraints If Both Nodes Are Relevant@ +=
+rows.add(new SetFlagOnChange(v, r, n.getKey(), n.getValue()));
+~~~~
+
+[All GLPK options](http://www.maximal-usa.com/solvopt/optglpk.html) - note presolve defaults to off.
+[GLPK manual](http://www.mai.liu.se/~kahol/kurser/all/glpk.pdf)
 
 ~~~~
 @Solve@ +=
-Problem allocation = getLPproblem(controlFlow, state.code);
-if (!solver.solve(allocation))
+glp_prob allocation = getLPproblem(controlFlow, state.code);
+glp_iocp iocp = new glp_iocp();
+glp_init_iocp(iocp);
+iocp.setPresolve(GLP_ON);
+if (glp_intopt(allocation, iocp) != 0)
   throw new IllegalStateException();
 copySolutionIntoCode(allocation, controlFlow, state);
-@Other Helpers@ +=
-private static final Solver solver = new SolverGlpk();
+glp_delete_prob(allocation);
 ~~~~
 
 We know which register each variable is in at each node now (assuming it's live):
 
 ~~~~
 @Other Helpers@ +=
-static Register whereAmI(Problem allocation, int v, int n) {
-  for(Register r : Register.ASSIGNABLE)
-    if(allocation.column(VAR_IN_REG_AT_INSTR, v, r.ordinal(), n).getValue() > 0.5)
+static Register whereAmI(glp_prob allocation, ControlFlowGraph controlFlow, int v, int n) {
+  for(Register r : Register.ASSIGNABLE) {
+    int index = Collections.binarySearch(controlFlow.columns, new VarInRegAtInstr(v, r, n));
+    if(index >= 0 && glp_mip_col_val(allocation, index + 1) > 0.5)
         return r;
+  }
   throw new IllegalStateException(); // shouldn't get here
 }
 ~~~~
@@ -1399,10 +1626,12 @@ We'll iterate through the linear programming solution and resolve variables as n
 for(int i = 0; i < state.code.size(); ++i)
   for(Variable variable : state.code.get(i).uses(Variable.class)) {
     int v = indexOf(controlFlow.variables, variable);
-    for (Register r : Register.ASSIGNABLE)
-      if(allocation.column(VAR_IN_REG_AT_INSTR, v, r.ordinal(), controlFlow.prevNode[i]).getValue() > 0.5) { // huge tolerance for 0-1 integer
+    for (Register r : Register.ASSIGNABLE) {
+      int index = Collections.binarySearch(controlFlow.columns, new VarInRegAtInstr(v, r, controlFlow.prevNode[i]));
+      if(index >= 0 && glp_mip_col_val(allocation, index + 1) > 0.5) { // huge tolerance for 0-1 integer
         state.code.set(i, state.code.get(i).resolve(variable, r)); break;
       }
+    }
   } 
 ~~~~
 
@@ -1413,12 +1642,14 @@ Multimap<Integer, Instruction>
   stackMovesAfter = HashMultimap.create();
 for (int v = 0; v < controlFlow.variables.length; ++v)
   for (int n = 0; n < controlFlow.numNodes; ++n)
-    for(Register r : Register.ASSIGNABLE)
-      if(allocation.column(NEW_VAR_IN_REG_FLAG, v, r.ordinal(), n).getValue() > 0.5) // v has moved
+    for(Register r : Register.ASSIGNABLE) {
+      int index = Collections.binarySearch(controlFlow.columns, new NewVarInRegFlag(v, r, n));
+      if(index >= 0 && glp_mip_col_val(allocation, index + 1) > 0.5) // v has moved
         if(r == Register.THESTACK)
           @V Now On Stack@
         else
           @V Now In Register@
+    }
 ~~~~
 
 The != _THESTACK_ check catches newly-initialised variables and dead variables (which are forced onto the stack).
@@ -1427,7 +1658,7 @@ The != _THESTACK_ check catches newly-initialised variables and dead variables (
 @V Now On Stack@ +=
 for(int i : controlFlow.instructionsBeforeNode.get(n))
   stackMovesAfter.put(i, move(
-    whereAmI(allocation, v, controlFlow.prevNode[i]), 
+    whereAmI(allocation, controlFlow, v, controlFlow.prevNode[i]), 
     state.stackVar(controlFlow.variables[v], new Immediate(8))));
 ~~~~
 
@@ -1436,7 +1667,7 @@ for(int i : controlFlow.instructionsBeforeNode.get(n))
 for(int i : controlFlow.instructionsFollowingNode.get(n))
   stackMovesBefore.put(i, move(
     state.stackVar(controlFlow.variables[v], new Immediate(8)), 
-    whereAmI(allocation, v, n)));
+    whereAmI(allocation, controlFlow, v, n)));
 ~~~~
 
 
@@ -1585,6 +1816,8 @@ import static com.google.common.collect.Iterables.*;
 import static com.google.common.collect.Multimaps.*;
 import static com.google.common.base.Predicates.*;
 import static com.google.common.primitives.UnsignedLong.*;
+import static org.gnu.glpk.GLPK.*;
+import static org.gnu.glpk.GLPKConstants.*;
 import java.io.*;
 import java.util.*;
 import java.util.Map.*;
@@ -1595,8 +1828,7 @@ import org.antlr.runtime.tree.*;
 import com.google.common.base.*;
 import com.google.common.primitives.*;
 import com.google.common.collect.*;
-import de.xypron.linopt.*;
-import de.xypron.linopt.Problem.*;
+import org.gnu.glpk.*;
 ~~~~
 
 Antlr code to build AST
