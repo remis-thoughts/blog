@@ -43,8 +43,9 @@ class Weave < Redcarpet::Render::XHTML
         :line_numbers => :table,
         :line_number_start => line_num)
     code.
-      gsub(/#{l_ang}(#{$allowed})#{r_ang}(\s*)\+#{equiv}/,'&lang;\\1&rang;+&equiv;').
-      gsub(/#{l_ang}(#{$allowed})#{r_ang}/,'&lang;\\1&rang;')
+      gsub(/#{l_ang}/,'&lang;').
+      gsub(/#{r_ang}/,'&rang;').
+      gsub(/#{equiv}/,'&equiv;')
   end  
   def codespan(code); block_code(code,nil) end
   def doc_header; "<html><body>" if @standalone end

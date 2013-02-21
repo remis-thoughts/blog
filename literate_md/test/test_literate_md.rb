@@ -2,23 +2,33 @@ require 'test/unit'
 require 'ostruct'
  
 class TestLiterateMD < Test::Unit::TestCase
-  def test_tangle
-    tidy_up(actual_file = 'test/test.rb')
-    $opts = OpenStruct.new(
-      :tangle => true, 
-      :weave => false, 
-      :outputdir => '.',
-      :files => 'test/test.md',
-      :lang => 'ruby')
+  def run_and_verify opts, actual_file, expected_file
+    tidy_up actual_file
+    $opts = opts
     run_it
-    expected = File.open('test/expected_test.rb', 'r'){|f|f.read}
+    expected = File.open(expected_file, 'r'){|f|f.read}
     actual = File.open(actual_file, 'r'){|f|f.read}
     assert_equal expected, actual
     tidy_up actual_file
   end
+
+  def test_tangle
+    run_and_verify OpenStruct.new(
+      :tangle => true, 
+      :weave => false, 
+      :outputdir => '.',
+      :files => 'test/test.md',
+      :lang => 'ruby'), 'test/test.rb', 'test/expected_test.rb'
+  end
  
   def test_weave
-    # TODO!
+    run_and_verify OpenStruct.new(
+      :tangle => false, 
+      :weave => true, 
+      :standalone => true,
+      :outputdir => '.',
+      :files => 'test/test.md',
+      :lang => 'ruby'), 'test.md.html', 'test/expected_test.html'
   end
   
   def tidy_up file
