@@ -1,0 +1,78 @@
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+	xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+	<modelVersion>4.0.0</modelVersion>
+
+	<artifactId>literate_md</artifactId>
+	<packaging>gem</packaging>
+
+	<!-- I'm versioning this separately to keep it in sync with the https://rubygems.org/gems/literate_md 
+		history. -->
+	<version>1.0.6</version>
+
+	<name>literate_md</name>
+	<description><![CDATA[Literate programming using markdown! Converts files to html or extracts the code snippets into one or more source files. To use:
+$ literate_md --help
+Options:
+    --weave, -w:   Produce documentation
+    --tangle, -t:   Produce code
+    --outputdir, -o <s>:   Directory to write files to
+    --lang, -l <s>:   Default language of code (default: ruby)
+    --files, -f <s>:   Files to process
+    --standalone, -s:   Weaves in html and body tags
+    --help, -h:   Show this message]]></description>
+	<url>http://remis-thoughts.blogspot.co.uk/2012/03/literate-programming-tool-this-is-last.html</url>
+	<parent>
+		<groupId>com.blogspot.remis-thoughts</groupId>
+		<artifactId>remis-thoughts</artifactId>
+		<version>1.0-SNAPSHOT</version>
+	</parent>
+	<properties>
+		<shortname>literate_md</shortname>
+	</properties>
+
+	<build>
+		<plugins>
+			<plugin>
+				<groupId>de.saumya.mojo</groupId>
+				<artifactId>gem-maven-plugin</artifactId>
+				<extensions>true</extensions>
+				<dependencies />
+				<configuration>
+					<executables>literate_md</executables>
+					<supportNative>true</supportNative>
+				</configuration>
+				<executions>
+					<execution>
+						<id>tangle</id>
+						<phase>none</phase>
+					</execution>
+					<execution>
+						<id>weave</id>
+						<phase>none</phase>
+					</execution>
+				</executions>
+			</plugin>
+		</plugins>
+	</build>
+
+	<dependencies>
+		<dependency>
+			<groupId>rubygems</groupId>
+			<artifactId>redcarpet</artifactId>
+			<version>[0,)</version>
+			<type>gem</type>
+		</dependency>
+		<dependency>
+			<groupId>rubygems</groupId>
+			<artifactId>trollop</artifactId>
+			<version>[0,)</version>
+			<type>gem</type>
+		</dependency>
+		<dependency>
+			<groupId>rubygems</groupId>
+			<artifactId>coderay</artifactId>
+			<version>[0,)</version>
+			<type>gem</type>
+		</dependency>
+	</dependencies>
+</project>

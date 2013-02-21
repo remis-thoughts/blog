@@ -23,6 +23,7 @@
 	</licenses>
 	<developers>
 		<developer>
+			<name>remis</name>
 			<email>remis.thoughts@gmail.com</email>
 		</developer>
 	</developers>
@@ -32,6 +33,7 @@
 		<module>dynamic-optimisation</module>
 		<module>triple-buffering</module>
 		<module>compile-to-asm</module>
+		<module>literate_md</module>
 	</modules>
 
 	<pluginRepositories>
@@ -49,7 +51,12 @@
 	</pluginRepositories>
 
 	<repositories>
-		<!-- for the LP wrapper -->
+		<!-- for ruby gems in 'gem'-type projects -->
+		<repository>
+			<id>rubygems-release</id>
+			<url>http://rubygems-proxy.torquebox.org/releases</url>
+		</repository>
+		<!-- for the GLPK SWIG bindings -->
 		<repository>
 			<id>xypron-release</id>
 			<url>http://rsync.xypron.de/repository</url>
@@ -199,6 +206,7 @@
 										</versionRange>
 										<goals>
 											<goal>exec</goal>
+											<goal>initialize</goal>
 										</goals>
 									</pluginExecutionFilter>
 									<action>
