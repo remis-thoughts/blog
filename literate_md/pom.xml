@@ -5,6 +5,9 @@
 	<artifactId>literate_md</artifactId>
 	<packaging>gem</packaging>
 
+	<!-- a magic string to remove the groupId from the generated gem name -->
+	<groupId>rubygems</groupId>
+
 	<!-- I'm versioning this separately to keep it in sync with the https://rubygems.org/gems/literate_md 
 		history. -->
 	<version>1.0.6</version>
