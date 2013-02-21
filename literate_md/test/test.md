@@ -14,8 +14,8 @@ and some more text. we should probably say what dostuff is; it's:
 
 ~~~~~
 @Do Stuff@ +=
-int* me = &1;
-*me++;
+	int* me = &1;
+	*me++;
 @Do More Stuff@ +=
 /* MORE! MORE! */
 @Do Stuff@ +=

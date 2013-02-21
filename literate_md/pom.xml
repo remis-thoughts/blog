@@ -10,7 +10,7 @@
 
 	<!-- I'm versioning this separately to keep it in sync with the https://rubygems.org/gems/literate_md 
 		history. -->
-	<version>1.0.6</version>
+	<version>1.0.7</version>
 
 	<name>literate_md</name>
 	<description><![CDATA[Literate programming using markdown! Converts files to html or extracts the code snippets into one or more source files. To use:
