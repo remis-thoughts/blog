@@ -10,23 +10,33 @@ import static com.blogspot.remisthoughts.compiletoasm.TestUtils.assertAllAssigne
 import static com.blogspot.remisthoughts.compiletoasm.TestUtils.assertEqualStackReadsAndWrites;
 import static com.google.common.collect.Iterables.filter;
 import static com.google.common.collect.Iterables.isEmpty;
+import static org.gnu.glpk.GLPK._glp_lpx_get_mat_row;
+import static org.gnu.glpk.GLPK.doubleArray_getitem;
 import static org.gnu.glpk.GLPK.glp_init_iocp;
 import static org.gnu.glpk.GLPK.glp_intopt;
+import static org.gnu.glpk.GLPK.glp_mip_col_val;
+import static org.gnu.glpk.GLPK.glp_mip_row_val;
+import static org.gnu.glpk.GLPK.intArray_getitem;
+import static org.gnu.glpk.GLPK.new_doubleArray;
+import static org.gnu.glpk.GLPK.new_intArray;
 import static org.gnu.glpk.GLPKConstants.GLP_ON;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
 
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
 
-import org.antlr.runtime.tree.CommonTree;
+import org.gnu.glpk.SWIGTYPE_p_double;
+import org.gnu.glpk.SWIGTYPE_p_int;
 import org.gnu.glpk.glp_iocp;
 import org.gnu.glpk.glp_prob;
 import org.junit.Test;
 
 import com.blogspot.remisthoughts.compiletoasm.Compiler.AtAddress;
 import com.blogspot.remisthoughts.compiletoasm.Compiler.Call;
+import com.blogspot.remisthoughts.compiletoasm.Compiler.ColumnKey;
 import com.blogspot.remisthoughts.compiletoasm.Compiler.ControlFlowGraph;
 import com.blogspot.remisthoughts.compiletoasm.Compiler.Definition;
 import com.blogspot.remisthoughts.compiletoasm.Compiler.Immediate;
@@ -34,8 +44,8 @@ import com.blogspot.remisthoughts.compiletoasm.Compiler.Instruction;
 import com.blogspot.remisthoughts.compiletoasm.Compiler.Label;
 import com.blogspot.remisthoughts.compiletoasm.Compiler.Op;
 import com.blogspot.remisthoughts.compiletoasm.Compiler.ParsingState;
-import com.blogspot.remisthoughts.compiletoasm.Compiler.ProgramState;
 import com.blogspot.remisthoughts.compiletoasm.Compiler.Register;
+import com.blogspot.remisthoughts.compiletoasm.Compiler.RowKey;
 import com.blogspot.remisthoughts.compiletoasm.Compiler.Variable;
 import com.google.common.base.Joiner;
 import com.google.common.collect.Iterables;
@@ -45,7 +55,8 @@ public class RegisterAllocationTest {
 
 	private static List<Instruction> assertAllocation(List<Instruction> code) {
 		ControlFlowGraph cfg = new ControlFlowGraph(code);
-		code = afterSolve(code, cfg, solve(cfg, code));
+		glp_prob problem = solve(cfg, code);
+		code = afterSolve(code, cfg, problem);
 
 		code = Lists.newArrayList(filter(code, noNoOps));
 		for (Instruction i : code) {
@@ -225,14 +236,15 @@ public class RegisterAllocationTest {
 	}
 
 	private static List<Instruction> afterSolve(List<Instruction> code, ControlFlowGraph cfg, glp_prob lpProblem) {
-		ParsingState state = new ParsingState(new CommonTree(), new ProgramState());
+		ParsingState state = TestUtils.newParsingState();
+		state.code.clear();
 		state.code.addAll(code);
 		copySolutionIntoCode(lpProblem, cfg, state);
 		return Lists.newArrayList(Iterables.filter(state.code, Compiler.noNoOps));
 	}
 
 	private static glp_prob solve(ControlFlowGraph cfg, List<Instruction> code) {
-		glp_prob lpProblem = getLPproblem(cfg, code);
+		glp_prob lpProblem = getLPproblem(cfg);
 		glp_iocp iocp = new glp_iocp();
 		glp_init_iocp(iocp);
 		iocp.setPresolve(GLP_ON);
@@ -249,8 +261,12 @@ public class RegisterAllocationTest {
 		int v = indexOf(cfg.variables, variable);
 		for (int i = 0; i < code.size(); ++i) {
 			int n = cfg.prevNode[i];
-			Register r = Compiler.whereAmI(lpProblem, cfg, v, n);
-			System.out.printf("%02d: %s\n", i, r);
+			try {
+				Register r = Compiler.whereAmI(lpProblem, cfg, v, n);
+				System.out.printf("%02d: %s\n", i, r);
+			} catch (IllegalStateException e) {
+				System.out.printf("%02d: NONE\n", i);
+			}
 		}
 	}
 
@@ -260,8 +276,12 @@ public class RegisterAllocationTest {
 			int n = cfg.prevNode[i];
 			List<Variable> vars = new ArrayList<Variable>(2);
 			for (int v = 0; v < cfg.variables.length; ++v) {
-				if (Compiler.whereAmI(lpProblem, cfg, v, n) == r) {
-					vars.add(cfg.variables[v]);
+				try {
+					if (Compiler.whereAmI(lpProblem, cfg, v, n) == r) {
+						vars.add(cfg.variables[v]);
+					}
+				} catch (IllegalStateException e) {
+					// not in any register
 				}
 			}
 			System.out.printf("%02d: %s\n", i, Joiner.on(',').join(vars));
@@ -275,8 +295,18 @@ public class RegisterAllocationTest {
 			for (int prevN : cfg.nextNodes.inverse().get(n)) {
 				for (int v = 0; v < cfg.variables.length; ++v) {
 					for (Register r : Register.ASSIGNABLE) {
-						boolean rPrevN = Compiler.whereAmI(lpProblem, cfg, v, prevN) == r;
-						boolean rN = Compiler.whereAmI(lpProblem, cfg, v, n) == r;
+						boolean rPrevN;
+						try {
+							rPrevN = Compiler.whereAmI(lpProblem, cfg, v, prevN) == r;
+						} catch (IllegalStateException e) {
+							rPrevN = false; // it wasn't in any register
+						}
+						boolean rN;
+						try {
+							rN = Compiler.whereAmI(lpProblem, cfg, v, n) == r;
+						} catch (IllegalStateException e) {
+							rN = false; // it wasn't in any register
+						}
 						boolean AssN = cfg.needsAssigning(v, n, r);
 						boolean AssPrevN = cfg.needsAssigning(v, prevN, r);
 						if (AssN && AssPrevN && rN && !rPrevN) {
@@ -286,6 +316,39 @@ public class RegisterAllocationTest {
 						}
 					}
 				}
+			}
+		}
+	}
+
+	private static void printColumns(ControlFlowGraph cfg, glp_prob problem, int n) {
+		for (int i = 0; i < cfg.columns.size(); ++i) {
+			ColumnKey column = cfg.columns.get(i);
+			if (column.n == n) {
+				System.out.printf("%3d %s p:%.0f\n", i, column, glp_mip_col_val(problem, i + 1));
+			}
+		}
+	}
+
+	private static void printRows(ControlFlowGraph cfg, glp_prob problem, int n) {
+		for (int i = 0; i < cfg.rows.size(); ++i) {
+			RowKey row = cfg.rows.get(i);
+			if (row.n == n) {
+				System.out.printf("%3d %s p:%.0f\n", i, row, glp_mip_row_val(problem, i + 1));
+			}
+		}
+	}
+
+	private static void printRow(ControlFlowGraph cfg, glp_prob problem, RowKey key) {
+		int row = Collections.binarySearch(cfg.rows, key);
+		assertTrue(row >= 0);
+
+		SWIGTYPE_p_int columns = new_intArray(cfg.columns.size());
+		SWIGTYPE_p_double values = new_doubleArray(cfg.columns.size());
+		_glp_lpx_get_mat_row(problem, row + 1, columns, values);
+		for (int c = 0; c < cfg.columns.size(); ++c) {
+			int column = intArray_getitem(columns, c);
+			if (column > 0) {
+				System.out.printf("%s %.0f\n", cfg.columns.get(column - 1), doubleArray_getitem(values, c));
 			}
 		}
 	}

@@ -7,7 +7,6 @@ import static org.junit.Assert.assertEquals;
 import java.util.Arrays;
 import java.util.List;
 
-import org.antlr.runtime.tree.CommonTree;
 import org.junit.Test;
 
 import com.blogspot.remisthoughts.compiletoasm.Compiler.AtAddress;
@@ -19,12 +18,11 @@ import com.blogspot.remisthoughts.compiletoasm.Compiler.Label;
 import com.blogspot.remisthoughts.compiletoasm.Compiler.Op;
 import com.blogspot.remisthoughts.compiletoasm.Compiler.Parameter;
 import com.blogspot.remisthoughts.compiletoasm.Compiler.ParsingState;
-import com.blogspot.remisthoughts.compiletoasm.Compiler.ProgramState;
 import com.blogspot.remisthoughts.compiletoasm.Compiler.Register;
 import com.blogspot.remisthoughts.compiletoasm.Compiler.Variable;
 
 public class AliasingTest {
-	private final ParsingState state = new ParsingState(new CommonTree(), new ProgramState());
+	private final ParsingState state = TestUtils.newParsingState();
 
 	@Test
 	public void testAliasing() throws Exception {

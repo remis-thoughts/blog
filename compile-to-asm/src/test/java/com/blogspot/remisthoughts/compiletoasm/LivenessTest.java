@@ -90,8 +90,8 @@ public class LivenessTest {
 	public void testConditionalMoves() throws Exception {
 		Variable[] vars = { new Variable("x"), new Variable("zero"), new Variable("ret") };
 		List<Instruction> code = Lists.newArrayList(
-				move(new Immediate(2), vars[0]), // mov 2, a
-				Op.cmpq.with(new Immediate(3), vars[0]), // cmp 3, a
+				move(new Immediate(2), vars[0]), // mov 2, x
+				Op.cmpq.with(new Immediate(3), vars[0]), // cmp 3, x
 				move(new Immediate(1), vars[2]), // mov 1, ret
 				move(new Immediate(0), vars[1]), // mov 0, zero
 				new Move(vars[1], vars[2], Condition.b), // cmovb zero, ret
@@ -101,30 +101,33 @@ public class LivenessTest {
 		ControlFlowGraph cfg = new ControlFlowGraph(code);
 
 		// vars[0]: "x"
-		assertFalse(cfg.isLiveAt(0, 0));
-		assertTrue(cfg.isLiveAt(0, 2));
-		assertFalse(cfg.isLiveAt(0, 3));
-		assertFalse(cfg.isLiveAt(0, 4));
-		assertFalse(cfg.isLiveAt(0, 5));
-		assertFalse(cfg.isLiveAt(0, 6));
-		assertFalse(cfg.isLiveAt(0, 1));
+		int x = Compiler.indexOf(cfg.variables, vars[0]);
+		assertFalse(cfg.isLiveAt(x, 0));
+		assertTrue(cfg.isLiveAt(x, 2));
+		assertFalse(cfg.isLiveAt(x, 3));
+		assertFalse(cfg.isLiveAt(x, 4));
+		assertFalse(cfg.isLiveAt(x, 5));
+		assertFalse(cfg.isLiveAt(x, 6));
+		assertFalse(cfg.isLiveAt(x, 7));
 
 		// vars[1]: "zero"
-		assertFalse(cfg.isLiveAt(1, 0));
-		assertFalse(cfg.isLiveAt(1, 2));
-		assertFalse(cfg.isLiveAt(1, 3));
-		assertFalse(cfg.isLiveAt(1, 4));
-		assertTrue(cfg.isLiveAt(1, 5));
-		assertFalse(cfg.isLiveAt(1, 6));
-		assertFalse(cfg.isLiveAt(1, 1));
+		int zero = Compiler.indexOf(cfg.variables, vars[1]);
+		assertFalse(cfg.isLiveAt(zero, 0));
+		assertFalse(cfg.isLiveAt(zero, 2));
+		assertFalse(cfg.isLiveAt(zero, 3));
+		assertFalse(cfg.isLiveAt(zero, 4));
+		assertTrue(cfg.isLiveAt(zero, 5));
+		assertFalse(cfg.isLiveAt(zero, 6));
+		assertFalse(cfg.isLiveAt(zero, 7));
 
 		// vars[2]: "ret"
-		assertFalse(cfg.isLiveAt(2, 0));
-		assertFalse(cfg.isLiveAt(2, 2));
-		assertFalse(cfg.isLiveAt(2, 3));
-		assertTrue(cfg.isLiveAt(2, 4));
-		assertTrue(cfg.isLiveAt(2, 5));
-		assertTrue(cfg.isLiveAt(2, 6));
-		assertFalse(cfg.isLiveAt(2, 1));
+		int ret = Compiler.indexOf(cfg.variables, vars[2]);
+		assertFalse(cfg.isLiveAt(ret, 0));
+		assertFalse(cfg.isLiveAt(ret, 2));
+		assertFalse(cfg.isLiveAt(ret, 3));
+		assertTrue(cfg.isLiveAt(ret, 4));
+		assertTrue(cfg.isLiveAt(ret, 5));
+		assertTrue(cfg.isLiveAt(ret, 6));
+		assertFalse(cfg.isLiveAt(ret, 7));
 	}
 }

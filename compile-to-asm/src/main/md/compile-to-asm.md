@@ -412,18 +412,18 @@ private Value getAsValue(Tree t) {
             return new Label(text(t).substring(1));
         case Call:
             switch(type(t, 0)) {
-            	case Local:
-            	case Global:
-            	case FFI:
-	            	{ call(t); @Keep the Return Value@ }
-	            case Intrinsic: 
-		            { @Parse An Intrinsic Call@ }
-		        case Conditional:
-        			{ @Parse A Conditional Call@ }
-		        case Deref:
-        			{ @Parse A Dereference@ }
-		        case StackAlloc:
-        			{ @Parse A Stack Allocation@ }
+              case Local:
+              case Global:
+              case FFI:
+                { call(t); @Keep the Return Value@ }
+              case Intrinsic: 
+                { @Parse An Intrinsic Call@ }
+            case Conditional:
+              { @Parse A Conditional Call@ }
+            case Deref:
+              { @Parse A Dereference@ }
+            case StackAlloc:
+              { @Parse A Stack Allocation@ }
             }
         case Number :
             return new Immediate(t.getText());
@@ -703,7 +703,7 @@ static final class AtAddress implements MemoryValue, Resolvable {
   public boolean equals(Object o) {
     if(!(o instanceof AtAddress)) return false;
     AtAddress other = (AtAddress) o;
-  	return at.equals(other.at) && offset == other.offset;
+    return at.equals(other.at) && offset == other.offset;
   }
   public int hashCode() { return at.hashCode(); }
   @At Address Members@
@@ -844,7 +844,7 @@ if(controlFlow.variables.length > 0) {
   @Solve@
 }
 @Other Helpers@ +=
-static glp_prob getLPproblem(ControlFlowGraph controlFlow, List<Instruction> code) {
+static glp_prob getLPproblem(ControlFlowGraph controlFlow) {
   glp_prob allocation = glp_create_prob();
   @Determine Rows And Columns@
   @Set Up Objective@
@@ -1085,6 +1085,9 @@ static abstract class CellKey implements Comparable<CellKey> {
       compare(r, o.r).
       compare(n, o.n).result();
   }
+  public String toString() {
+    return String.format("%s v:%d r:%s n:%d", getClass().getSimpleName(), v, r, n);
+  }
 }
 private static final int NONE = -1;
 ~~~~
@@ -1258,7 +1261,7 @@ static final class AliasedInSameReg extends ColumnKey {
 }
 private static final double ALIASED_VAR_HINT = -0.5;
 @Add Column Keys@ +=
-for(Integer n : aliasingVars.keys())
+for(Integer n : aliasingVars.asMap().keySet())
   for (Register r : Register.ASSIGNABLE)
     if(r != Register.THESTACK)
       columns.add(new AliasedInSameReg(r, n));
@@ -1303,13 +1306,13 @@ SWIGTYPE_p_int constraintRows = new_intArray(constraints.size());
 SWIGTYPE_p_double constraintVals = new_doubleArray(constraints.size());
 for(int i = 0; i < constraints.size(); ++i) {
   Constraint c = constraints.get(i);
-  intArray_setitem(constraintCols, i, c.column + 1);
-  intArray_setitem(constraintRows, i, c.row + 1);
-  doubleArray_setitem(constraintVals, i, c.value);
+  intArray_setitem(constraintCols, i + 1, c.column + 1);
+  intArray_setitem(constraintRows, i + 1, c.row + 1);
+  doubleArray_setitem(constraintVals, i + 1, c.value);
 }
 glp_load_matrix(
   allocation,
-  constraints.size() - 1,
+  constraints.size(),
   constraintRows,
   constraintCols,
   constraintVals);
@@ -1320,13 +1323,13 @@ glp_load_matrix(
 static final class AliasedVarFlag extends RowKey {
   AliasedVarFlag(Register r, int n) { super(NONE, r, n); }
   void addConstraints(glp_prob allocation, int row, List<Constraint> constraints, ControlFlowGraph cfg) {
-    int numAliasingVars = cfg.aliasingVars.size(),
-    constraintType = numAliasingVars == 1 ? GLP_FX : GLP_DB;
-    glp_set_row_bnds(allocation, row + 1, constraintType, 0.0, numAliasingVars - 1.0);
+    Collection<Integer> aliasing = cfg.aliasingVars.get(n);
+    int constraintType = aliasing.size() == 1 ? GLP_FX : GLP_DB;
+    glp_set_row_bnds(allocation, row + 1, constraintType, 0.0, aliasing.size() - 1.0);
     constraints.add(new Constraint(
       row, 
       Collections.binarySearch(cfg.columns, new AliasedInSameReg(r, n)),
-      -1.0 * numAliasingVars));
+      -1.0 * aliasing.size()));
     for(int v : cfg.aliasingVars.get(n))
       constraints.add(new Constraint(
         row, 
@@ -1335,7 +1338,7 @@ static final class AliasedVarFlag extends RowKey {
   }
 }
 @Add Row Keys@ +=
-for(Integer n : aliasingVars.keys())
+for(Integer n : aliasingVars.asMap().keySet())
   for (Register r : Register.ASSIGNABLE)
     if(r != Register.THESTACK)
       rows.add(new AliasedVarFlag(r, n));
@@ -1561,7 +1564,7 @@ rows.add(new SetFlagOnChange(v, r, n.getKey(), n.getValue()));
 
 ~~~~
 @Solve@ +=
-glp_prob allocation = getLPproblem(controlFlow, state.code);
+glp_prob allocation = getLPproblem(controlFlow);
 glp_iocp iocp = new glp_iocp();
 glp_init_iocp(iocp);
 iocp.setPresolve(GLP_ON);

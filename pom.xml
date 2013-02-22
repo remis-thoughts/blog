@@ -268,7 +268,7 @@
 							<configuration>
 								<script><![CDATA[
 require 'rubygems'
-load '${project.build.directory}/rubygems-gem-maven-plugin/gems/literate_md-1.0.5/bin/literate_md'								
+load '${project.build.directory}/rubygems-gem-maven-plugin/gems/literate_md-1.0.7/bin/literate_md'								
 								]]></script>
 								<args><![CDATA[
                                     --files ${basedir}/src/main/md/${project.artifactId}.md
@@ -290,7 +290,7 @@ load '${project.build.directory}/rubygems-gem-maven-plugin/gems/literate_md-1.0.
 								<script><![CDATA[
 require 'rubygems'
 return if ${skip.javadoc}
-load '${project.build.directory}/rubygems-gem-maven-plugin/gems/literate_md-1.0.5/bin/literate_md'								
+load '${project.build.directory}/rubygems-gem-maven-plugin/gems/literate_md-1.0.7/bin/literate_md'								
 								]]></script>
 								<args><![CDATA[
                                     --files ${basedir}/src/main/md/${project.artifactId}.md
@@ -308,7 +308,7 @@ load '${project.build.directory}/rubygems-gem-maven-plugin/gems/literate_md-1.0.
 						<dependency>
 							<groupId>rubygems</groupId>
 							<artifactId>literate_md</artifactId>
-							<version>1.0.5</version>
+							<version>1.0.7</version>
 							<type>gem</type>
 						</dependency>
 					</dependencies>
