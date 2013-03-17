@@ -14,12 +14,11 @@ assignable : variable | Deref assignable -> ^(Deref assignable) | FFI;
 ret : Return expression -> ^(Return expression);
 assign : assignable Assign expression -> ^(Assign assignable expression);
 funcall : callable LP (expression (C expression)*)? RP -> ^(Call callable ^(Parameters expression*));
-parameters : (Local (C Local)*)? -> ^(Parameters Local+);
 iftrue : (statement SC)*; iffalse : (statement SC)*;
 ifelse : If expression LB iftrue RB (Else LB iffalse RB)? 
   -> ^(If ^(Test expression) ^(IfTrue iftrue) ^(IfFalse iffalse)?);
-fundef : Definition variable? LP parameters RP LB (statement SC)* RB 
-  -> ^(Definition ^(Name variable) parameters ^(Body statement*));
+fundef : Definition variable? LP (Local (C Local)*)? RP LB (statement SC)* RB 
+  -> ^(Definition ^(Name variable) ^(Parameters Local*) ^(Body statement*));
 whileloop : While expression LB (statement SC)* RB
   -> ^(While ^(Test expression) ^(Body statement*));
 ~~~~
@@ -345,7 +344,9 @@ if(type(statement, 0) == Global) {
   @Assigned To A Local Variable@
 }
 for(; numDerefs > 1; -- numDerefs) {
-  throw new IllegalStateException();
+  Variable inter = new Variable();
+  code.add(move(to, inter));
+  to = new AtAddress(inter, 0);
 }
 code.add(move(expr, to));
 @Shortcut For Global Initialisation@ +=
@@ -455,7 +456,6 @@ static Label parseDefinition(Tree def, ProgramState program) {
   ParsingState state = new ParsingState(def, program);  
   state.parseStatements(children(def, 2));
   if(getLast(state.code) != ret) { state.addReturn(); }
-  @Store Frame Pointer@
   @Do Register Allocation@
   @Is This The Main Function@
   return state.myName;
@@ -479,7 +479,8 @@ static final class ParsingState {
   ParsingState(Tree def, ProgramState program) {
     (this.program = program).text.add(code);
     @Get Function Name@
-    @Entering Function@
+    @Set Up Stack Allocation@
+    @Identify Callee Saves Registers@
     @Parse Function Parameters@
     @Keep Track Of Declared Variables@
   }
@@ -526,13 +527,14 @@ http://www.agner.org/optimize/calling%5Fconventions.pdf http://blogs.embarcadero
 Note that CALLEE_SAVE_VAR shouldn't be user-enterable or this will confuse things, hence "!"
 
 ~~~~
-@Entering Function@ +=
+@Identify Callee Saves Registers@ +=
 for(Register r : Register.CALLEE_SAVES)
   code.add(move(r, new Variable(CALLEE_SAVE_VAR + r)));
 @Parsing State Members@ +=
 void addReturn() {
   for(Register r : Register.CALLEE_SAVES)
     code.add(move(new Variable(CALLEE_SAVE_VAR + r), r));
+  @Restore Stack Pointer@
   code.add(Compiler.ret);
 }
 @Other Helpers@ +=
@@ -683,7 +685,7 @@ private static final class Pop extends Instruction {
 ~~~~
 @Before We Push Function Params Onto Stack@ += 
 if(numParams > maxInRegs && (numParams - maxInRegs) % 2 != 0)
-  state.code.add(Op.subq.with(new Immediate(8), rsp));
+  state.code.add(Op.subq.with(new Immediate(SIZE), rsp));
 @Remove Function Call Params From Stack@ +=
 int correction = 0;
 if((numParams - maxInRegs) % 2 != 0) correction = 1;
@@ -731,51 +733,85 @@ The stack. Each time we refer to a stack-allocated variable we have to get the s
 We'll have two types of stack allocation - static (where we know how many bytes we'll put on the stack at compile-time) and dynamic. This'll affect how we refer to function parameters on the stack and parameters to functions we call. These classes'll therefore need to refer to the _ParsingState_ to see whether we're using dynamic allocation.
 
 ~~~~
-@Value Classes@ +=
-private static abstract class UsesStack implements MemoryValue {
-  final ParsingState function;
-  UsesStack(ParsingState function) { this.function = function; }
-}
 @Parsing State Members@ +=
-private StorableValue framePointer = null; // avoid setting if possible
+private final StorableValue framePointer;
+@Other Helpers@ +=
+static boolean hasDynamicAllocation(Tree t) {
+  if(t.getType() == StackAlloc && get(t.getParent(), 1, 0).getType() != Number) return true;
+  for(Tree child : children(t))
+    if(hasDynamicAllocation(child)) return true;
+  return false;
+}
+@Set Up Stack Allocation@ +=
+if(hasDynamicAllocation(get(def, 2))) {
+  framePointer = new Variable();
+  code.add(move(rsp, framePointer));
+} else
+  framePointer = null;
+@Restore Stack Pointer@ +=
+if(framePointer != null)
+  code.add(move(framePointer, Register.rsp));
 ~~~~
 
 Stack variables are _Values_ that are pointers onto this function's stack space.
 
 ~~~~
 @Value Classes@ +=
-static final class StaticStackVar extends UsesStack {
-  final UnsignedLong bytesIntoStack;
-  StaticStackVar(ParsingState function, UnsignedLong bytesIntoStack) {
-    super(function); this.bytesIntoStack = bytesIntoStack;
+static final class StackVar {
+  final UnsignedLong bytesIntoStack; final UnsignedLong size;
+  StackVar(UnsignedLong bytesIntoStack, UnsignedLong size) {
+    this.bytesIntoStack = bytesIntoStack; this.size = size;
   }
-  public String toString() { @StackVar x86 Code@ }
 }
 @Parsing State Members@ +=
-private final Map<Variable, StaticStackVar> stackVars = Maps.newTreeMap();
+private final Map<Variable, StackVar> stackVars = Maps.newTreeMap();
 private UnsignedLong stackBytes = ZERO;
-StaticStackVar stackVar(Variable name, Immediate bytes) {
+  StackVar stackVar(Variable name, Immediate bytes) {
   if(!stackVars.containsKey(name)) {
-    stackVars.put(name, new StaticStackVar(this, stackBytes));
+    stackVars.put(name, new StackVar(stackBytes, bytes.value));
     stackBytes = stackBytes.add(bytes.value);
   } 
   return stackVars.get(name); 
 }
 ~~~~
 
-Create stack variables by subtracting chunks from the stack, or pre-allocating the space if we know it beforehand.
+We'll work out the memory address of a stack variable differently if we have dynamic allocation. However, even with static allocation we don't know how many entries there will be. We'll hand out new offsets as we get requests, but these will be further away from the stack pointer (i.e. closer to the start of the frame).
+
+~~~~
+@Parsing State Members@ +=
+StorableValue stackVarsRelativeTo() {
+  return framePointer == null ? rsp : framePointer;
+}
+long stackVarOffset(StackVar s) {
+  if(framePointer == null)
+    return s.bytesIntoStack.longValue(); // stack pointer + n bytes
+  else
+    return -s.bytesIntoStack.longValue(); // frame pointer - n bytes
+}
+Instruction stackVarOffset(StackVar s, Variable v) {
+  long offset = stackVarOffset(s);
+  if(offset < 0)
+    return Op.subq.with(new Immediate(-offset), v); 
+  else   
+    return Op.addq.with(new Immediate(offset), v);
+}
+~~~~
+
+Create stack variables by subtracting chunks from the stack, or pre-allocating the space if we know it beforehand. Note that the stack grows downwards, but we want the pointer we return to point to the lowest address.
 
 ~~~~
 @Parse A Stack Allocation@ +=
+Variable ret = new Variable();
 Value size = getAsValue(get(t, 1, 0));
-if(size instanceof Immediate)
-  return stackVar(new Variable(), (Immediate)size);
-else {
-  if(framePointer == null) 
-    framePointer = new Variable();
-  Variable ret = new Variable();
-  code.add(move(Register.rsp, ret)); // current top of stack is now pointer to allocated memory
+if(size instanceof Immediate) {
+  StackVar v = stackVar(ret, (Immediate)size);
+  code.add(move(stackVarsRelativeTo(), ret));
+  code.add(stackVarOffset(v, ret));
+  return ret;
+} else {
   code.add(Op.subq.with(size, Register.rsp));
+  code.add(move(Register.rsp, ret)); // point at lowest allocated byte
+  return ret;
 }
 ~~~~
 
@@ -783,10 +819,10 @@ Dealing with parameters. Make _Variable_ comparable and add _equals_ methods so 
 
 ~~~~
 @Static Classes@ +=
-static final class Parameter extends UsesStack {
-  final int number;
+static final class Parameter implements MemoryValue {
+  final ParsingState function; final int number;
   Parameter(ParsingState function, int number) { 
-    super(function); this.number = number; 
+    this.function = function; this.number = number; 
   }
   public String toString() { @Parameter x86 Code@ }
 }
@@ -825,10 +861,7 @@ Now we know whether or not we're using dynamic stack allocation, but we still do
 
 ~~~~
 @Store Frame Pointer@ +=
-if(state.framePointer != null) {
-  state.code.add(1, move(Register.rsp, state.framePointer));
-  addBeforeRets(state, move(state.framePointer, Register.rsp));
-}
+
 ~~~~
 
 
@@ -836,10 +869,11 @@ if(state.framePointer != null) {
 
 We'll do this function-by-function
 http://www.xypron.de/projects/linopt/apidocs/index.html (the paper)[http://grothoff.org/christian/lcpc2006.pdf]
+Note: insert stack moves first so frame pointer variable is resolved later.
 
 ~~~~
 @Do Register Allocation@ +=
-ControlFlowGraph controlFlow = new ControlFlowGraph(state.code);
+ControlFlowGraph controlFlow = new ControlFlowGraph(state.code, state.framePointer);
 if(controlFlow.variables.length > 0) {
   @Solve@
 }
@@ -853,6 +887,7 @@ static glp_prob getLPproblem(ControlFlowGraph controlFlow) {
 }
 static void copySolutionIntoCode(glp_prob allocation, ControlFlowGraph controlFlow, ParsingState state) {
   @Copy Solution Into Code@
+  @Calculate Stack Moves Needed@
   @Insert Stack Moves@
   @Allocate Stack Space For Variables@
 }
@@ -881,7 +916,7 @@ We need two separate bits of information from this graph; how the nodes relate t
 @Other Helpers@ +=
 static final class ControlFlowGraph {
   @Control Flow Graph Members@
-  ControlFlowGraph(List<Instruction> code) {
+  ControlFlowGraph(List<Instruction> code, StorableValue framePointer) {
     @Get Variables Used@
     @Fit Instructions Between Nodes@
     @Map Nodes To Instructions@
@@ -889,6 +924,7 @@ static final class ControlFlowGraph {
     @Variables Used At Next Instruction@
     @Identify Function Calls@
     @Calculate Liveness@
+    @Find Registers Already In Use@
     @Mark Aliased Variables@
     @Generate GLPK Mappings@
   }
@@ -1022,6 +1058,9 @@ for(Instruction i : code) {
   addAll(allVariables, i.uses(Variable.class));
 }
 variables = toArray(allVariables, Variable.class);
+this.framePointer = indexOf(variables, framePointer);
+@Control Flow Graph Members@ +=
+final int framePointer;
 ~~~~
 
 Liveness...as a BitSet. A variable is not live at the node before the instruction where it's created and is not live at the node after the instruction where it's last read.
@@ -1049,6 +1088,20 @@ for(Integer node = unprocessed.poll(); node != null; node = unprocessed.poll()) 
 }
 ~~~~
 
+We know some instructions pre-specify _Registers_ that they'll write to - and we don't want to put anything there that has to be live afterwards! We'll assume any register mentioned is written to, not read from!
+
+~~~~
+@Control Flow Graph Members@ +=
+final BitSet registersInUse = new BitSet();
+boolean registerInUse(int n, Register r) {
+  return registersInUse.get(n * Register.values().length + r.ordinal());
+}
+@Find Registers Already In Use@ +=
+for(int i = 0; i < code.size(); ++i)
+  for(Register r : code.get(i).uses(Register.class))
+    registersInUse.set(prevNode[i] * Register.values().length + r.ordinal());
+~~~~
+
 We can use liveness information to decide what variables we need to assign to registers at each node. At function calls we should ensure that any live variables are stored in registers that'll be preserved. The assembly instructions inserted before the function call itself will ensure that the parameters will stay in the correct registers. Also, if a variable is going to be used in an instruction following a node that variable can't be assigned to the stack!
 
 ~~~~
@@ -1057,8 +1110,10 @@ final Variable[] variables;
 boolean needsAssigning(int variable, int node, Register r) {
   boolean isLive = isLiveAt(variable, node) || isVarUsedNext(variable, node);
   boolean thisRegPreserved = !nodesBeforeFnCalls.get(node) || calleeSavesRegisterIndices.get(r.ordinal());
-  boolean ifUsedNotOnStack = !(isVarUsedNext(node, variable) && r == Register.THESTACK);
-  return isLive && thisRegPreserved && ifUsedNotOnStack;
+  boolean ifUsedNotOnStack = !(isVarUsedNext(node, variable) && r == THESTACK);
+  boolean framePointerNotOnStack = variable != framePointer || r != THESTACK;
+  boolean registerNotInUse = !registerInUse(node, r) || isVarUsedNext(variable, node);
+  return isLive && thisRegPreserved && ifUsedNotOnStack && framePointerNotOnStack && registerNotInUse;
 }
 @Other Helpers@ += 
 private static final BitSet calleeSavesRegisterIndices = new BitSet();
@@ -1639,38 +1694,77 @@ for(int i = 0; i < state.code.size(); ++i)
 ~~~~
 
 ~~~~
-@Copy Solution Into Code@ +=
-Multimap<Integer, Instruction> 
-  stackMovesBefore = HashMultimap.create(), 
-  stackMovesAfter = HashMultimap.create();
+@Calculate Stack Moves Needed@ +=
+Multimap<Integer, Instruction> stackMovesAfter = HashMultimap.create();
 for (int v = 0; v < controlFlow.variables.length; ++v)
   for (int n = 0; n < controlFlow.numNodes; ++n)
     for(Register r : Register.ASSIGNABLE) {
       int index = Collections.binarySearch(controlFlow.columns, new NewVarInRegFlag(v, r, n));
-      if(index >= 0 && glp_mip_col_val(allocation, index + 1) > 0.5) // v has moved
-        if(r == Register.THESTACK)
-          @V Now On Stack@
-        else
-          @V Now In Register@
+      if(index >= 0 && glp_mip_col_val(allocation, index + 1) > 0.5)
+        for(int i : controlFlow.instructionsBeforeNode.get(n)) {
+          @V Has Moved@
+          if(whereAmI == Register.THESTACK)
+            { @V Copied From Register To Stack@ }
+          else if(whereWasI == THESTACK)
+            { @V Copied From Stack To Register@ }
+          else
+            { @V Copied From Register To Register@ }
+        }
     }
+~~~~
+
+
+~~~~
+@V Has Moved@ +=
+Register whereAmI = r;
+Register whereWasI = whereAmI(allocation, controlFlow, v, controlFlow.prevNode[i]);
+~~~~
+
+~~~~
+@Find Where I Live On The Stack@ +=
+long stackOffset = state.stackVarOffset(
+  state.stackVar(controlFlow.variables[v], new Immediate(SIZE)));
+~~~~
+
+Who knows where the stack pointer is? If it's not in a fixed register, check the GLPK solution:
+
+~~~~
+@Parsing State Members@ +=
+Register stackVarsRelativeTo(glp_prob allocation, ControlFlowGraph controlFlow, int n) {
+  if(framePointer == null)
+    return rsp;
+  else
+    return whereAmI(allocation, controlFlow, indexOf(controlFlow.variables, framePointer), n);
+}
 ~~~~
 
 The != _THESTACK_ check catches newly-initialised variables and dead variables (which are forced onto the stack).
 
 ~~~~
-@V Now On Stack@ +=
-for(int i : controlFlow.instructionsBeforeNode.get(n))
-  stackMovesAfter.put(i, move(
-    whereAmI(allocation, controlFlow, v, controlFlow.prevNode[i]), 
-    state.stackVar(controlFlow.variables[v], new Immediate(8))));
+@V Copied From Register To Stack@ +=
+@Find Where I Live On The Stack@
+stackMovesAfter.put(i, move(
+  whereWasI, 
+  new AtAddress(
+    state.stackVarsRelativeTo(allocation, controlFlow, controlFlow.prevNode[i]), 
+    stackOffset)));
+~~~~
+
+The question is, where was V? On the stack or in a register?
+
+~~~~
+@V Copied From Stack To Register@ +=
+@Find Where I Live On The Stack@
+stackMovesAfter.put(i, move(
+  new AtAddress(
+    state.stackVarsRelativeTo(allocation, controlFlow, n),
+    stackOffset),
+  whereAmI));
 ~~~~
 
 ~~~~
-@V Now In Register@ +=
-for(int i : controlFlow.instructionsFollowingNode.get(n))
-  stackMovesBefore.put(i, move(
-    state.stackVar(controlFlow.variables[v], new Immediate(8)), 
-    whereAmI(allocation, controlFlow, v, n)));
+@V Copied From Register To Register@ +=
+stackMovesAfter.put(i, move(whereWasI, whereAmI));
 ~~~~
 
 
@@ -1679,9 +1773,7 @@ Inserting is a bit tricky as the indices will change
 ~~~~
 @Insert Stack Moves@ +=
 int drift = 0;
-for(int i : Sets.newTreeSet(Sets.union(stackMovesBefore.keySet(), stackMovesAfter.keySet()))) {
-  state.code.addAll(i + drift, stackMovesBefore.get(i)); 
-  drift += stackMovesBefore.get(i).size();
+for(int i : stackMovesAfter.keySet()) {
   state.code.addAll(i + drift + 1, stackMovesAfter.get(i)); 
   drift += stackMovesAfter.get(i).size();
 }
@@ -1726,12 +1818,6 @@ if(name instanceof Label)
 else
   return String.format( "call *%s", name); // indirect function call - code address in a register
 @Section x86 Code@ += return String.format( ".%s", name()); 
-@StackVar x86 Code@ +=
-if(function.framePointer == null) {
-  UnsignedLong offset = function.staticStackBytes().value.subtract(bytesIntoStack).subtract(SIZE);
-  return String.format("0x%s(%%rsp)", offset.toString(16)); // end of stack frame - stack size + n + return address
-} else   
-  return String.format("-0x%s(%s)", bytesIntoStack.toString(16), function.framePointer); // start of stack from + n
 @Align x86 Code@ += ".align " + SIZE
 @Text x86 Code@ += ".text"
 @Ret x86 Code@ += "ret"
@@ -1751,7 +1837,10 @@ else
 @Label x86 Code@ += return String.format("%s@GOTPCREL(%%rip)", name);
 @At Label x86 Code@ += return String.format("%s(%%rip)", at.name);
 @At Address x86 Code@ +=
-return offset == 0 ? String.format("(%s)", at) : String.format("0x%s(%s)", Long.toString(offset, 16), at);
+if(offset == 0)
+  return String.format("(%s)", at);
+else
+  return String.format("%s0x%s(%s)", offset < 0 ? "-" : "", Long.toString(Math.abs(offset), 16), at);
 @Release Args x86 Code@ +=
 return Op.addq.with(new Immediate(numArgs * SIZE.longValue()).alignAllocation(), rsp).toString();
 @Store Arg x86 Code@ +=

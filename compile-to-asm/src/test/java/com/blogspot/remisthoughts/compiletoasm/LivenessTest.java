@@ -29,7 +29,7 @@ public class LivenessTest {
 				move(vars[1], Register.rax),
 				Compiler.ret);
 
-		ControlFlowGraph cfg = new ControlFlowGraph(code);
+		ControlFlowGraph cfg = new ControlFlowGraph(code, null);
 
 		// vars[0]: "a"
 		assertFalse(cfg.isLiveAt(0, 0));
@@ -62,7 +62,7 @@ public class LivenessTest {
 				move(vars[0], Register.rax), // mov a, %rax
 				Compiler.ret);
 
-		ControlFlowGraph cfg = new ControlFlowGraph(code);
+		ControlFlowGraph cfg = new ControlFlowGraph(code, null);
 
 		// vars[0]: "a"
 		assertFalse(cfg.isLiveAt(0, 0));
@@ -98,7 +98,7 @@ public class LivenessTest {
 				move(vars[2], Register.rax),
 				Compiler.ret);
 
-		ControlFlowGraph cfg = new ControlFlowGraph(code);
+		ControlFlowGraph cfg = new ControlFlowGraph(code, null);
 
 		// vars[0]: "x"
 		int x = Compiler.indexOf(cfg.variables, vars[0]);

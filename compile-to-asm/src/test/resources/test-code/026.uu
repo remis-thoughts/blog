@@ -1,0 +1,10 @@
+fn check_stack_alignment() {}
+
+a = $(+(+(8, 8), 8));
+@a = +(a, 8);
+@@a = +(a, 16);
+@@@a = 26;
+
+check_stack_alignment();
+
+return @(@(@(a)));
