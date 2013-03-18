@@ -44,7 +44,7 @@ public class AliasingTest {
 				move(a, Register.rax),
 				ret);
 
-		ControlFlowGraph cfg = new ControlFlowGraph(code);
+		ControlFlowGraph cfg = new ControlFlowGraph(code, new Variable());
 
 		assertEquals(0, cfg.aliasingVars.get(0).size());
 		assertEquals(0, cfg.aliasingVars.get(1).size());
@@ -79,7 +79,7 @@ public class AliasingTest {
 				move(b, Register.rax), // r:b
 				ret);
 
-		ControlFlowGraph cfg = new ControlFlowGraph(code);
+		ControlFlowGraph cfg = new ControlFlowGraph(code, new Variable());
 
 		assertEquals(0, cfg.aliasingVars.get(0).size());
 		assertEquals(0, cfg.aliasingVars.get(1).size());
@@ -113,7 +113,7 @@ public class AliasingTest {
 				move(atA, Register.rax), // r:a
 				ret);
 
-		ControlFlowGraph cfg = new ControlFlowGraph(code);
+		ControlFlowGraph cfg = new ControlFlowGraph(code, new Variable());
 
 		assertEquals(0, cfg.aliasingVars.get(0).size());
 		assertEquals(0, cfg.aliasingVars.get(1).size());

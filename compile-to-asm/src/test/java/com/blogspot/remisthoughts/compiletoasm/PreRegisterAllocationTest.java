@@ -1,6 +1,5 @@
 package com.blogspot.remisthoughts.compiletoasm;
 
-import static com.blogspot.remisthoughts.compiletoasm.TestUtils.assertEqualStackReadsAndWrites;
 import static org.junit.Assert.assertEquals;
 
 import java.io.ByteArrayInputStream;
@@ -50,7 +49,6 @@ public class PreRegisterAllocationTest {
 		Compiler.parseDefinition(ast, program);
 		List<Instruction> code = Lists.newArrayList(Iterables.filter(
 				program.text.get(0), Compiler.noNoOps));
-		assertEqualStackReadsAndWrites(code);
 	}
 
 	@Test
@@ -61,7 +59,6 @@ public class PreRegisterAllocationTest {
 		Compiler.parseDefinition(ast, program);
 		List<Instruction> code = Lists.newArrayList(Iterables.filter(
 				program.text.get(0), Compiler.noNoOps));
-		assertEqualStackReadsAndWrites(code);
 	}
 
 }

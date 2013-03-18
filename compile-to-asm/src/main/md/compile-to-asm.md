@@ -786,7 +786,7 @@ long stackVarOffset(StackVar s) {
   if(framePointer == null)
     return s.bytesIntoStack.longValue(); // stack pointer + n bytes
   else
-    return -s.bytesIntoStack.longValue(); // frame pointer - n bytes
+    return -s.bytesIntoStack.add(SIZE).longValue(); // frame pointer - (n+8) bytes
 }
 Instruction stackVarOffset(StackVar s, Variable v) {
   long offset = stackVarOffset(s);
@@ -1039,7 +1039,10 @@ Set<Variable> readsFrom() { return setOf(Variable.class, arg); }
 <VAL> Set<VAL> uses(Class<VAL> c) { return setOf(c, arg); }
 @Other Helpers@ +=
 private static <VAL> Set<VAL> setOf(Class<VAL> c, Object... objs) {
-  return ImmutableSet.copyOf(filter(transform(Arrays.asList(objs), unwrap), c));
+  List<Object> wrapped = Arrays.asList(objs);
+  return ImmutableSet.copyOf(concat(
+    filter(transform(wrapped, unwrap), c), 
+    filter(wrapped, c)));
 }
 private static Function<Object, Object> unwrap = new Function<Object, Object>() {
   public Object apply(Object v) { 
@@ -1301,7 +1304,7 @@ for(int i = 0; i < code.size(); ++i) {
 @Determine VarInRegAtInstr Coefficient@ +=
 if(cfg.shouldBeNoOp.contains(this)) coefficient += MOVE_NOP_HINT;
 @Other Helpers@ +=
-private static final double MOVE_NOP_HINT = -0.5;
+private static final double MOVE_NOP_HINT = -1.0;
 ~~~~
 
 Let's also encourage putting aliased vars in the same register. For that we'll need another flag:
@@ -1774,9 +1777,26 @@ Inserting is a bit tricky as the indices will change
 @Insert Stack Moves@ +=
 int drift = 0;
 for(int i : stackMovesAfter.keySet()) {
-  state.code.addAll(i + drift + 1, stackMovesAfter.get(i)); 
+  List<Instruction> toAdd = Lists.newArrayList(stackMovesAfter.get(i));
+  @Choose Stack Move Order@
+  state.code.addAll(i + drift + 1, toAdd); 
   drift += stackMovesAfter.get(i).size();
 }
+~~~~
+
+The order is important, if we want to avoid flattening values moved from register to register with those moved from the stack
+
+~~~~
+@Choose Stack Move Order@ +=
+Collections.sort(toAdd, memoryLoadsLast);
+@Other Helpers@ +=
+static final Comparator<Instruction> memoryLoadsLast = new Comparator<Instruction>() {
+  public int compare(Instruction a, Instruction b) {
+    boolean aUses = a.uses(AtAddress.class).isEmpty();
+    boolean bUses = b.uses(AtAddress.class).isEmpty();
+    return aUses ^ bUses ? (aUses ? -1 : 1) : 0;
+  }
+};
 ~~~~
 
 Now we know how many local vars we need, we can reserve the appropriate amount of space. However, we must preserve 16-byte alignment when we're making function calls, so rather than rounding the stack pointer before every function call we'll just over-allocate 8 bytes of stack space.
@@ -1792,8 +1812,11 @@ Immediate staticStackBytes() {
 @Allocate Stack Space For Variables@ +=
 Immediate staticBytes = state.staticStackBytes();
 if(!staticBytes.value.equals(ZERO)) {
-  state.code.add(1, Op.subq.with(staticBytes, Register.rsp));
-  addBeforeRets(state, Op.addq.with(staticBytes, Register.rsp));
+  state.code.add(
+    state.framePointer == null ? 1 : 2, 
+    Op.subq.with(staticBytes, Register.rsp));
+  if(state.framePointer == null)
+    addBeforeRets(state, Op.addq.with(staticBytes, Register.rsp));
 }
 ~~~~
 

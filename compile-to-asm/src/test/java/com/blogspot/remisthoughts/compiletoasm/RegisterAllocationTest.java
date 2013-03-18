@@ -7,7 +7,6 @@ import static com.blogspot.remisthoughts.compiletoasm.Compiler.move;
 import static com.blogspot.remisthoughts.compiletoasm.Compiler.noNoOps;
 import static com.blogspot.remisthoughts.compiletoasm.Compiler.ret;
 import static com.blogspot.remisthoughts.compiletoasm.TestUtils.assertAllAssigned;
-import static com.blogspot.remisthoughts.compiletoasm.TestUtils.assertEqualStackReadsAndWrites;
 import static com.google.common.collect.Iterables.filter;
 import static com.google.common.collect.Iterables.isEmpty;
 import static org.gnu.glpk.GLPK._glp_lpx_get_mat_row;
@@ -54,7 +53,7 @@ import com.google.common.collect.Lists;
 public class RegisterAllocationTest {
 
 	private static List<Instruction> assertAllocation(List<Instruction> code) {
-		ControlFlowGraph cfg = new ControlFlowGraph(code);
+		ControlFlowGraph cfg = new ControlFlowGraph(code, new Variable());
 		glp_prob problem = solve(cfg, code);
 		code = afterSolve(code, cfg, problem);
 
@@ -145,7 +144,7 @@ public class RegisterAllocationTest {
 				Compiler.ret);
 
 		// assigns: ret->rbp, a->rdi, var0->r10
-		ControlFlowGraph cfg = new ControlFlowGraph(code);
+		ControlFlowGraph cfg = new ControlFlowGraph(code, new Variable());
 		glp_prob lpProblem = solve(cfg, code);
 
 		// some debug printing
@@ -157,7 +156,6 @@ public class RegisterAllocationTest {
 		List<Instruction> solved = afterSolve(code, cfg, lpProblem);
 		assertAllAssigned(solved);
 		assertEquals(12, solved.size());
-		assertEqualStackReadsAndWrites(solved);
 	}
 
 	@Test
@@ -221,7 +219,7 @@ public class RegisterAllocationTest {
 				Compiler.ret);
 
 		// assigns: ret->rbp, a->rdi, var0->r10
-		ControlFlowGraph cfg = new ControlFlowGraph(code);
+		ControlFlowGraph cfg = new ControlFlowGraph(code, new Variable());
 		glp_prob lpProblem = solve(cfg, code);
 
 		// some debug printing
@@ -232,7 +230,6 @@ public class RegisterAllocationTest {
 		List<Instruction> solved = afterSolve(code, cfg, lpProblem);
 		assertAllAssigned(solved);
 		assertEquals(10, solved.size());
-		assertEqualStackReadsAndWrites(solved);
 	}
 
 	private static List<Instruction> afterSolve(List<Instruction> code, ControlFlowGraph cfg, glp_prob lpProblem) {
