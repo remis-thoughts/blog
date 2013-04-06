@@ -1,11 +1,11 @@
 fn add(a, b) {
     return +(a, b);
-}
+};
 fn sub(a, b) {
     return -(a, b);
-}
+};
 fn do_stuff(a, b, c) {
     return sub(add(a, b), c);
-}
+};
 
 return do_stuff(10, 5, 9);

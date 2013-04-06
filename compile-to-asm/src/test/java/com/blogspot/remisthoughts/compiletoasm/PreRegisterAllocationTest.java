@@ -44,7 +44,7 @@ public class PreRegisterAllocationTest {
 	@Test
 	public void testSpillToStackAcrossFnCall() throws Exception {
 		Tree ast = Compiler.get(
-				code("fn main(a) { @a = +(3, 2);ret = @(a);free(a);return ret;}"), 0);
+				code("fn main(a) { @a = +(3, 2);ret = @(a);free(a);return ret;};"), 0);
 		ProgramState program = new ProgramState();
 		Compiler.parseDefinition(ast, program);
 		List<Instruction> code = Lists.newArrayList(Iterables.filter(
@@ -54,7 +54,7 @@ public class PreRegisterAllocationTest {
 	@Test
 	public void testAnotherSpillToStackAcrossFnCall() throws Exception {
 		Tree ast = Compiler.get(
-				code("fn do_stuff(a, b, c) {return sub(add(a, b), c);}"), 0);
+				code("fn do_stuff(a, b, c) {return sub(add(a, b), c);};"), 0);
 		ProgramState program = new ProgramState();
 		Compiler.parseDefinition(ast, program);
 		List<Instruction> code = Lists.newArrayList(Iterables.filter(

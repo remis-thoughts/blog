@@ -5,7 +5,7 @@ http://www.antlr.org/wiki/display/~admin/2008/11/30/Example+tree+rewriting+with+
 
 ~~~~
 @Antlr Parse Rules@ +=
-eval : ((statement SC) | fundef)+ -> ^(Root fundef* ^(Definition ^(Name Global["main"]) ^(Parameters) ^(Body statement*)));
+eval : ((statement | fundef) SC)+ -> ^(Root fundef* ^(Definition ^(Name Global["main"]) ^(Parameters) ^(Body statement*)));
 statement : funcall | ret | assign | whileloop | ifelse;
 expression : variable | Number | funcall | FFI;
 variable : Local | Global;
@@ -34,7 +34,7 @@ Local : '_'* ('a'..'z') ('a'..'z'|'_'|'0'..'9')*;
 Global : '_'* ('A'..'Z') ('A'..'Z'|'_'|'0'..'9')*;
 FFI : '#' ('a'..'z'|'A'..'Z'|'0'..'9'|'_')+;
 Number : ('0'..'9')+;
-Intrinsic : '+' | '-' | '&' | '|'; Deref : '@'; StackAlloc : '$';
+Intrinsic : '+' | '-' | '&' | '|' | '\u00ab' | '\u00bb' ; Deref : '@'; StackAlloc : '$';
 Conditional : '<' | '>' | '\u2261' | '\u2260' | '\u2264' | '\u2265';
 WS : (' ' | '\t' | '\r' | '\n') {$channel=HIDDEN;};
 @Synthetic Tokens@ +=
@@ -96,7 +96,9 @@ enum Op {
   subq("-") { @SUBQ@ },
   andq("&") { @ANDQ@ },
   orq("|")  { @ORQ@  },
-  cmpq("?") { @CMPQ@ };
+  cmpq("?") { @CMPQ@ },
+  shlq("«") { @SHLQ@ },
+  shrq("»") { @SHRQ@ };
   Instruction with(Value arg1, StorableValue arg2) { 
     return new BinaryOp(this, arg1, arg2); 
   }
@@ -287,7 +289,8 @@ private void call(Tree t) {
   }
   for(int r = 0; r < registerArgs; ++r) // regs second so they don't get flattened by mem switch
     code.add(move(values.get(r), Register.PARAMETERS[r]));
-  code.add(callFn(text(t, 0), storedArgs));
+  @Track Stack Arg Watermark@
+  code.add(new Call(getAsValue(get(t,0))));
   code.add(new ReleaseArgs(this, storedArgs));
 }
 ~~~~
@@ -297,11 +300,8 @@ Note that we'll assume the function being called is a local variable if it has t
 ~~~~
 @Parsing State Members@ +=
 private int mostStackArgs = 0;
-Instruction callFn(String text, int numStackArgs) {
-  Variable fnName = new Variable(text);
-  mostStackArgs = Math.max(mostStackArgs, numStackArgs);
-  return new Call(declaredVars.contains(fnName) ? fnName : new Label("_" + text));
-}
+@Track Stack Arg Watermark@ +=
+mostStackArgs = Math.max(mostStackArgs, storedArgs);
 ~~~~
 
 According to [the ABI (pdf)](http://www.x86-64.org/documentation/abi.pdf), values are returned in the _rax_ register.
@@ -408,7 +408,7 @@ private Value getAsValue(Tree t) {
         case Global:
             { @Get A Global@ }
         case Local:
-            return resolveVar(text(t));
+            { @Get A Local@ }
         case FFI:
             return new Label(text(t).substring(1));
         case Call:
@@ -448,6 +448,11 @@ What if they're anonymous? Need "_" for C linkage
 @Get Function Name@ +=
 myName = hasChildren(def, 0) ? new Label("_" + text(def, 0, 0)) : new Label();
 code.add(new Definition(myName, hasChildren(def, 0) && type(def, 0, 0) == Global));
+~~~~
+
+~~~~
+@Get A Local@ +=
+return type(t.getParent()) == Call ? new Label("_" + text(t)) : resolveVar(text(t));
 ~~~~
 
 ~~~~
@@ -507,6 +512,8 @@ private void parseStatements(Iterable<Tree> statements) {
 
 ~~~~
 @Get A Global@ +=
+if(type(t.getParent()) == Call) 
+  return new Label("_" + text(t));
 Label ret = new Label(text(t));
 if(!program.globals.containsKey(ret))
   program.globals.put(ret, new Immediate(0));
@@ -1913,6 +1920,8 @@ public boolean isNoOp(Value arg1, StorableValue arg2) { return arg1.equals(new I
 @ADDQ@ += @Zero Is Identity@
 @SUBQ@ += @Zero Is Identity@
 @ORQ@ += @Zero Is Identity@
+@SHRQ@ += @Zero Is Identity@
+@SHLQ@ += @Zero Is Identity@
 @All Bits Set Is Identity@ +=
 public boolean isNoOp(Value arg1, StorableValue arg2) { return arg1.equals(new Immediate(0xFFFFFFFFFFFFFFFFL)); }
 @ANDQ@ += @All Bits Set Is Identity@

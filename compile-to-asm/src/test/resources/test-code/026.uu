@@ -1,4 +1,4 @@
-fn check_stack_alignment() {}
+fn check_stack_alignment() {};
 
 a = $(+(+(8, 8), 8));
 @a = +(a, 8);

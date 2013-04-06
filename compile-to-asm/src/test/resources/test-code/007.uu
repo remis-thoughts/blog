@@ -1,9 +1,9 @@
 fn one(a,b,c,d,e,f,g,h) {
     return +(+(+(+(+(+(+(a, b), c), d), e), f), g), h);
-}
+};
 
 fn two(a,b,c,d,e,f,g,h) {
     return one(a,b,c,d,e,f,g,h);
-}
+};
 
 return two(0,1,1,0,1,2,1,1);

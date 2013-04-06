@@ -82,9 +82,9 @@ public class CompilerTest {
 
 			// run the file and check it produces the correct exit code
 			Process bin = Runtime.getRuntime().exec(binaryFile.getAbsolutePath());
+			print(System.out, bin.getInputStream());
+			print(System.err, bin.getErrorStream());
 			if (Integer.parseInt(exitCode) != bin.waitFor()) {
-				print(System.out, bin.getInputStream());
-				print(System.err, bin.getErrorStream());
 				fail("must have correct exit code " + exitCode + ", not " + bin.waitFor());
 			}
 
