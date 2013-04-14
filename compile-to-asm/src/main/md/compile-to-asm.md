@@ -460,7 +460,10 @@ return type(t.getParent()) == Call ? new Label("_" + text(t)) : resolveVar(text(
 static Label parseDefinition(Tree def, ProgramState program) {
   ParsingState state = new ParsingState(def, program);  
   state.parseStatements(children(def, 2));
-  if(getLast(state.code) != ret) { state.addReturn(); }
+  if(getLast(state.code) != ret) {
+    @No Return Statement Given@ 
+    state.addReturn();
+  }
   @Do Register Allocation@
   @Is This The Main Function@
   return state.myName;
@@ -532,6 +535,7 @@ declaredVars.add(var);
 Stack frames. [Enter](http://www.read.seas.harvard.edu/~kohler/class/04f-aos/ref/i386/ENTER.htm)
 http://www.agner.org/optimize/calling%5Fconventions.pdf http://blogs.embarcadero.com/eboling/2009/05/20/5607
 Note that CALLEE_SAVE_VAR shouldn't be user-enterable or this will confuse things, hence "!"
+Adding the rax-rax move so we definitely have one instruction the return value register, which makes scanning backwards easier.
 
 ~~~~
 @Identify Callee Saves Registers@ +=
@@ -670,7 +674,7 @@ However, when we return from main we should restore the original _rsp_ (regardle
 if(state.myName.name.equals("_main")) {
   state.code.addAll(1, Arrays.asList(
     new Push(rsp),
-    Op.andq.with(new Immediate(0xFFFFFFFFFFFFFFF0L), rsp)));
+    alignStack()));
   addBeforeRets(state, new Pop(rsp));
 }
 @Instruction Classes@ +=
@@ -684,6 +688,9 @@ private static final class Pop extends Instruction {
   final StorableValue value;
   Pop(StorableValue value) { this.value = value; }
   public String toString() { @Pop x86 Code@ }
+}
+static Instruction alignStack() {
+  return Op.andq.with(new Immediate(0xFFFFFFFFFFFFFFF0L), rsp);
 }
 ~~~~
 
@@ -741,7 +748,7 @@ We'll have two types of stack allocation - static (where we know how many bytes 
 
 ~~~~
 @Parsing State Members@ +=
-private final StorableValue framePointer;
+final StorableValue framePointer;
 @Other Helpers@ +=
 static boolean hasDynamicAllocation(Tree t) {
   if(t.getType() == StackAlloc && get(t.getParent(), 1, 0).getType() != Number) return true;
@@ -817,6 +824,7 @@ if(size instanceof Immediate) {
   return ret;
 } else {
   code.add(Op.subq.with(size, Register.rsp));
+  code.add(alignStack()); // round allocation up to nearest 16 bytes
   code.add(move(Register.rsp, ret)); // point at lowest allocated byte
   return ret;
 }
@@ -1112,6 +1120,52 @@ for(int i = 0; i < code.size(); ++i)
     registersInUse.set(prevNode[i] * Register.values().length + r.ordinal());
 ~~~~
 
+When we start a function we want to make sure the registers we're going to preserve aren't allocated before we copy them into variables.  
+
+~~~~
+@Find Registers Already In Use@ +=
+EnumSet<Register> saved = EnumSet.noneOf(Register.class);
+saved.addAll(Arrays.asList(Register.CALLEE_SAVES));
+Collection<Integer> next;
+for (int n = FIRST_NODE; !saved.isEmpty(); n = Iterables.getOnlyElement(next)) {
+  for (Register r : saved)
+    registersInUse.set(n * Register.values().length + r.ordinal());
+  for(int i : instructionsFollowingNode.get(n))
+    saved.removeAll(code.get(i).uses(Register.class));
+  if((next = this.nextNodes.get(n)).isEmpty())
+    break;
+}
+~~~~
+
+Once we've restored the saved registers (and the return value!), we don't want to assign anything to them. Note that we know control flow is linear between the ret and the return statement.
+
+~~~~
+@Find Registers Already In Use@ +=
+Collection<Integer> prev;
+for (int i : instructionsBeforeNode.get(LAST_NODE)) {
+  EnumSet<Register> restored = EnumSet.noneOf(Register.class);
+  restored.addAll(Arrays.asList(Register.CALLEE_SAVES));
+  @Decide Which Registers To Restore@
+  for (int n = prevNode[i]; !saved.isEmpty(); n = prevNode[Iterables.getOnlyElement(prev)]) {
+    for (Register r : saved)
+      registersInUse.set(n * Register.values().length + r.ordinal());
+    for (int j : instructionsBeforeNode.get(n))
+      saved.removeAll(code.get(j).uses(Register.class));
+    if((prev = instructionsBeforeNode.get(n)).isEmpty())
+      break;
+  }
+}
+~~~~
+
+...we want to stop the return value from being flattened too.
+
+~~~~
+@Decide Which Registers To Restore@ +=
+restored.add(rax);
+@No Return Statement Given@ +=
+state.code.add(move(rax, rax));
+~~~~
+
 We can use liveness information to decide what variables we need to assign to registers at each node. At function calls we should ensure that any live variables are stored in registers that'll be preserved. The assembly instructions inserted before the function call itself will ensure that the parameters will stay in the correct registers. Also, if a variable is going to be used in an instruction following a node that variable can't be assigned to the stack!
 
 ~~~~
@@ -1149,9 +1203,6 @@ static abstract class CellKey implements Comparable<CellKey> {
       compare(v, o.v).
       compare(r, o.r).
       compare(n, o.n).result();
-  }
-  public String toString() {
-    return String.format("%s v:%d r:%s n:%d", getClass().getSimpleName(), v, r, n);
   }
 }
 private static final int NONE = -1;
@@ -1328,7 +1379,7 @@ private static final double ALIASED_VAR_HINT = -0.5;
 @Add Column Keys@ +=
 for(Integer n : aliasingVars.asMap().keySet())
   for (Register r : Register.ASSIGNABLE)
-    if(r != Register.THESTACK)
+    if(r != Register.THESTACK && !registerInUse(n, r))
       columns.add(new AliasedInSameReg(r, n));
 ~~~~
 
@@ -1361,19 +1412,24 @@ static final class Constraint {
     this.row = row; this.column = column; this.value = value;
   } 
 }
+~~~~
+
+Crazy 1-indexing - leaves blank 0-spaces everywhere
+
+~~~~
 @Determine Rows And Columns@ +=
 List<Constraint> constraints = Lists.newArrayList();
 for(int row = 0; row < controlFlow.rows.size(); ++row)
   controlFlow.rows.get(row).addConstraints(allocation, row, constraints, controlFlow);
 @Finalise Problem@ +=
-SWIGTYPE_p_int constraintCols = new_intArray(constraints.size());
-SWIGTYPE_p_int constraintRows = new_intArray(constraints.size());
-SWIGTYPE_p_double constraintVals = new_doubleArray(constraints.size());
-for(int i = 0; i < constraints.size(); ++i) {
-  Constraint c = constraints.get(i);
-  intArray_setitem(constraintCols, i + 1, c.column + 1);
-  intArray_setitem(constraintRows, i + 1, c.row + 1);
-  doubleArray_setitem(constraintVals, i + 1, c.value);
+SWIGTYPE_p_int constraintCols = new_intArray(constraints.size() + 1);
+SWIGTYPE_p_int constraintRows = new_intArray(constraints.size() + 1);
+SWIGTYPE_p_double constraintVals = new_doubleArray(constraints.size() + 1);
+for(int i = 1; i <= constraints.size(); ++i) {
+  Constraint c = constraints.get(i - 1);
+  intArray_setitem(constraintCols, i, c.column + 1);
+  intArray_setitem(constraintRows, i, c.row + 1);
+  doubleArray_setitem(constraintVals, i, c.value);
 }
 glp_load_matrix(
   allocation,
@@ -1381,6 +1437,9 @@ glp_load_matrix(
   constraintRows,
   constraintCols,
   constraintVals);
+delete_intArray(constraintRows);
+delete_intArray(constraintCols);
+delete_doubleArray(constraintVals);
 ~~~~
 
 ~~~~
@@ -1405,7 +1464,7 @@ static final class AliasedVarFlag extends RowKey {
 @Add Row Keys@ +=
 for(Integer n : aliasingVars.asMap().keySet())
   for (Register r : Register.ASSIGNABLE)
-    if(r != Register.THESTACK)
+    if(r != Register.THESTACK  && !registerInUse(n, r))
       rows.add(new AliasedVarFlag(r, n));
 ~~~~
 
@@ -1705,7 +1764,7 @@ for(int i = 0; i < state.code.size(); ++i)
 
 ~~~~
 @Calculate Stack Moves Needed@ +=
-Multimap<Integer, Instruction> stackMovesAfter = HashMultimap.create();
+Multimap<Integer, Instruction> stackMovesAfter = TreeMultimap.create(Ordering.natural(), memoryLoadsLast);
 for (int v = 0; v < controlFlow.variables.length; ++v)
   for (int n = 0; n < controlFlow.numNodes; ++n)
     for(Register r : Register.ASSIGNABLE) {
@@ -1778,30 +1837,28 @@ stackMovesAfter.put(i, move(whereWasI, whereAmI));
 ~~~~
 
 
-Inserting is a bit tricky as the indices will change
+Inserting is a bit tricky as the indices will change. We need a treeset as we walk through the code array, so need the insertions in sequence.
 
 ~~~~
 @Insert Stack Moves@ +=
 int drift = 0;
 for(int i : stackMovesAfter.keySet()) {
-  List<Instruction> toAdd = Lists.newArrayList(stackMovesAfter.get(i));
+  Collection<Instruction> toAdd = stackMovesAfter.get(i);
   @Choose Stack Move Order@
   state.code.addAll(i + drift + 1, toAdd); 
-  drift += stackMovesAfter.get(i).size();
+  drift += toAdd.size();
 }
 ~~~~
 
 The order is important, if we want to avoid flattening values moved from register to register with those moved from the stack
 
 ~~~~
-@Choose Stack Move Order@ +=
-Collections.sort(toAdd, memoryLoadsLast);
 @Other Helpers@ +=
 static final Comparator<Instruction> memoryLoadsLast = new Comparator<Instruction>() {
   public int compare(Instruction a, Instruction b) {
     boolean aUses = a.uses(AtAddress.class).isEmpty();
     boolean bUses = b.uses(AtAddress.class).isEmpty();
-    return aUses ^ bUses ? (aUses ? -1 : 1) : 0;
+    return aUses ^ bUses ? (aUses ? -1 : 1) : Ints.compare(a.hashCode(), b.hashCode());
   }
 };
 ~~~~
