@@ -18,7 +18,6 @@ import org.gnu.glpk.SWIGTYPE_p_double;
 import org.gnu.glpk.SWIGTYPE_p_int;
 import org.gnu.glpk.glp_prob;
 
-import com.blogspot.remisthoughts.compiletoasm.Compiler;
 import com.blogspot.remisthoughts.compiletoasm.Compiler.ColumnKey;
 import com.blogspot.remisthoughts.compiletoasm.Compiler.ControlFlowGraph;
 import com.blogspot.remisthoughts.compiletoasm.Compiler.Instruction;
@@ -27,14 +26,13 @@ import com.blogspot.remisthoughts.compiletoasm.Compiler.RowKey;
 import com.blogspot.remisthoughts.compiletoasm.Compiler.Variable;
 import com.google.common.base.Joiner;
 
-
 class DebugUtils {
 
 	/**
 	 * Assumes var is only in one register at once...it might not be if the
 	 * constraints are incorrect!
 	 */
-	 static void printVariableLife(glp_prob lpProblem, ControlFlowGraph cfg, List<Instruction> code, Variable variable) {
+	static void printVariableLife(glp_prob lpProblem, ControlFlowGraph cfg, List<Instruction> code, Variable variable) {
 		System.out.println(variable.name);
 		int v = indexOf(cfg.variables, variable);
 		for (int i = 0; i < code.size(); ++i) {
@@ -48,7 +46,29 @@ class DebugUtils {
 		}
 	}
 
-	 static void printRegisterLife(glp_prob lpProblem, ControlFlowGraph cfg, List<Instruction> code, Register r) {
+	static void printVariableLiveness(ControlFlowGraph cfg, List<Instruction> code, Variable variable) {
+		int v = indexOf(cfg.variables, variable);
+		System.out.printf("%s (%d)\n", variable.name, v);
+		for (int i = 0; i < code.size(); ++i) {
+			int index = cfg.prevNode[i] * cfg.variables.length + v;
+			System.out.printf("%02d: %s", i, cfg.isLive.get(index));
+			boolean r = cfg.varsReadNext.get(index);
+			boolean w = cfg.varsWrittenNext.get(index);
+			if (r || w) {
+				System.out.print(" (");
+				if (r) {
+					System.out.print("r");
+				}
+				if (w) {
+					System.out.print("w");
+				}
+				System.out.print(")");
+			}
+			System.out.print("\n");
+		}
+	}
+
+	static void printRegisterLife(glp_prob lpProblem, ControlFlowGraph cfg, List<Instruction> code, Register r) {
 		System.out.println(r.name());
 		for (int i = 0; i < code.size(); ++i) {
 			int n = cfg.prevNode[i];
@@ -66,7 +86,7 @@ class DebugUtils {
 		}
 	}
 
-	 static void printShouldBeSwitches(glp_prob lpProblem, ControlFlowGraph cfg, List<Instruction> code) {
+	static void printShouldBeSwitches(glp_prob lpProblem, ControlFlowGraph cfg, List<Instruction> code) {
 		System.out.println("should-be-switches");
 		for (int i = 0; i < code.size(); ++i) {
 			int n = cfg.prevNode[i];
@@ -98,7 +118,7 @@ class DebugUtils {
 		}
 	}
 
-	 static void printColumns(ControlFlowGraph cfg, glp_prob problem, int n) {
+	static void printColumns(ControlFlowGraph cfg, glp_prob problem, int n) {
 		for (int i = 0; i < cfg.columns.size(); ++i) {
 			ColumnKey column = cfg.columns.get(i);
 			if (column.n == n) {
@@ -107,7 +127,7 @@ class DebugUtils {
 		}
 	}
 
-	 static void printRows(ControlFlowGraph cfg, glp_prob problem, int n) {
+	static void printRows(ControlFlowGraph cfg, glp_prob problem, int n) {
 		for (int i = 0; i < cfg.rows.size(); ++i) {
 			RowKey row = cfg.rows.get(i);
 			if (row.n == n) {
@@ -116,7 +136,7 @@ class DebugUtils {
 		}
 	}
 
-	 static void printRow(ControlFlowGraph cfg, glp_prob problem, RowKey key) {
+	static void printRow(ControlFlowGraph cfg, glp_prob problem, RowKey key) {
 		int row = Collections.binarySearch(cfg.rows, key);
 		assertTrue(row >= 0);
 
@@ -131,7 +151,7 @@ class DebugUtils {
 		}
 	}
 
-	 static int numNodesLiveAtBefore(ControlFlowGraph cfg, int v, int n) {
+	static int numNodesLiveAtBefore(ControlFlowGraph cfg, int v, int n) {
 		int ret = 0;
 		for (int prev : cfg.nextNodes.inverse().get(n)) {
 			if (cfg.isLiveAt(v, prev)) {

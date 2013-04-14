@@ -1,0 +1,15 @@
+fn fibs(nth) {
+	last = 1;
+	this = 1;
+	
+	while >(nth, 0) {
+		nth = -(nth, 1);
+		next = +(this, last);
+		last = this;
+		this = next;
+	};
+	
+	return this;
+};
+
+return -(fibs(7), 1);

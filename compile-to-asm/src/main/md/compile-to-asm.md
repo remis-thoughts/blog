@@ -652,7 +652,7 @@ A while loop is essentially an if block with an unconditional loop
 ~~~~
 @Parse A While Statement@ +=
 Label l = new Label(); code.add(new DefineLabel(l));
-Label endWhile = parseIf(get(statement, 1), get(statement, 2), null);
+Label endWhile = parseIf(get(statement, 0), get(statement, 1), null);
 code.add(new Jump(l, null)); 
 code.add(new DefineLabel(endWhile)); 
 ~~~~
@@ -966,6 +966,7 @@ for(int i = 0; i < code.size(); ++i ) {
   if(instr.couldJumpTo() != null) {
     int nextInstr = code.indexOf(new DefineLabel(instr.couldJumpTo()));
     if(prevNode[nextInstr] != UNASSIGNED) nextNode[i] = prevNode[nextInstr]; // e.g. a loop
+    else if(nextNode[i] != UNASSIGNED) prevNode[nextInstr] = nextNode[i];
     else nextNode[i] = prevNode[nextInstr] = highestNode++; 
   }
   if(nextNode[i] == UNASSIGNED) nextNode[i] = LAST_NODE; // control terminates, e.g. a ret
