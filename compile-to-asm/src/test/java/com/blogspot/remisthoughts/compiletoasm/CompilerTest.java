@@ -12,6 +12,7 @@ import java.io.PrintStream;
 import java.util.List;
 
 import org.apache.commons.lang3.StringUtils;
+import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.Parameterized;
@@ -48,6 +49,11 @@ public class CompilerTest {
 
 	public CompilerTest(File src) {
 		this.src = src;
+	}
+
+	@Before
+	public void setup() {
+		Compiler.uniqueness.set(0);
 	}
 
 	@Test

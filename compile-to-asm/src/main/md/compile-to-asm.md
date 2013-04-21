@@ -209,7 +209,7 @@ static final class Variable implements StorableValue, Resolvable, Comparable<Var
   public String toString() { return name; }
   @Variable Members@
 }
-private static final AtomicInteger uniqueness = new AtomicInteger();
+static final AtomicInteger uniqueness = new AtomicInteger();
 ~~~~
 
 The types of values
@@ -488,6 +488,7 @@ static final class ParsingState {
     (this.program = program).text.add(code);
     @Get Function Name@
     @Set Up Stack Allocation@
+    @Set Up Alignment@
     @Identify Callee Saves Registers@
     @Parse Function Parameters@
     @Keep Track Of Declared Variables@
@@ -657,7 +658,7 @@ code.add(new Jump(l, null));
 code.add(new DefineLabel(endWhile)); 
 ~~~~
 
-OSX demands16-byte alignment when we call a function. Unfortunately, when we start at the _main_ entrypoint, the stack is pretty arbitary:
+OSX demands 16-byte alignment when we call a function. Unfortunately, when we start at the _main_ entrypoint, the stack is pretty arbitary:
 
 <pre>
 Starting program: /private/var/folders/HT/HTSjwIiwHaSNfbnpJnpWX++++TI/-Tmp-/2859 
@@ -667,11 +668,15 @@ rsp            0x7fff5fbff858   0x7fff5fbff858
 (gdb)
 </pre>
 
-However, when we return from main we should restore the original _rsp_ (regardless of its alignment) otherwise we'll segfault.
+However, when we return from main we should restore the original _rsp_ (regardless of its alignment) otherwise we'll segfault. We want the stack aligned at all times, but normally when we enter a function we push the return address to the stack, which means we expect to be 8 bytes off alignment when we start.
 
 ~~~~
+@Parsing State Members@ +=
+boolean isMainFn() {
+  return myName.name.equals("_main");
+}
 @Is This The Main Function@ +=
-if(state.myName.name.equals("_main")) {
+if(state.isMainFn()) {
   state.code.addAll(1, Arrays.asList(
     new Push(rsp),
     alignStack()));
@@ -1864,7 +1869,25 @@ static final Comparator<Instruction> memoryLoadsLast = new Comparator<Instructio
 };
 ~~~~
 
-Now we know how many local vars we need, we can reserve the appropriate amount of space. However, we must preserve 16-byte alignment when we're making function calls, so rather than rounding the stack pointer before every function call we'll just over-allocate 8 bytes of stack space.
+~~~~
+@Parsing State Members@ +=
+final boolean ignoreAlignment;
+@Other Helpers@ +=
+static boolean hasFnCalls(Tree t) {
+  if(t.getType() == Call
+  && get(t,0).getType() != Intrinsic
+  && get(t,0).getType() != Deref
+  && get(t,0).getType() != StackAlloc
+  && get(t,0).getType() != Conditional) return true;
+  for(Tree child : children(t))
+    if(hasFnCalls(child)) return true;
+  return false;
+}
+@Set Up Alignment@ +=
+ignoreAlignment = !hasFnCalls(get(def, 2));
+~~~~
+
+Now we know how many local vars we need, we can reserve the appropriate amount of space. However, we must preserve 16-byte alignment when we're making function calls, so rather than rounding the stack pointer before every function call we'll just over-allocate 8 bytes of stack space. Also, when we enter a function we'll be 8 bytes off alignment as the call instruction will have pushed the return address. 
 
 ~~~~
 @Parsing State Members@ +=
@@ -1872,7 +1895,10 @@ Immediate staticStackBytes() {
   UnsignedLong ret = stackBytes;
   if(framePointer == null)
     ret = ret.add(UnsignedLong.asUnsigned(mostStackArgs).multiply(SIZE));
-  return new Immediate(ret).alignAllocation();
+  UnsignedLong overhang = ret.add(isMainFn() || ignoreAlignment ? ZERO : SIZE).remainder(ALIGN_STACK_TO);
+  if (!overhang.equals(ZERO))
+    ret = ret.add(ALIGN_STACK_TO.subtract(overhang));
+  return new Immediate(ret);
 }
 @Allocate Stack Space For Variables@ +=
 Immediate staticBytes = state.staticStackBytes();

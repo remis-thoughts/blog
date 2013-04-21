@@ -1,0 +1,39 @@
+@EMPTY = 0;
+
+fn PREPEND(to, value) {
+  new_node = #_malloc(16);
+  @new_node = to;
+  body = +(new_node, 8);
+  @body = value;
+  return new_node;
+};
+
+fn COUNT(list) {
+  count = 0;
+  while ≠(list, EMPTY) {
+  	count = +(count, 1);
+  	list = @(list);
+  };
+  return count;
+};
+
+fn GET(list, index) {
+  while 1 {
+  	if ≡(index, 0) {
+      return @(+(list, 8));
+  	};
+  	list = @(list);
+  	index = -(index, 1);
+  };
+};
+
+list = PREPEND(PREPEND(PREPEND(EMPTY, 1), 2), 3);
+if ≠(COUNT(list), 3) {
+  return 1;
+};
+
+if ≠(GET(list, 1), 2) {
+  return 1;
+};
+
+return 30;
