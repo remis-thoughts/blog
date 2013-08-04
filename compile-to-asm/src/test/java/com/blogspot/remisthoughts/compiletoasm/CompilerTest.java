@@ -53,7 +53,7 @@ public class CompilerTest {
 
 	@Before
 	public void setup() {
-		Compiler.uniqueness.set(0);
+		Compiler.uniqueness.set(8);
 	}
 
 	@Test

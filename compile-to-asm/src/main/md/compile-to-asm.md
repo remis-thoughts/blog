@@ -1856,7 +1856,7 @@ for(int i : stackMovesAfter.keySet()) {
 }
 ~~~~
 
-The order is important, if we want to avoid flattening values moved from register to register with those moved from the stack
+The order is important, if we want to avoid flattening values moved from register to register with those moved from the stack. The stack pointer's especially important, as we'll either wnat to use it to store others before storing it, or load it before loading others relative to it.
 
 ~~~~
 @Other Helpers@ +=
