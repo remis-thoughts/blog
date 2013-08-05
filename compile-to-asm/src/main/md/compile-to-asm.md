@@ -1512,6 +1512,7 @@ for (int n = 0; n < numNodes; ++n)
           for (int v = 0; v < variables.length; ++v)
             if(v != avoid && needsAssigning(v, n, r))
               constraint.vars.add(v);
+          rows.add(constraint);
         }
       } else {
         OneVarPerReg constraint = new OneVarPerReg(NONE, r, n);
@@ -1883,14 +1884,14 @@ Multimap<Instruction, Instruction> dependencies = HashMultimap.create();
 Collection<Instruction> exchanges = Lists.newArrayList();
 for(Instruction a : toAdd)
   for(Instruction b : toAdd) {
-  	if(a == b)
-  	  continue;
-	else if(!Sets.intersection(a.readsFrom(Register.class), b.writesTo(Register.class, CAN)).isEmpty())
-	  dependencies.put(b, a);
-	else if(!Sets.intersection(b.readsFrom(Register.class), a.writesTo(Register.class, CAN)).isEmpty())
-	  dependencies.put(a, b);
-	if (dependencies.get(a).contains(b) && dependencies.get(b).contains(a))
-	  { @Break Stack Move Deadlock@ }
+    if(a == b)
+      continue;
+  else if(!Sets.intersection(a.readsFrom(Register.class), b.writesTo(Register.class, CAN)).isEmpty())
+    dependencies.put(b, a);
+  else if(!Sets.intersection(b.readsFrom(Register.class), a.writesTo(Register.class, CAN)).isEmpty())
+    dependencies.put(a, b);
+  if (dependencies.get(a).contains(b) && dependencies.get(b).contains(a))
+    { @Break Stack Move Deadlock@ }
   }
 ~~~~
 
@@ -2227,4 +2228,4 @@ gobjdump -f /opt/local/lib/gcc47/libgcc_ext.10.5.dylib
 llvm-objdump-mp-3.1 -disassemble $(which gcc) 
 
 seeing what type a file is 
-file ...	 
+file ...   
