@@ -202,7 +202,7 @@ static final class Immediate implements Value {
   public String toString() { @Immediate x86 Code@ }
   @Immediate Members@
 }
-static final class Variable implements StorableValue, Resolvable, Comparable<Variable> {
+static final class Variable implements StorableValue, Comparable<Variable> {
   final String name;
   Variable(String name) { this.name = name; }
   Variable() { this("VAR" + uniqueness.getAndIncrement()); };
@@ -1012,12 +1012,12 @@ Which variables are used in any of the instructions following this node? We can'
 BitSet varsReadNext = new BitSet(), varsWrittenNext = new BitSet();
 @Variables Used At Next Instruction@ +=
 for(int i = 0; i < code.size(); ++i )
-  for(Variable variable : code.get(i).readsFrom())
+  for(Variable variable : code.get(i).readsFrom(Variable.class))
     varsReadNext.set(prevNode[i] * variables.length + indexOf(variables, variable));
 for(Entry<Integer, Collection<Integer>> next : instructionsFollowingNode.asMap().entrySet()) { // not empty
   Set<Variable> varsSet = Sets.newHashSet(variables); 
   for(int i : next.getValue())
-    varsSet.retainAll(code.get(i).willWriteTo());
+    varsSet.retainAll(code.get(i).writesTo(Variable.class, WILL));
   for(Variable variable : varsSet)
     varsWrittenNext.set(next.getKey() * variables.length + indexOf(variables, variable));
 }
@@ -1037,28 +1037,32 @@ for(int i = 0; i < code.size(); ++i )
 Data dependencies - will let us calculate liveness. Can write to is a subset (but not a strict subset) of will write to
 
 ~~~~
-@Instruction Members@ +=
-Set<Variable> readsFrom() { return noVars; }
-Set<Variable> willWriteTo() { return noVars; }
-<VAL> Set<VAL> uses(Class<VAL> c) { return Collections.emptySet(); }
-@BinaryOp Members@ +=
-Set<Variable> readsFrom() { return setOf(Variable.class, arg1, arg2); }
-Set<Variable> willWriteTo() { 
-  return arg2 instanceof Variable ? setOf(Variable.class, arg2) : noVars; 
-}
-<VAL> Set<VAL> uses(Class<VAL> c) { return setOf(c, arg1, arg2); }
-@Move Members@ +=
-Set<Variable> readsFrom() { 
-  return to instanceof AtAddress ? setOf(Variable.class, from, to) : setOf(Variable.class, from); 
-}
-Set<Variable> willWriteTo() {
-  return to instanceof Variable && cond == null ? setOf(Variable.class, to) : noVars; 
-}
-<VAL> Set<VAL> uses(Class<VAL> c) { return setOf(c, from, to); }
-@Store Arg Members@ +=
-Set<Variable> readsFrom() { return setOf(Variable.class, arg); }
-<VAL> Set<VAL> uses(Class<VAL> c) { return setOf(c, arg); }
 @Other Helpers@ +=
+enum WriteType { WILL, CAN };
+@Instruction Members@ +=
+<VAL> Set<VAL> readsFrom(Class<VAL> c) { return none(c); }
+<VAL> Set<VAL> writesTo(Class<VAL> c, WriteType t) { return none(c); }
+<VAL> Set<VAL> uses(Class<VAL> c) { return Sets.union(readsFrom(c), writesTo(c, CAN)); }
+@BinaryOp Members@ +=
+<VAL> Set<VAL> readsFrom(Class<VAL> c) { return setOf(c, arg1, arg2); }
+<VAL> Set<VAL> writesTo(Class<VAL> c, WriteType t) { 
+  return arg2 instanceof MemoryValue ? none(c) : setOf(c, arg2); 
+}
+@Move Members@ +=
+<VAL> Set<VAL> readsFrom(Class<VAL> c) {
+  return to instanceof MemoryValue ? setOf(c, from, to) : setOf(c, from); 
+}
+<VAL> Set<VAL> writesTo(Class<VAL> c, WriteType t) {
+  return to instanceof MemoryValue || (t == WILL && cond != null) 
+    ? none(c) : setOf(c, to); 
+}
+@Store Arg Members@ +=
+<VAL> Set<VAL> readsFrom(Class<VAL> c) { return setOf(c, arg); }
+~~~~
+
+~~~~
+@Other Helpers@ +=
+private static <VAL> Set<VAL> none(Class<VAL> c) { return Collections.emptySet(); }
 private static <VAL> Set<VAL> setOf(Class<VAL> c, Object... objs) {
   List<Object> wrapped = Arrays.asList(objs);
   return ImmutableSet.copyOf(concat(
@@ -1070,7 +1074,6 @@ private static Function<Object, Object> unwrap = new Function<Object, Object>() 
     return v instanceof AtAddress ? ((AtAddress)v).at : v;
   }
 };
-private static final Set<Variable> noVars = Collections.emptySet();
 ~~~~
 
 We need to know all the variables we'll ever need to assign
@@ -1327,9 +1330,9 @@ for (int n = 0; n < numNodes; ++n) {
   Move move = (Move) instr;
   if(move.uses(Variable.class).size() != 2) continue; 
   if(move.cond != null) continue;
-  if(instr.readsFrom().size() == 2) continue; // reg->mem
-  int reads = indexOf(variables, getOnlyElement(instr.readsFrom()));
-  int writes = indexOf(variables, getOnlyElement(instr.willWriteTo()));
+  if(instr.readsFrom(Variable.class).size() == 2) continue; // reg->mem
+  int reads = indexOf(variables, getOnlyElement(instr.readsFrom(Variable.class)));
+  int writes = indexOf(variables, getOnlyElement(instr.writesTo(Variable.class, WILL)));
   if(isLiveAt(reads, nextNode[i]) || isLiveAt(writes, n)) continue;
   aliasingVars.putAll(n, Arrays.asList(reads, writes));
 }
@@ -1722,33 +1725,39 @@ Now we know where to put variables, we can update the instructions. We'll make t
 
 ~~~~
 @Instruction Members@ +=
-Instruction resolve(Variable var, Register reg) { return this; }
+Instruction resolve(Map<Value, Value> resolutions) { return this; }
 @BinaryOp Members@ +=
-Instruction resolve(Variable var, Register reg) { 
-  return op.with(resolve(arg1, var, reg), resolve(arg2, var, reg)); 
+Instruction resolve(Map<Value, Value> resolutions) { 
+  return op.with(resolve(arg1, resolutions), resolve(arg2, resolutions)); 
 }
 @Store Arg Members@ += 
-Instruction resolve(Variable var, Register reg) {
-  return new StoreArg(function, resolve(arg, var, reg), position);
+Instruction resolve(Map<Value, Value> resolutions) {
+  return new StoreArg(function, resolve(arg, resolutions), position);
 }
 @Move Members@ +=
-Instruction resolve(Variable var, Register reg) {
-  return new Move(resolve(from, var, reg), resolve(to, var, reg), cond); 
+Instruction resolve(Map<Value, Value> resolutions) {
+  return new Move(resolve(from, resolutions), resolve(to, resolutions), cond); 
 }
 ~~~~
 
 ~~~~
 @Static Classes@ +=
 interface Resolvable {
-  StorableValue resolve(Variable var, Register reg);
+  StorableValue resolve(Map<Value, Value> resolutions);
 }
 @At Address Members@ +=
-public StorableValue resolve(Variable var, Register reg) { return at.equals(var) ? new AtAddress(reg, offset) : this; }
-@Variable Members@ += 
-public StorableValue resolve(Variable var, Register reg) { return equals(var) ? reg : this; }
+public StorableValue resolve(Map<Value, Value> resolutions) { 
+  Value resolution = resolutions.get(at);
+  return resolution == null ? this : new AtAddress((StorableValue) resolution, offset); 
+}
 @Instruction Members@ +=
-protected <E> E resolve(E from, Variable var, Register reg) {
-  return from instanceof Resolvable ? (E) ((Resolvable) from).resolve(var, reg) : from;
+protected <E> E resolve(E from, Map<Value, Value> resolutions) {
+  if(from instanceof Resolvable)
+    return (E) ((Resolvable) from).resolve(resolutions);
+  else {
+    Value resolution = resolutions.get(from);
+    return (E) (resolution == null ? from : resolution);
+  }
 }
 ~~~~
 
@@ -1756,21 +1765,23 @@ We'll iterate through the linear programming solution and resolve variables as n
 
 ~~~~
 @Copy Solution Into Code@ +=
-for(int i = 0; i < state.code.size(); ++i)
+for(int i = 0; i < state.code.size(); ++i) {
+  Map<Value, Value> resolutions = Maps.newHashMap();
   for(Variable variable : state.code.get(i).uses(Variable.class)) {
     int v = indexOf(controlFlow.variables, variable);
     for (Register r : Register.ASSIGNABLE) {
       int index = Collections.binarySearch(controlFlow.columns, new VarInRegAtInstr(v, r, controlFlow.prevNode[i]));
-      if(index >= 0 && glp_mip_col_val(allocation, index + 1) > 0.5) { // huge tolerance for 0-1 integer
-        state.code.set(i, state.code.get(i).resolve(variable, r)); break;
-      }
+      if(index >= 0 && glp_mip_col_val(allocation, index + 1) > 0.5) // huge tolerance for 0-1 integer
+        resolutions.put(variable, r);
     }
   } 
+  state.code.set(i, state.code.get(i).resolve(resolutions));
+}
 ~~~~
 
 ~~~~
 @Calculate Stack Moves Needed@ +=
-Multimap<Integer, Instruction> stackMovesAfter = TreeMultimap.create(Ordering.natural(), memoryLoadsLast);
+Multimap<Integer, Instruction> stackMovesAfter = HashMultimap.create();
 for (int v = 0; v < controlFlow.variables.length; ++v)
   for (int n = 0; n < controlFlow.numNodes; ++n)
     for(Register r : Register.ASSIGNABLE) {
@@ -1842,31 +1853,99 @@ stackMovesAfter.put(i, move(
 stackMovesAfter.put(i, move(whereWasI, whereAmI));
 ~~~~
 
-
 Inserting is a bit tricky as the indices will change. We need a treeset as we walk through the code array, so need the insertions in sequence.
 
 ~~~~
 @Insert Stack Moves@ +=
 int drift = 0;
-for(int i : stackMovesAfter.keySet()) {
-  Collection<Instruction> toAdd = stackMovesAfter.get(i);
+for(int i : Sets.newTreeSet(stackMovesAfter.keySet())) {
+  Set<Instruction> toAdd = Sets.newHashSet(stackMovesAfter.get(i));
+  List<Instruction> toAddReordered = Lists.newArrayList();
   @Choose Stack Move Order@
-  state.code.addAll(i + drift + 1, toAdd); 
-  drift += toAdd.size();
+  state.code.addAll(i + drift + 1, toAddReordered); 
+  drift += toAddReordered.size();
 }
 ~~~~
 
-The order is important, if we want to avoid flattening values moved from register to register with those moved from the stack. The stack pointer's especially important, as we'll either wnat to use it to store others before storing it, or load it before loading others relative to it.
+The order is important, if we want to avoid flattening values moved from register to register with those moved from the stack. The stack pointer's especially important, as we'll either wnat to use it to store others before storing it, or load it before loading others relative to it. We basically have to create a dependency tree, and do a topological sort to perform the moves in a non-overlapping manner.
 
 ~~~~
-@Other Helpers@ +=
-static final Comparator<Instruction> memoryLoadsLast = new Comparator<Instruction>() {
-  public int compare(Instruction a, Instruction b) {
-    boolean aUses = a.uses(AtAddress.class).isEmpty();
-    boolean bUses = b.uses(AtAddress.class).isEmpty();
-    return aUses ^ bUses ? (aUses ? -1 : 1) : Ints.compare(a.hashCode(), b.hashCode());
+@Choose Stack Move Order@ +=
+@Calculate Move Dependencies@
+@Reorder Stack Moves@
+~~~~
+
+The dependencies map is "key must come after all values" so we can pick a random key even if the map is a forest.
+
+~~~~
+@Calculate Move Dependencies@ +=
+Multimap<Instruction, Instruction> dependencies = HashMultimap.create();
+Collection<Instruction> exchanges = Lists.newArrayList();
+for(Instruction a : toAdd)
+  for(Instruction b : toAdd) {
+  	if(a == b)
+  	  continue;
+	else if(!Sets.intersection(a.readsFrom(Register.class), b.writesTo(Register.class, CAN)).isEmpty())
+	  dependencies.put(b, a);
+	else if(!Sets.intersection(b.readsFrom(Register.class), a.writesTo(Register.class, CAN)).isEmpty())
+	  dependencies.put(a, b);
+	if (dependencies.get(a).contains(b) && dependencies.get(b).contains(a))
+	  { @Break Stack Move Deadlock@ }
   }
-};
+~~~~
+
+We can break deadlocks using the XCHG instruction to swap two registers or a memory location and a register. The latter is very expensive, so try and switch registers wherever possible!
+
+~~~~
+@Instruction Classes@ +=
+static final class Swap extends Instruction {
+  final StorableValue arg1; final StorableValue arg2; 
+  Swap(StorableValue arg1, StorableValue arg2) { this.arg1 = arg1; this.arg2 = arg2; }
+  <VAL> Set<VAL> readsFrom(Class<VAL> c) { return setOf(c, arg1, arg2); }
+  <VAL> Set<VAL> writesTo(Class<VAL> c, WriteType t) { return setOf(c, arg1, arg2); }
+  public String toString() { @Swap x86 Code@ }
+  @Swap Members@
+}
+@Move Members@ +=
+Instruction toSwap() { return new Swap((StorableValue) from, to); }
+@Break Stack Move Deadlock@ +=
+Instruction swap = a.uses(MemoryValue.class).isEmpty() ? a : b;
+exchanges.add(swap);
+~~~~
+
+~~~~
+@Remove Exchanges@ +=
+toAdd.removeAll(exchanges);
+for(Instruction exchange : exchanges)
+  toAddReordered.add(((Move) exchange).toSwap());
+@Rewrite According To Exchanges@ +=
+for(Instruction exchange : exchanges)
+  for(int j = exchanges.size(); j < toAddReordered.size(); ++j) {
+    Move m = (Move) exchange;
+    toAddReordered.set(j, toAddReordered.get(j).resolve(
+      ImmutableMap.of(m.from, m.to, m.to, m.from)));
+  }
+~~~~
+
+~~~~
+@Reorder Stack Moves@ +=
+@Remove Exchanges@
+while(!toAdd.isEmpty()) {
+  Instruction next = Iterables.get(toAdd, 0);
+  topologicalRemove(next, toAdd, toAddReordered, dependencies);
+}
+@Rewrite According To Exchanges@
+@Other Helpers@ +=
+static <I> void topologicalRemove(
+  I i, 
+  Set<I> remaining, 
+  Collection<I> inOrder,
+  Multimap<I, I> dependencies) {
+  if(!remaining.remove(i)) return;
+  for(I dependency: dependencies.get(i))
+    topologicalRemove(dependency, remaining, inOrder, dependencies);  
+  inOrder.add(i);
+}  
 ~~~~
 
 ~~~~
@@ -1962,6 +2041,7 @@ if(function.framePointer == null)
   return move(arg, new AtAddress(rsp, position * SIZE.longValue())).toString();
 else
   return new Push(arg).toString();
+@Swap x86 Code@ += return String.format("xchg %s, %s", arg1, arg2);
 ~~~~
 
 We'll always write to UTF, even if our assembly only ever has ASCII characters in it. We won't bother indenting the code.
@@ -1997,6 +2077,8 @@ boolean isNoOp() { return op.isNoOp(arg1, arg2); }
 public abstract boolean isNoOp(Value arg1, StorableValue arg2);
 @Move Members@ +=  
 public boolean isNoOp() { return from.equals(to); }
+@Swap Members@ +=
+public boolean isNoOp() { return arg1.equals(arg2); }
 @Release Args Members@ +=
 public boolean isNoOp() { return function.framePointer == null || numArgs == 0; }
 @Zero Is Identity@ +=
@@ -2020,6 +2102,7 @@ public boolean isNoOp(Value arg1, StorableValue arg2) { return false; }
 @Imports@ += 
 import static com.blogspot.remisthoughts.compiletoasm.UnsignedLexer.*;
 import static com.blogspot.remisthoughts.compiletoasm.Compiler.Register.*;
+import static com.blogspot.remisthoughts.compiletoasm.Compiler.WriteType.*;
 import static com.google.common.collect.Iterables.*;
 import static com.google.common.collect.Multimaps.*;
 import static com.google.common.base.Predicates.*;
@@ -2141,4 +2224,7 @@ port install binutils
 examining
 nm -m -U /System/Library/Frameworks/QTKit.framework/QTKit
 gobjdump -f /opt/local/lib/gcc47/libgcc_ext.10.5.dylib
-llvm-objdump-mp-3.1 -disassemble $(which gcc)  
+llvm-objdump-mp-3.1 -disassemble $(which gcc) 
+
+seeing what type a file is 
+file ...	 
