@@ -767,6 +767,11 @@ if(hasDynamicAllocation(get(def, 2))) {
   code.add(move(rsp, framePointer));
 } else
   framePointer = null;
+~~~~
+
+We restore the frame pointer for the main function even though we don't need to here so that it's live for the duration of the function.
+
+~~~~
 @Restore Stack Pointer@ +=
 if(framePointer != null)
   code.add(move(framePointer, Register.rsp));
@@ -878,12 +883,6 @@ public int compareTo(Variable o) { return name.compareTo(o.name); }
 ~~~~
 
 Now we know whether or not we're using dynamic stack allocation, but we still don't know how many static bytes we'll need as we might spill some variables to the stack in the register allocation phase (next). However, we'll insert the stack pointer code here so it gets allocated correctly. 
-
-~~~~
-@Store Frame Pointer@ +=
-
-~~~~
-
 
 ## (II) Register Allocation via Linear Programming ##
 
@@ -1726,17 +1725,17 @@ Now we know where to put variables, we can update the instructions. We'll make t
 
 ~~~~
 @Instruction Members@ +=
-Instruction resolve(Map<Value, Value> resolutions) { return this; }
+Instruction rewrite(Map<Value, Value> resolutions) { return this; }
 @BinaryOp Members@ +=
-Instruction resolve(Map<Value, Value> resolutions) { 
+Instruction rewrite(Map<Value, Value> resolutions) { 
   return op.with(resolve(arg1, resolutions), resolve(arg2, resolutions)); 
 }
 @Store Arg Members@ += 
-Instruction resolve(Map<Value, Value> resolutions) {
+Instruction rewrite(Map<Value, Value> resolutions) {
   return new StoreArg(function, resolve(arg, resolutions), position);
 }
 @Move Members@ +=
-Instruction resolve(Map<Value, Value> resolutions) {
+Instruction rewrite(Map<Value, Value> resolutions) {
   return new Move(resolve(from, resolutions), resolve(to, resolutions), cond); 
 }
 ~~~~
@@ -1744,17 +1743,17 @@ Instruction resolve(Map<Value, Value> resolutions) {
 ~~~~
 @Static Classes@ +=
 interface Resolvable {
-  StorableValue resolve(Map<Value, Value> resolutions);
+  StorableValue rewrite(Map<Value, Value> resolutions);
 }
 @At Address Members@ +=
-public StorableValue resolve(Map<Value, Value> resolutions) { 
+public StorableValue rewrite(Map<Value, Value> resolutions) { 
   Value resolution = resolutions.get(at);
   return resolution == null ? this : new AtAddress((StorableValue) resolution, offset); 
 }
-@Instruction Members@ +=
-protected <E> E resolve(E from, Map<Value, Value> resolutions) {
+@Other Helpers@ +=
+protected static <E> E resolve(E from, Map<Value, Value> resolutions) {
   if(from instanceof Resolvable)
-    return (E) ((Resolvable) from).resolve(resolutions);
+    return (E) ((Resolvable) from).rewrite(resolutions);
   else {
     Value resolution = resolutions.get(from);
     return (E) (resolution == null ? from : resolution);
@@ -1776,7 +1775,7 @@ for(int i = 0; i < state.code.size(); ++i) {
         resolutions.put(variable, r);
     }
   } 
-  state.code.set(i, state.code.get(i).resolve(resolutions));
+  state.code.set(i, state.code.get(i).rewrite(resolutions));
 }
 ~~~~
 
@@ -1884,20 +1883,24 @@ Multimap<Instruction, Instruction> dependencies = HashMultimap.create();
 Instruction deadlocker = null;
 do {
   @Resolve Current Deadlock@
-  for(Instruction a : toAdd)
-    for(Instruction b : toAdd) {
-      if(a == b)
-        continue;
-      if(!Sets.intersection(a.readsFrom(Register.class), b.writesTo(Register.class, CAN)).isEmpty()) {
-        dependencies.put(b, a); // b must be after a
-        if(dependencies.get(a).contains(b))
-          deadlocker = b;
-      } else if(!Sets.intersection(b.readsFrom(Register.class), a.writesTo(Register.class, CAN)).isEmpty()) {
-        dependencies.put(a, b); // a must be after b
-        if(dependencies.get(b).contains(a))
-          deadlocker = a;
+  dependency_loops: {
+    for(Instruction a : toAdd)
+      for(Instruction b : toAdd) {
+        if(a == b)
+          continue;
+        if(!Sets.intersection(a.readsFrom(Register.class), b.writesTo(Register.class, CAN)).isEmpty()) {
+          dependencies.put(b, a); // b must be after a
+          if(dependencies.get(a).contains(b)) {
+            deadlocker = b; break dependency_loops;
+          }
+        } else if(!Sets.intersection(b.readsFrom(Register.class), a.writesTo(Register.class, CAN)).isEmpty()) {
+          dependencies.put(a, b); // a must be after b
+          if(dependencies.get(b).contains(a)) {
+            deadlocker = a; break dependency_loops;
+          }
+        }
       }
-    }
+  }
 } while(deadlocker != null); 
 ~~~~
 
@@ -1935,23 +1938,22 @@ If we've inserted any swaps we'll have to re-write the following instructions, a
 @Propagate Swap Effects@ +=
 Map<Value, Value> swaps = Maps.newHashMap();
 for(int j = 0; j < toAddReordered.size(); ++j) {
-  toAddReordered.set(j, toAddReordered.get(j).resolve(swaps));
   if(toAddReordered.get(j) instanceof Swap) {
     Swap swap = (Swap) toAddReordered.get(j);
+    toAddReordered.set(j, new Swap(resolve(swap.arg1, swaps), swap.arg2));
     swaps.put(swap.arg1, swap.arg2);
     swaps.put(swap.arg2, swap.arg1);
+  } else {
+    Move move = (Move) toAddReordered.get(j);
+    toAddReordered.set(j, move(resolve(move.from, swaps), move.to));
   }
-}
-@Swap Members@ += 
-Instruction resolve(Map<Value, Value> resolutions) {
-  return new Swap(resolve(arg1, resolutions), resolve(arg2, resolutions));
 }
 ~~~~
 
 ~~~~
 @Reorder Stack Moves@ +=
 while(!toAdd.isEmpty()) {
-  Instruction next = Iterables.get(toAdd, 0);
+  @Pick Next@
   topologicalRemove(next, toAdd, toAddReordered, dependencies);
 }
 @Propagate Swap Effects@
@@ -1966,6 +1968,13 @@ static <I> void topologicalRemove(
     topologicalRemove(dependency, remaining, inOrder, dependencies);  
   inOrder.add(i);
 }  
+~~~~
+
+Picking next isn't trivial - if some instructions load from the stack they'll need the framepointer, so if we're moving that (e.g. from a callee-saved register to somewhere else) then move it first. If not, the memory load will expect the frame pointer to be in a non-callee saved register!
+
+~~~~
+@Pick Next@ +=
+Instruction next = Iterables.get(toAdd, 0);
 ~~~~
 
 ~~~~
@@ -2123,6 +2132,7 @@ public boolean isNoOp(Value arg1, StorableValue arg2) { return false; }
 import static com.blogspot.remisthoughts.compiletoasm.UnsignedLexer.*;
 import static com.blogspot.remisthoughts.compiletoasm.Compiler.Register.*;
 import static com.blogspot.remisthoughts.compiletoasm.Compiler.WriteType.*;
+import static com.blogspot.remisthoughts.compiletoasm.Compiler.*;
 import static com.google.common.collect.Iterables.*;
 import static com.google.common.collect.Multimaps.*;
 import static com.google.common.base.Predicates.*;
