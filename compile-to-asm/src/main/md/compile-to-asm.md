@@ -1876,26 +1876,32 @@ The order is important, if we want to avoid flattening values moved from registe
 @Reorder Stack Moves@
 ~~~~
 
-The dependencies map is "key must come after all values" so we can pick a random key even if the map is a forest.
+The dependencies map is "key must come after all values" so we can pick a random key even if the map is a forest. Let's pick the deadlocker as the one that does the writing (as we know that's a simple move, so cheap to convert to a swap, as it doesn't touch the ram).
 
 ~~~~
 @Calculate Move Dependencies@ +=
 Multimap<Instruction, Instruction> dependencies = HashMultimap.create();
-Collection<Instruction> exchanges = Lists.newArrayList();
-for(Instruction a : toAdd)
-  for(Instruction b : toAdd) {
-    if(a == b)
-      continue;
-  else if(!Sets.intersection(a.readsFrom(Register.class), b.writesTo(Register.class, CAN)).isEmpty())
-    dependencies.put(b, a);
-  else if(!Sets.intersection(b.readsFrom(Register.class), a.writesTo(Register.class, CAN)).isEmpty())
-    dependencies.put(a, b);
-  if (dependencies.get(a).contains(b) && dependencies.get(b).contains(a))
-    { @Break Stack Move Deadlock@ }
-  }
+Instruction deadlocker = null;
+do {
+  @Resolve Current Deadlock@
+  for(Instruction a : toAdd)
+    for(Instruction b : toAdd) {
+      if(a == b)
+        continue;
+      if(!Sets.intersection(a.readsFrom(Register.class), b.writesTo(Register.class, CAN)).isEmpty()) {
+        dependencies.put(b, a); // b must be after a
+        if(dependencies.get(a).contains(b))
+          deadlocker = b;
+      } else if(!Sets.intersection(b.readsFrom(Register.class), a.writesTo(Register.class, CAN)).isEmpty()) {
+        dependencies.put(a, b); // a must be after b
+        if(dependencies.get(b).contains(a))
+          deadlocker = a;
+      }
+    }
+} while(deadlocker != null); 
 ~~~~
 
-We can break deadlocks using the XCHG instruction to swap two registers or a memory location and a register. The latter is very expensive, so try and switch registers wherever possible!
+We can break deadlocks using the XCHG instruction to swap two registers or a memory location and a register. The latter is very expensive, so try and switch registers wherever possible! To clarify, writesTo means destructively write to, so a swap returns none(..) here as it doesn't destroy either input.
 
 ~~~~
 @Instruction Classes@ +=
@@ -1903,39 +1909,52 @@ static final class Swap extends Instruction {
   final StorableValue arg1; final StorableValue arg2; 
   Swap(StorableValue arg1, StorableValue arg2) { this.arg1 = arg1; this.arg2 = arg2; }
   <VAL> Set<VAL> readsFrom(Class<VAL> c) { return setOf(c, arg1, arg2); }
-  <VAL> Set<VAL> writesTo(Class<VAL> c, WriteType t) { return setOf(c, arg1, arg2); }
+  <VAL> Set<VAL> writesTo(Class<VAL> c, WriteType t) { return none(c); }
   public String toString() { @Swap x86 Code@ }
   @Swap Members@
 }
 @Move Members@ +=
 Instruction toSwap() { return new Swap((StorableValue) from, to); }
-@Break Stack Move Deadlock@ +=
-Instruction swap = a.uses(MemoryValue.class).isEmpty() ? a : b;
-exchanges.add(swap);
 ~~~~
 
+Also, all the instructions are unconditional moves (unless they've been replaced with swaps) - so in any case the only way they write to a register is if the to-Value of the move is not a MemoryAddress.
+
 ~~~~
-@Remove Exchanges@ +=
-toAdd.removeAll(exchanges);
-for(Instruction exchange : exchanges)
-  toAddReordered.add(((Move) exchange).toSwap());
-@Rewrite According To Exchanges@ +=
-for(Instruction exchange : exchanges)
-  for(int j = exchanges.size(); j < toAddReordered.size(); ++j) {
-    Move m = (Move) exchange;
-    toAddReordered.set(j, toAddReordered.get(j).resolve(
-      ImmutableMap.of(m.from, m.to, m.to, m.from)));
+@Resolve Current Deadlock@ +=
+if(deadlocker != null) {
+  toAdd.remove(deadlocker);
+  toAdd.add(((Move)deadlocker).toSwap());
+  deadlocker = null;
+  dependencies.clear();
+}
+~~~~
+
+If we've inserted any swaps we'll have to re-write the following instructions, as they (currently) assume simultanious execution.
+
+~~~~
+@Propagate Swap Effects@ +=
+Map<Value, Value> swaps = Maps.newHashMap();
+for(int j = 0; j < toAddReordered.size(); ++j) {
+  toAddReordered.set(j, toAddReordered.get(j).resolve(swaps));
+  if(toAddReordered.get(j) instanceof Swap) {
+    Swap swap = (Swap) toAddReordered.get(j);
+    swaps.put(swap.arg1, swap.arg2);
+    swaps.put(swap.arg2, swap.arg1);
   }
+}
+@Swap Members@ += 
+Instruction resolve(Map<Value, Value> resolutions) {
+  return new Swap(resolve(arg1, resolutions), resolve(arg2, resolutions));
+}
 ~~~~
 
 ~~~~
 @Reorder Stack Moves@ +=
-@Remove Exchanges@
 while(!toAdd.isEmpty()) {
   Instruction next = Iterables.get(toAdd, 0);
   topologicalRemove(next, toAdd, toAddReordered, dependencies);
 }
-@Rewrite According To Exchanges@
+@Propagate Swap Effects@
 @Other Helpers@ +=
 static <I> void topologicalRemove(
   I i, 
