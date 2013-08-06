@@ -1491,11 +1491,11 @@ Constraint: registers can only ever hold one variable at once (apart from the st
 ~~~~
 @Other Helpers@ +=
 static final class OneVarPerReg extends RowKey {
-  final Set<Integer> vars = Sets.newTreeSet();
+  final BitSet vars = new BitSet();
   OneVarPerReg(int avoid, Register r, int n) { super(avoid, r, n); }
   void addConstraints(glp_prob allocation, int row, List<Constraint> constraints, ControlFlowGraph cfg) {
     glp_set_row_bnds(allocation, row + 1, GLP_DB, 0.0, 1.0);
-    for(int v : vars)
+    for(int v = vars.nextSetBit(0); v >= 0; v = vars.nextSetBit(v+1))
       constraints.add(new Constraint(
         row, 
         Collections.binarySearch(cfg.columns, new VarInRegAtInstr(v, r, n)),
@@ -1511,14 +1511,14 @@ for (int n = 0; n < numNodes; ++n)
           OneVarPerReg constraint = new OneVarPerReg(avoid, r, n);
           for (int v = 0; v < variables.length; ++v)
             if(v != avoid && needsAssigning(v, n, r))
-              constraint.vars.add(v);
+              constraint.vars.set(v);
           rows.add(constraint);
         }
       } else {
         OneVarPerReg constraint = new OneVarPerReg(NONE, r, n);
         for (int v = 0; v < variables.length; ++v)
           if(needsAssigning(v, n, r))
-            constraint.vars.add(v);
+            constraint.vars.set(v);
         rows.add(constraint);
       }
 ~~~~

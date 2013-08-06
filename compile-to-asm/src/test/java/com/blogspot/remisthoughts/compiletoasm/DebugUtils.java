@@ -39,9 +39,9 @@ class DebugUtils {
 			int n = cfg.prevNode[i];
 			try {
 				Register r = Compiler.whereAmI(lpProblem, cfg, v, n);
-				System.out.printf("%02d: %s\n", i, r);
+				System.out.printf("%02d\t%s\t%s\n", i, r, code.get(i));
 			} catch (IllegalStateException e) {
-				System.out.printf("%02d: NONE\n", i);
+				System.out.printf("%02d\tNONE\t%s\n", i, code.get(i));
 			}
 		}
 	}
@@ -82,7 +82,7 @@ class DebugUtils {
 					// not in any register
 				}
 			}
-			System.out.printf("%02d: %s\n", i, Joiner.on(',').join(vars));
+			System.out.printf("%02d\t%s\t%s\n", i, Joiner.on(',').join(vars), code.get(i));
 		}
 	}
 
