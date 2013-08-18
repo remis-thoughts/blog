@@ -135,7 +135,7 @@ The data section. Labels are references to symbols defined either in this file o
 
 ~~~~
 @Static Classes@ +=
-static final class Label implements MemoryValue, Comparable<Label> {
+static final class Label implements StorableValue, Comparable<Label> {
   final String name;
   Label(String name) { this.name = name; }
   Label() { this("L" + uniqueness.getAndIncrement()); } // for anonymous fns
@@ -191,7 +191,6 @@ Generate x86 GAS code - you could probably use a factory to create the _Instruct
 @Static Classes@ +=
 interface Value {}
 interface StorableValue extends Value {}
-interface MemoryValue extends StorableValue {}
 @Value Classes@
 static final class Immediate implements Value {
   final UnsignedLong value;
@@ -248,23 +247,12 @@ static final class Call extends Instruction {
   Call(Value name) { this.name = name; }
   public String toString() { @Call x86 Code@ }
 }
-static final class StoreArg extends Instruction {
-  final Value arg; final int position;
-  final ParsingState function;
-  StoreArg(ParsingState function, Value arg, int position) {
-    this.arg = arg; this.function = function; 
-    this.position = position;
-  }
-  public String toString() { @Store Arg x86 Code@ }
-  @Store Arg Members@
-}
-static final class ReleaseArgs extends Instruction {
-  final int numArgs; final ParsingState function;
-  ReleaseArgs(ParsingState function, int numArgs) {
-    this.numArgs = numArgs; this.function = function; 
-  }
-  public String toString() { @Release Args x86 Code@ }
-  @Release Args Members@
+@Parsing State Members@ +=
+Instruction storeArg(Value arg, int position) {
+  if(framePointer == null)
+    return move(arg, new AtAddress(rsp, position * SIZE.longValue()));
+  else
+    return new Push(arg);
 }
 ~~~~
 
@@ -280,18 +268,19 @@ private void call(Tree t) {
       storedArgs = numArgs - registerArgs;
   for(int r = storedArgs - 1; r >= 0; --r) {
     Value arg = values.get(registerArgs + r);
-    if(arg instanceof MemoryValue) {
+    if(arg instanceof AtAddress) {
       Variable tmp = new Variable(); 
       code.add(move(arg, tmp));
       arg = tmp;
     }
-    code.add(new StoreArg(this, arg, r));
+    code.add(storeArg(arg, r));
   }
   for(int r = 0; r < registerArgs; ++r) // regs second so they don't get flattened by mem switch
     code.add(move(values.get(r), Register.PARAMETERS[r]));
   @Track Stack Arg Watermark@
   code.add(new Call(getAsValue(get(t,0))));
-  code.add(new ReleaseArgs(this, storedArgs));
+  if(framePointer == null)
+    code.add(Op.addq.with(new Immediate(storedArgs * SIZE.longValue()).alignAllocation(), rsp));
 }
 ~~~~
 
@@ -334,7 +323,7 @@ while(type(statement, 0) == Deref) {
 StorableValue to;
 if(type(statement, 0) == Global) {
   Label label = new Label(text(statement, 0));
-  to = new AtLabel(label); // must be at least one Deref
+  to = new AtAddress(label, 0); // must be at least one Deref
   @Shortcut For Global Initialisation@
   if(!program.globals.containsKey(label))
     program.globals.put(label, new Immediate(0));
@@ -480,7 +469,7 @@ static final class ProgramState {
 }
 static final class ParsingState {
   List<Instruction> code = Lists.newArrayList();
-  Map<Variable, Parameter> params = Maps.newTreeMap(); 
+  Map<Variable, StorableValue> params = Maps.newTreeMap(); 
   ProgramState program;
   Set<Variable> declaredVars = Sets.newTreeSet();
   Label myName;
@@ -715,31 +704,27 @@ Memory stuff. Need _MemoryAddress_ interface as we can't have x86 instructions l
 
 ~~~~
 @Static Classes@ +=
-static final class AtAddress implements MemoryValue, Resolvable {
-  final StorableValue at; final long offset;
-  AtAddress(StorableValue at, long offset) {
+static class AtAddress implements StorableValue, Resolvable {
+  final StorableValue at; final Supplier<Long> offset;
+  AtAddress(StorableValue at, Supplier<Long> offset) {
     this.at = at; this.offset = offset;
+  }
+  AtAddress(StorableValue at, long offset) {
+    this(at, Suppliers.ofInstance(offset));
   }
   public String toString() { @At Address x86 Code@ }
   public boolean equals(Object o) {
     if(!(o instanceof AtAddress)) return false;
     AtAddress other = (AtAddress) o;
-    return at.equals(other.at) && offset == other.offset;
+    return at.equals(other.at) && offset.equals(other.offset);
   }
   public int hashCode() { return at.hashCode(); }
   @At Address Members@
 }
-private static final class AtLabel implements MemoryValue {
-  final Label at;
-  AtLabel(Label at) { this.at = at; }
-  public String toString() { @At Label x86 Code@ }
-}
 @Parse A Dereference@ +=
-StorableValue val = to(getAsValue(get(t, 1, 0)), StorableValue.class);
-if(val instanceof Label)
-  return new AtLabel((Label)val);
-else if(val instanceof Variable)
-  return new AtAddress(val, 0);
+Value val = to(getAsValue(get(t, 1, 0)), Value.class);
+if(val instanceof StorableValue && !(val instanceof AtAddress))
+  return new AtAddress((StorableValue)val, 0);
 else {
   Variable ret = new Variable();
   code.add(move(val, ret));
@@ -844,12 +829,22 @@ Dealing with parameters. Make _Variable_ comparable and add _equals_ methods so 
 
 ~~~~
 @Static Classes@ +=
-static final class Parameter implements MemoryValue {
+static final class Parameter implements Supplier<Long> {
   final ParsingState function; final int number;
-  Parameter(ParsingState function, int number) { 
+  Parameter(ParsingState function, int number) {
     this.function = function; this.number = number; 
   }
-  public String toString() { @Parameter x86 Code@ }
+  public Long get() {
+    return (number + 1) * SIZE.longValue() + function.staticStackBytes().value.longValue();
+  }
+}
+@Parsing State Members@ +=
+StorableValue parameter(int number) {
+  if (framePointer == null) {
+    return new AtAddress(rsp, new Parameter(this, number));
+  } else {
+    return new AtAddress(framePointer, (number + 1) * SIZE.longValue());
+  }
 }
 ~~~~
 
@@ -862,7 +857,7 @@ for(int p = 0, count = numChildren(def, 1); p < count; ++p) {
   if(p < Register.PARAMETERS.length)
     code.add(move(Register.PARAMETERS[p], v));
   else
-    params.put(v, new Parameter(this, p - Register.PARAMETERS.length));
+    params.put(v, parameter(p - Register.PARAMETERS.length));
   @Keep Track Of Declared Parameter@
 }
 ~~~~
@@ -1016,7 +1011,7 @@ for(int i = 0; i < code.size(); ++i )
 for(Entry<Integer, Collection<Integer>> next : instructionsFollowingNode.asMap().entrySet()) { // not empty
   Set<Variable> varsSet = Sets.newHashSet(variables); 
   for(int i : next.getValue())
-    varsSet.retainAll(code.get(i).writesTo(Variable.class, WILL));
+    varsSet.retainAll(code.get(i).writesTo(Variable.class, WILL_ERASE));
   for(Variable variable : varsSet)
     varsWrittenNext.set(next.getKey() * variables.length + indexOf(variables, variable));
 }
@@ -1037,26 +1032,26 @@ Data dependencies - will let us calculate liveness. Can write to is a subset (bu
 
 ~~~~
 @Other Helpers@ +=
-enum WriteType { WILL, CAN };
+enum WriteType { WILL_ERASE, CAN_ERASE, MOVES };
 @Instruction Members@ +=
 <VAL> Set<VAL> readsFrom(Class<VAL> c) { return none(c); }
 <VAL> Set<VAL> writesTo(Class<VAL> c, WriteType t) { return none(c); }
-<VAL> Set<VAL> uses(Class<VAL> c) { return Sets.union(readsFrom(c), writesTo(c, CAN)); }
+<VAL> Set<VAL> uses(Class<VAL> c) { return Sets.union(readsFrom(c), writesTo(c, CAN_ERASE)); }
 @BinaryOp Members@ +=
 <VAL> Set<VAL> readsFrom(Class<VAL> c) { return setOf(c, arg1, arg2); }
 <VAL> Set<VAL> writesTo(Class<VAL> c, WriteType t) { 
-  return arg2 instanceof MemoryValue ? none(c) : setOf(c, arg2); 
+  return arg2 instanceof AtAddress ? none(c) : setOf(c, arg2); 
 }
 @Move Members@ +=
 <VAL> Set<VAL> readsFrom(Class<VAL> c) {
-  return to instanceof MemoryValue ? setOf(c, from, to) : setOf(c, from); 
+  return to instanceof AtAddress ? setOf(c, from, to) : setOf(c, from); 
 }
 <VAL> Set<VAL> writesTo(Class<VAL> c, WriteType t) {
-  return to instanceof MemoryValue || (t == WILL && cond != null) 
+  return to instanceof AtAddress || (t == WILL_ERASE && cond != null) 
     ? none(c) : setOf(c, to); 
 }
-@Store Arg Members@ +=
-<VAL> Set<VAL> readsFrom(Class<VAL> c) { return setOf(c, arg); }
+@Push Members@ +=
+<VAL> Set<VAL> readsFrom(Class<VAL> c) { return setOf(c, value); }
 ~~~~
 
 ~~~~
@@ -1331,7 +1326,7 @@ for (int n = 0; n < numNodes; ++n) {
   if(move.cond != null) continue;
   if(instr.readsFrom(Variable.class).size() == 2) continue; // reg->mem
   int reads = indexOf(variables, getOnlyElement(instr.readsFrom(Variable.class)));
-  int writes = indexOf(variables, getOnlyElement(instr.writesTo(Variable.class, WILL)));
+  int writes = indexOf(variables, getOnlyElement(instr.writesTo(Variable.class, WILL_ERASE)));
   if(isLiveAt(reads, nextNode[i]) || isLiveAt(writes, n)) continue;
   aliasingVars.putAll(n, Arrays.asList(reads, writes));
 }
@@ -1730,9 +1725,9 @@ Instruction rewrite(Map<Value, Value> resolutions) { return this; }
 Instruction rewrite(Map<Value, Value> resolutions) { 
   return op.with(resolve(arg1, resolutions), resolve(arg2, resolutions)); 
 }
-@Store Arg Members@ += 
+@Push Members@ += 
 Instruction rewrite(Map<Value, Value> resolutions) {
-  return new StoreArg(function, resolve(arg, resolutions), position);
+  return new Push(resolve(value, resolutions));
 }
 @Move Members@ +=
 Instruction rewrite(Map<Value, Value> resolutions) {
@@ -1750,6 +1745,8 @@ public StorableValue rewrite(Map<Value, Value> resolutions) {
   Value resolution = resolutions.get(at);
   return resolution == null ? this : new AtAddress((StorableValue) resolution, offset); 
 }
+@Static Parameter Members@ +=
+public StorableValue rewrite(Map<Value, Value> resolutions) { return this; } 
 @Other Helpers@ +=
 protected static <E> E resolve(E from, Map<Value, Value> resolutions) {
   if(from instanceof Resolvable)
@@ -1871,8 +1868,30 @@ The order is important, if we want to avoid flattening values moved from registe
 
 ~~~~
 @Choose Stack Move Order@ +=
+@Ensure Stack Pointer Location Consistent@
 @Calculate Move Dependencies@
 @Reorder Stack Moves@
+~~~~
+
+MemoryAddresses use the location of the stack pointer after the stack moves, but all other references use the stack pointer location before stack moves. We have to undo this when moving things about.
+
+~~~~
+@Ensure Stack Pointer Location Consistent@ +=
+StorableValue stackPointerNowAt = null, stackPointerWasAt = null;
+for(Instruction inst : toAdd) {
+  Set<AtAddress> memoryAccesses = inst.uses(AtAddress.class);
+  if(!memoryAccesses.isEmpty()) {
+    stackPointerNowAt = Iterables.get(memoryAccesses, 0);
+    break;
+  }
+}
+for(Instruction inst : toAdd)
+  if(inst.writesTo(StorableValue.class, CAN_ERASE).contains(stackPointerNowAt)) {
+    stackPointerWasAt = Iterables.get(inst.readsFrom(StorableValue.class), 0); 
+    break;
+  }
+
+     
 ~~~~
 
 The dependencies map is "key must come after all values" so we can pick a random key even if the map is a forest. Let's pick the deadlocker as the one that does the writing (as we know that's a simple move, so cheap to convert to a swap, as it doesn't touch the ram).
@@ -1881,27 +1900,30 @@ The dependencies map is "key must come after all values" so we can pick a random
 @Calculate Move Dependencies@ +=
 Multimap<Instruction, Instruction> dependencies = HashMultimap.create();
 Instruction deadlocker = null;
-do {
+while((deadlocker = calculateDependencies(dependencies, toAdd)) != null) {
   @Resolve Current Deadlock@
-  dependency_loops: {
-    for(Instruction a : toAdd)
-      for(Instruction b : toAdd) {
-        if(a == b)
-          continue;
-        if(!Sets.intersection(a.readsFrom(Register.class), b.writesTo(Register.class, CAN)).isEmpty()) {
-          dependencies.put(b, a); // b must be after a
-          if(dependencies.get(a).contains(b)) {
-            deadlocker = b; break dependency_loops;
-          }
-        } else if(!Sets.intersection(b.readsFrom(Register.class), a.writesTo(Register.class, CAN)).isEmpty()) {
-          dependencies.put(a, b); // a must be after b
-          if(dependencies.get(b).contains(a)) {
-            deadlocker = a; break dependency_loops;
-          }
-        }
-      }
-  }
-} while(deadlocker != null); 
+}
+@Other Helpers@ +=
+static Instruction calculateDependencies(
+  Multimap<Instruction, Instruction> dependencies,
+  Iterable<Instruction> toAdd) {
+  for(Instruction a : toAdd)
+    for(Instruction b : toAdd) {
+      @Add Dependencies@
+    }
+  return null;
+}
+~~~~
+
+We loop over all instructions, so we'll see each pair both ways round (e.g a,b and b,a). 
+
+~~~~
+@Add Dependencies@ +=
+if(!Sets.intersection(a.readsFrom(Register.class), b.writesTo(Register.class, CAN_ERASE)).isEmpty()) {
+  dependencies.put(b, a); // b must be after a
+  if(dependencies.get(a).contains(b)) 
+    return b.uses(AtAddress.class).isEmpty() ? b : a; // cheapest 
+}
 ~~~~
 
 We can break deadlocks using the XCHG instruction to swap two registers or a memory location and a register. The latter is very expensive, so try and switch registers wherever possible! To clarify, writesTo means destructively write to, so a swap returns none(..) here as it doesn't destroy either input.
@@ -1912,7 +1934,9 @@ static final class Swap extends Instruction {
   final StorableValue arg1; final StorableValue arg2; 
   Swap(StorableValue arg1, StorableValue arg2) { this.arg1 = arg1; this.arg2 = arg2; }
   <VAL> Set<VAL> readsFrom(Class<VAL> c) { return setOf(c, arg1, arg2); }
-  <VAL> Set<VAL> writesTo(Class<VAL> c, WriteType t) { return none(c); }
+  <VAL> Set<VAL> writesTo(Class<VAL> c, WriteType t) { 
+    return t == MOVES ? setOf(c, arg1, arg2) : none(c); 
+  }
   public String toString() { @Swap x86 Code@ }
   @Swap Members@
 }
@@ -1924,12 +1948,9 @@ Also, all the instructions are unconditional moves (unless they've been replaced
 
 ~~~~
 @Resolve Current Deadlock@ +=
-if(deadlocker != null) {
-  toAdd.remove(deadlocker);
-  toAdd.add(((Move)deadlocker).toSwap());
-  deadlocker = null;
-  dependencies.clear();
-}
+toAdd.remove(deadlocker);
+toAdd.add(((Move)deadlocker).toSwap());
+dependencies.clear();
 ~~~~
 
 If we've inserted any swaps we'll have to re-write the following instructions, as they (currently) assume simultanious execution.
@@ -1950,10 +1971,12 @@ for(int j = 0; j < toAddReordered.size(); ++j) {
 }
 ~~~~
 
+Picking next isn't trivial - if some instructions load from the stack they'll need the framepointer, so if we're moving that (e.g. from a callee-saved register to somewhere else) then move it first. If not, the memory load will expect the frame pointer to be in a non-callee saved register!
+
 ~~~~
 @Reorder Stack Moves@ +=
 while(!toAdd.isEmpty()) {
-  @Pick Next@
+  Instruction next = Iterables.get(toAdd, 0);
   topologicalRemove(next, toAdd, toAddReordered, dependencies);
 }
 @Propagate Swap Effects@
@@ -1968,13 +1991,6 @@ static <I> void topologicalRemove(
     topologicalRemove(dependency, remaining, inOrder, dependencies);  
   inOrder.add(i);
 }  
-~~~~
-
-Picking next isn't trivial - if some instructions load from the stack they'll need the framepointer, so if we're moving that (e.g. from a callee-saved register to somewhere else) then move it first. If not, the memory load will expect the frame pointer to be in a non-callee saved register!
-
-~~~~
-@Pick Next@ +=
-Instruction next = Iterables.get(toAdd, 0);
 ~~~~
 
 ~~~~
@@ -2045,11 +2061,6 @@ else
 @Ret x86 Code@ += "ret"
 @Define Label x86 Code@ += return String.format("%s:", label.name);
 @Immediate x86 Code@ += return String.format("$0x%s", value.toString(16));
-@Parameter x86 Code@ +=
-if(function.framePointer == null)
-  return new AtAddress(rsp, (number+1)*SIZE.longValue() + function.staticStackBytes().value.longValue()).toString();
-else   
-  return new AtAddress(function.framePointer, (number+1)*SIZE.longValue()).toString();
 @Jump x86 Code@ += return String.format("j%s %s", cond == null ? "mp" : cond, to.name);
 @Move x86 Code@ += 
 if(cond == null)
@@ -2057,19 +2068,13 @@ if(cond == null)
 else
   return String.format("cmov%s %s, %s", cond, from, to);
 @Label x86 Code@ += return String.format("%s@GOTPCREL(%%rip)", name);
-@At Label x86 Code@ += return String.format("%s(%%rip)", at.name);
 @At Address x86 Code@ +=
-if(offset == 0)
+if(at instanceof Label)
+  return String.format("%s(%%rip)", ((Label)at).name);
+else if(offset.get() == 0)
   return String.format("(%s)", at);
 else
-  return String.format("%s0x%s(%s)", offset < 0 ? "-" : "", Long.toString(Math.abs(offset), 16), at);
-@Release Args x86 Code@ +=
-return Op.addq.with(new Immediate(numArgs * SIZE.longValue()).alignAllocation(), rsp).toString();
-@Store Arg x86 Code@ +=
-if(function.framePointer == null)
-  return move(arg, new AtAddress(rsp, position * SIZE.longValue())).toString();
-else
-  return new Push(arg).toString();
+  return String.format("%s0x%s(%s)", offset.get() < 0 ? "-" : "", Long.toString(Math.abs(offset.get()), 16), at);
 @Swap x86 Code@ += return String.format("xchg %s, %s", arg1, arg2);
 ~~~~
 
@@ -2108,8 +2113,6 @@ public abstract boolean isNoOp(Value arg1, StorableValue arg2);
 public boolean isNoOp() { return from.equals(to); }
 @Swap Members@ +=
 public boolean isNoOp() { return arg1.equals(arg2); }
-@Release Args Members@ +=
-public boolean isNoOp() { return function.framePointer == null || numArgs == 0; }
 @Zero Is Identity@ +=
 public boolean isNoOp(Value arg1, StorableValue arg2) { return arg1.equals(new Immediate(0)); }
 @ADDQ@ += @Zero Is Identity@
