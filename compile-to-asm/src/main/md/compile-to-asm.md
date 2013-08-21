@@ -279,9 +279,14 @@ private void call(Tree t) {
     code.add(move(values.get(r), Register.PARAMETERS[r]));
   @Track Stack Arg Watermark@
   code.add(new Call(getAsValue(get(t,0))));
-  if(framePointer == null)
-    code.add(Op.addq.with(new Immediate(storedArgs * SIZE.longValue()).alignAllocation(), rsp));
+  @Remove Args From Stack@
 }
+~~~~
+
+~~~~
+@Remove Args From Stack@ +=
+if(framePointer != null)
+  code.add(Op.addq.with(new Immediate(storedArgs * SIZE.longValue()).alignAllocation(), rsp));
 ~~~~
 
 Note that we'll assume the function being called is a local variable if it has the same name as a local variable in this function - otherwise it'll be a label which the linker will resolve for us.
@@ -583,6 +588,8 @@ private Label parseIf(Tree test, Tree ifTrue, Tree ifFalse) {
 ~~~~
 
 We can save a few instructions if we have already done a conditional move
+
+Note we only need near jumps as we don't mess about with segments: http://stackoverflow.com/questions/14812160/near-and-far-jmps
 
 ~~~~
 @Do If Comparison Check@ +=
@@ -1840,7 +1847,7 @@ The question is, where was V? On the stack or in a register?
 @Find Where I Live On The Stack@
 stackMovesAfter.put(i, move(
   new AtAddress(
-    state.stackVarsRelativeTo(allocation, controlFlow, n),
+    state.stackVarsRelativeTo(allocation, controlFlow, controlFlow.prevNode[i]),
     stackOffset),
   whereAmI));
 ~~~~
@@ -1868,31 +1875,11 @@ The order is important, if we want to avoid flattening values moved from registe
 
 ~~~~
 @Choose Stack Move Order@ +=
-@Ensure Stack Pointer Location Consistent@
 @Calculate Move Dependencies@
 @Reorder Stack Moves@
 ~~~~
 
 MemoryAddresses use the location of the stack pointer after the stack moves, but all other references use the stack pointer location before stack moves. We have to undo this when moving things about.
-
-~~~~
-@Ensure Stack Pointer Location Consistent@ +=
-StorableValue stackPointerNowAt = null, stackPointerWasAt = null;
-for(Instruction inst : toAdd) {
-  Set<AtAddress> memoryAccesses = inst.uses(AtAddress.class);
-  if(!memoryAccesses.isEmpty()) {
-    stackPointerNowAt = Iterables.get(memoryAccesses, 0);
-    break;
-  }
-}
-for(Instruction inst : toAdd)
-  if(inst.writesTo(StorableValue.class, CAN_ERASE).contains(stackPointerNowAt)) {
-    stackPointerWasAt = Iterables.get(inst.readsFrom(StorableValue.class), 0); 
-    break;
-  }
-
-     
-~~~~
 
 The dependencies map is "key must come after all values" so we can pick a random key even if the map is a forest. Let's pick the deadlocker as the one that does the writing (as we know that's a simple move, so cheap to convert to a swap, as it doesn't touch the ram).
 
@@ -1909,6 +1896,7 @@ static Instruction calculateDependencies(
   Iterable<Instruction> toAdd) {
   for(Instruction a : toAdd)
     for(Instruction b : toAdd) {
+      if(a == b) continue;
       @Add Dependencies@
     }
   return null;
@@ -1916,6 +1904,8 @@ static Instruction calculateDependencies(
 ~~~~
 
 We loop over all instructions, so we'll see each pair both ways round (e.g a,b and b,a). 
+
+We very much want to avoid swapping with a memory address, as that has expensive locking semantics (http://en.wikibooks.org/wiki/X86_Assembly/Data_Transfer#Data_Swap)
 
 ~~~~
 @Add Dependencies@ +=
@@ -2149,6 +2139,7 @@ import java.util.concurrent.atomic.*;
 import org.antlr.runtime.ANTLRInputStream;
 import org.antlr.runtime.CommonTokenStream;
 import org.antlr.runtime.tree.*;
+import com.google.common.base.Supplier;
 import com.google.common.base.*;
 import com.google.common.primitives.*;
 import com.google.common.collect.*;
