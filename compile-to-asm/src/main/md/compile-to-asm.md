@@ -646,12 +646,19 @@ private static class Jump extends Instruction {
 
 A while loop is essentially an if block with an unconditional loop
 
+We don't allow dead code, so assume if it is a constant it's a while-true loop.
+
 ~~~~
 @Parse A While Statement@ +=
 Label l = new Label(); code.add(new DefineLabel(l));
-Label endWhile = parseIf(get(statement, 0), get(statement, 1), null);
-code.add(new Jump(l, null)); 
-code.add(new DefineLabel(endWhile)); 
+if(get(statement, 0, 0).getType() == Number) {
+  parseStatements(children(get(statement, 1)));
+  code.add(new Jump(l, null)); 
+} else {
+  Label endWhile = parseIf(get(statement, 0), get(statement, 1), null);
+  code.add(new Jump(l, null)); 
+  code.add(new DefineLabel(endWhile));
+} 
 ~~~~
 
 OSX demands 16-byte alignment when we call a function. Unfortunately, when we start at the _main_ entrypoint, the stack is pretty arbitary:
@@ -836,7 +843,7 @@ Dealing with parameters. Make _Variable_ comparable and add _equals_ methods so 
 
 ~~~~
 @Static Classes@ +=
-static final class Parameter implements Supplier<Long> {
+static final class Parameter implements com.google.common.base.Supplier<Long> {
   final ParsingState function; final int number;
   Parameter(ParsingState function, int number) {
     this.function = function; this.number = number; 
@@ -938,10 +945,13 @@ We need two separate bits of information from this graph; how the nodes relate t
 static final class ControlFlowGraph {
   @Control Flow Graph Members@
   ControlFlowGraph(List<Instruction> code, StorableValue framePointer) {
-    @Get Variables Used@
-    @Fit Instructions Between Nodes@
-    @Map Nodes To Instructions@
-    @Join Nodes Together@
+    do {
+      @Get Variables Used@
+      @Fit Instructions Between Nodes@
+      @Join Nodes Together@
+      @Map Nodes To Instructions@
+      @Strip Out Dead Code@
+    } while(!instructionsFollowingNode.get(UNASSIGNED).isEmpty());
     @Variables Used At Next Instruction@
     @Identify Function Calls@
     @Calculate Liveness@
@@ -957,8 +967,8 @@ Firstly: how nodes relate to the graph. This will create new nodes (i.e. increme
 ~~~~
 @Control Flow Graph Members@ +=
 private static final int FIRST_NODE = 0, LAST_NODE = 1, UNASSIGNED = -1;
-final int numNodes;
-final int[] prevNode, nextNode;
+int numNodes;
+int[] prevNode, nextNode;
 @Fit Instructions Between Nodes@ +=
 int highestNode = LAST_NODE + 1;
 prevNode = new int[code.size()]; Arrays.fill(prevNode, 1, code.size(), UNASSIGNED);
@@ -984,10 +994,12 @@ Now we know where nodes fit into the graph we can build up a map of which instru
 
 ~~~~
 @Control Flow Graph Members@ +=
-final Multimap<Integer, Integer> 
-  instructionsFollowingNode = HashMultimap.create(), 
-  instructionsBeforeNode = HashMultimap.create(); 
+Multimap<Integer, Integer> 
+  instructionsFollowingNode, 
+  instructionsBeforeNode; 
 @Map Nodes To Instructions@ +=
+instructionsFollowingNode = TreeMultimap.create(); 
+instructionsBeforeNode = TreeMultimap.create();
 for(int i = 0; i < code.size(); ++i ) {
   instructionsFollowingNode.put(prevNode[i], i);
   instructionsBeforeNode.put(nextNode[i], i);
@@ -998,12 +1010,50 @@ for(int i = 0; i < code.size(); ++i ) {
 
 ~~~~
 @Control Flow Graph Members@ +=
-ImmutableMultimap<Integer, Integer> nextNodes;
+Multimap<Integer, Integer> nextNodes, prevNodes;
 @Join Nodes Together@ +=
-ImmutableMultimap.Builder<Integer, Integer> nextNodes = ImmutableMultimap.builder();
-for(int i = 0; i < code.size(); ++i )
+nextNodes = TreeMultimap.create();
+prevNodes = TreeMultimap.create();
+for(int i = 0; i < code.size(); ++i) {
   nextNodes.put(prevNode[i], nextNode[i]);
-this.nextNodes = nextNodes.build();
+  prevNodes.put(nextNode[i], prevNode[i]);
+}
+~~~~
+
+Dead code is all code only reachable from an UNASSIGNED node (and no other path)
+
+~~~~
+@Strip Out Dead Code@ +=
+BitSet dead = new BitSet(code.size());
+Queue<Integer> maybeDead = Queues.newArrayDeque(instructionsFollowingNode.get(UNASSIGNED));
+while (!maybeDead.isEmpty()) {
+  int i = maybeDead.poll();
+  if (dead.get(i))
+    continue;
+  boolean isDead = true;
+  for (int p : instructionsBeforeNode.get(prevNode[i]))
+    isDead &= dead.get(p);
+  if (isDead) {
+    dead.set(i);
+    maybeDead.addAll(instructionsFollowingNode.get(nextNode[i]));
+    @Found Dead Instruction@
+  }
+}
+~~~~
+
+We make each jump to a unique target, so if we remove a jump, remove a target!
+
+~~~~
+@Found Dead Instruction@ +=
+Instruction inst = code.get(i); 
+if (inst instanceof Jump)
+  dead.set(code.indexOf(new DefineLabel(((Jump) inst).to)));
+~~~~
+
+~~~~
+@Remove Dead Code@ +=
+for (int i = dead.nextSetBit(0), drift = 0; i >= 0; i = dead.nextSetBit(i + 1))
+  code.remove(i - drift++);
 ~~~~
 
 Which variables are used in any of the instructions following this node? We can't call a variable dead if at least one code path reads it, but we can call it dead if every code path writes to it (and doesn't read from it in the same instruction).
@@ -1088,7 +1138,8 @@ for(Instruction i : code) {
 variables = toArray(allVariables, Variable.class);
 this.framePointer = indexOf(variables, framePointer);
 @Control Flow Graph Members@ +=
-final int framePointer;
+Variable[] variables;
+int framePointer;
 ~~~~
 
 Liveness...as a BitSet. A variable is not live at the node before the instruction where it's created and is not live at the node after the instruction where it's last read.
@@ -1105,13 +1156,13 @@ Queue<Integer> unprocessed = Queues.newArrayDeque(Arrays.asList(ControlFlowGraph
 BitSet nodesSeen = new BitSet();
 for(Integer node = unprocessed.poll(); node != null; node = unprocessed.poll()) {
   boolean changed = false;
-  for(int n : this.nextNodes.get(node))
+  for(int n : nextNodes.get(node))
       changed |= copyFrom(isLive, n, node, variables.length);
   for(int index = node * variables.length; index < (node+1) * variables.length; ++index)
     if(varsWrittenNext.get(index) && !varsReadNext.get(index))
       isLive.clear(index);
   if(!nodesSeen.get(node) || changed)
-    for(int n : this.nextNodes.inverse().get(node)) unprocessed.offer(n);
+    for(int n : prevNodes.get(node)) unprocessed.offer(n);
   nodesSeen.set(node);
 }
 ~~~~
@@ -1142,7 +1193,7 @@ for (int n = FIRST_NODE; !saved.isEmpty(); n = Iterables.getOnlyElement(next)) {
     registersInUse.set(n * Register.values().length + r.ordinal());
   for(int i : instructionsFollowingNode.get(n))
     saved.removeAll(code.get(i).uses(Register.class));
-  if((next = this.nextNodes.get(n)).isEmpty())
+  if((next = nextNodes.get(n)).isEmpty())
     break;
 }
 ~~~~
@@ -1180,7 +1231,6 @@ We can use liveness information to decide what variables we need to assign to re
 
 ~~~~
 @Control Flow Graph Members@ +=
-final Variable[] variables;
 boolean needsAssigning(int variable, int node, Register r) {
   boolean isLive = isLiveAt(variable, node) || isVarUsedNext(variable, node);
   boolean thisRegPreserved = !nodesBeforeFnCalls.get(node) || calleeSavesRegisterIndices.get(r.ordinal());
@@ -1558,7 +1608,7 @@ The last pair of constraints ensure that the _NEW_VAR_IN_REG_FLAG_ works as we w
 @Add Row Keys@ +=
 for (int v = 0; v < variables.length; ++v)
   for (Register r : Register.ASSIGNABLE)
-    for(Entry<Integer, Integer> n : this.nextNodes.entries()) {
+    for(Entry<Integer, Integer> n : nextNodes.entries()) {
       if(needsAssigning(v, n.getKey(), r)
       && needsAssigning(v, n.getValue(), r)) 
         { @Add Constraints If Both Nodes Are Relevant@ }
@@ -2139,7 +2189,6 @@ import java.util.concurrent.atomic.*;
 import org.antlr.runtime.ANTLRInputStream;
 import org.antlr.runtime.CommonTokenStream;
 import org.antlr.runtime.tree.*;
-import com.google.common.base.Supplier;
 import com.google.common.base.*;
 import com.google.common.primitives.*;
 import com.google.common.collect.*;

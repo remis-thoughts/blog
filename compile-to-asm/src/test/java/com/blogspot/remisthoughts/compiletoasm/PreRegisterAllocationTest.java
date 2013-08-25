@@ -10,6 +10,7 @@ import org.antlr.runtime.CommonTokenStream;
 import org.antlr.runtime.tree.Tree;
 import org.junit.Test;
 
+import com.blogspot.remisthoughts.compiletoasm.Compiler.BinaryOp;
 import com.blogspot.remisthoughts.compiletoasm.Compiler.Immediate;
 import com.blogspot.remisthoughts.compiletoasm.Compiler.Instruction;
 import com.blogspot.remisthoughts.compiletoasm.Compiler.Label;
@@ -23,6 +24,24 @@ public class PreRegisterAllocationTest {
 		return new UnsignedParser(new CommonTokenStream(new UnsignedLexer(
 				new ANTLRInputStream(new ByteArrayInputStream(
 						code.getBytes(Charsets.UTF_8)), "UTF-8")))).eval().tree;
+	}
+
+	@Test
+	public void testWhileWITHConstant() throws Exception {
+		Tree ast = Compiler.get(code("while 1 { a = 3; return a; };"), 0);
+		ProgramState program = new ProgramState();
+		Compiler.parseDefinition(ast, program);
+		List<Instruction> code = program.text.get(0);
+		assertEquals(1, Iterables.size(Iterables.filter(code, BinaryOp.class)));
+	}
+
+	@Test
+	public void testWhileNOConstant() throws Exception {
+		Tree ast = Compiler.get(code("a = 3; while >(a,5) { a = 2; };"), 0);
+		ProgramState program = new ProgramState();
+		Compiler.parseDefinition(ast, program);
+		List<Instruction> code = program.text.get(0);
+		assertEquals(2, Iterables.size(Iterables.filter(code, BinaryOp.class)));
 	}
 
 	@Test

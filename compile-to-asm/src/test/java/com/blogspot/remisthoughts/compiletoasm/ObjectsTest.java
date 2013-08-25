@@ -2,7 +2,7 @@ package com.blogspot.remisthoughts.compiletoasm;
 
 import static com.blogspot.remisthoughts.compiletoasm.Compiler.move;
 import static com.blogspot.remisthoughts.compiletoasm.Compiler.Condition.ae;
-import static com.blogspot.remisthoughts.compiletoasm.Compiler.WriteType.WILL;
+import static com.blogspot.remisthoughts.compiletoasm.Compiler.WriteType.WILL_ERASE;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
@@ -27,75 +27,75 @@ public class ObjectsTest {
 	@Test
 	public void testMemoryAddresses_move_imm2mem() throws Exception {
 		assertFalse(move(zero, a).readsFrom(Value.class).contains(a));
-		assertTrue(move(zero, a).writesTo(Value.class, WILL).contains(a));
+		assertTrue(move(zero, a).writesTo(Value.class, WILL_ERASE).contains(a));
 
 		assertTrue(move(zero, atA).readsFrom(Value.class).contains(a));
-		assertFalse(move(zero, atA).writesTo(Value.class, WILL).contains(a));
+		assertFalse(move(zero, atA).writesTo(Value.class, WILL_ERASE).contains(a));
 	}
 
 	@Test
 	public void testMemoryAddresses_move_var2mem() throws Exception {
 		assertFalse(move(b, a).readsFrom(Value.class).contains(a));
 		assertTrue(move(b, a).readsFrom(Value.class).contains(b));
-		assertTrue(move(b, a).writesTo(Value.class, WILL).contains(a));
-		assertFalse(move(b, a).writesTo(Value.class, WILL).contains(b));
+		assertTrue(move(b, a).writesTo(Value.class, WILL_ERASE).contains(a));
+		assertFalse(move(b, a).writesTo(Value.class, WILL_ERASE).contains(b));
 
 		assertTrue(move(b, atA).readsFrom(Value.class).contains(a));
 		assertTrue(move(b, atA).readsFrom(Value.class).contains(b));
-		assertFalse(move(b, atA).writesTo(Value.class, WILL).contains(a));
-		assertFalse(move(b, atA).writesTo(Value.class, WILL).contains(b));
+		assertFalse(move(b, atA).writesTo(Value.class, WILL_ERASE).contains(a));
+		assertFalse(move(b, atA).writesTo(Value.class, WILL_ERASE).contains(b));
 	}
 
 	@Test
 	public void testMemoryAddresses_binop_var2mem() throws Exception {
 		assertTrue(Op.addq.with(b, a).readsFrom(Value.class).contains(a));
 		assertTrue(Op.addq.with(b, a).readsFrom(Value.class).contains(b));
-		assertTrue(Op.addq.with(b, a).writesTo(Value.class, WILL).contains(a));
-		assertFalse(Op.addq.with(b, a).writesTo(Value.class, WILL).contains(b));
+		assertTrue(Op.addq.with(b, a).writesTo(Value.class, WILL_ERASE).contains(a));
+		assertFalse(Op.addq.with(b, a).writesTo(Value.class, WILL_ERASE).contains(b));
 
 		assertTrue(Op.addq.with(b, atA).readsFrom(Value.class).contains(a));
 		assertTrue(Op.addq.with(b, atA).readsFrom(Value.class).contains(b));
-		assertFalse(Op.addq.with(b, atA).writesTo(Value.class, WILL).contains(a));
-		assertFalse(Op.addq.with(b, atA).writesTo(Value.class, WILL).contains(b));
+		assertFalse(Op.addq.with(b, atA).writesTo(Value.class, WILL_ERASE).contains(a));
+		assertFalse(Op.addq.with(b, atA).writesTo(Value.class, WILL_ERASE).contains(b));
 	}
 
 	@Test
 	public void testMemoryAddresses_move_cond() throws Exception {
 		assertFalse(new Move(b, a, ae).readsFrom(Value.class).contains(a));
 		assertTrue(new Move(b, a, ae).readsFrom(Value.class).contains(b));
-		assertFalse(new Move(b, a, ae).writesTo(Value.class, WILL).contains(a));
-		assertFalse(new Move(b, a, ae).writesTo(Value.class, WILL).contains(b));
+		assertFalse(new Move(b, a, ae).writesTo(Value.class, WILL_ERASE).contains(a));
+		assertFalse(new Move(b, a, ae).writesTo(Value.class, WILL_ERASE).contains(b));
 
 		assertTrue(new Move(b, atA, ae).readsFrom(Value.class).contains(a));
 		assertTrue(new Move(b, atA, ae).readsFrom(Value.class).contains(b));
-		assertFalse(new Move(b, atA, ae).writesTo(Value.class, WILL).contains(a));
-		assertFalse(new Move(b, atA, ae).writesTo(Value.class, WILL).contains(b));
+		assertFalse(new Move(b, atA, ae).writesTo(Value.class, WILL_ERASE).contains(a));
+		assertFalse(new Move(b, atA, ae).writesTo(Value.class, WILL_ERASE).contains(b));
 	}
 
 	@Test
 	public void testMemoryAddresses_binop_mem2var() throws Exception {
 		assertTrue(Op.addq.with(a, b).readsFrom(Value.class).contains(a));
 		assertTrue(Op.addq.with(a, b).readsFrom(Value.class).contains(b));
-		assertFalse(Op.addq.with(a, b).writesTo(Value.class, WILL).contains(a));
-		assertTrue(Op.addq.with(a, b).writesTo(Value.class, WILL).contains(b));
+		assertFalse(Op.addq.with(a, b).writesTo(Value.class, WILL_ERASE).contains(a));
+		assertTrue(Op.addq.with(a, b).writesTo(Value.class, WILL_ERASE).contains(b));
 
 		assertTrue(Op.addq.with(atA, b).readsFrom(Value.class).contains(a));
 		assertTrue(Op.addq.with(atA, b).readsFrom(Value.class).contains(b));
-		assertFalse(Op.addq.with(atA, b).writesTo(Value.class, WILL).contains(a));
-		assertTrue(Op.addq.with(atA, b).writesTo(Value.class, WILL).contains(b));
+		assertFalse(Op.addq.with(atA, b).writesTo(Value.class, WILL_ERASE).contains(a));
+		assertTrue(Op.addq.with(atA, b).writesTo(Value.class, WILL_ERASE).contains(b));
 	}
 
 	@Test
 	public void testMemoryAddresses_move_mem2var() throws Exception {
 		assertTrue(move(a, b).readsFrom(Value.class).contains(a));
 		assertFalse(move(a, b).readsFrom(Value.class).contains(b));
-		assertFalse(move(a, b).writesTo(Value.class, WILL).contains(a));
-		assertTrue(move(a, b).writesTo(Value.class, WILL).contains(b));
+		assertFalse(move(a, b).writesTo(Value.class, WILL_ERASE).contains(a));
+		assertTrue(move(a, b).writesTo(Value.class, WILL_ERASE).contains(b));
 
 		assertTrue(move(atA, b).readsFrom(Value.class).contains(a));
 		assertFalse(move(atA, b).readsFrom(Value.class).contains(b));
-		assertFalse(move(atA, b).writesTo(Value.class, WILL).contains(a));
-		assertTrue(move(atA, b).writesTo(Value.class, WILL).contains(b));
+		assertFalse(move(atA, b).writesTo(Value.class, WILL_ERASE).contains(a));
+		assertTrue(move(atA, b).writesTo(Value.class, WILL_ERASE).contains(b));
 	}
 
 	@Test

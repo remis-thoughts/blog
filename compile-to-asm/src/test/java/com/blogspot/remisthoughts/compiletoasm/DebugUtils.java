@@ -90,7 +90,7 @@ class DebugUtils {
 		System.out.println("should-be-switches");
 		for (int i = 0; i < code.size(); ++i) {
 			int n = cfg.prevNode[i];
-			for (int prevN : cfg.nextNodes.inverse().get(n)) {
+			for (int prevN : cfg.prevNodes.get(n)) {
 				for (int v = 0; v < cfg.variables.length; ++v) {
 					for (Register r : Register.ASSIGNABLE) {
 						boolean rPrevN;
@@ -153,7 +153,7 @@ class DebugUtils {
 
 	static int numNodesLiveAtBefore(ControlFlowGraph cfg, int v, int n) {
 		int ret = 0;
-		for (int prev : cfg.nextNodes.inverse().get(n)) {
+		for (int prev : cfg.prevNodes.get(n)) {
 			if (cfg.isLiveAt(v, prev)) {
 				++ret;
 			}

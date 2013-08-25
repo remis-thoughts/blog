@@ -16,9 +16,9 @@ import com.blogspot.remisthoughts.compiletoasm.Compiler.Immediate;
 import com.blogspot.remisthoughts.compiletoasm.Compiler.Instruction;
 import com.blogspot.remisthoughts.compiletoasm.Compiler.Label;
 import com.blogspot.remisthoughts.compiletoasm.Compiler.Op;
-import com.blogspot.remisthoughts.compiletoasm.Compiler.Parameter;
 import com.blogspot.remisthoughts.compiletoasm.Compiler.ParsingState;
 import com.blogspot.remisthoughts.compiletoasm.Compiler.Register;
+import com.blogspot.remisthoughts.compiletoasm.Compiler.StorableValue;
 import com.blogspot.remisthoughts.compiletoasm.Compiler.Variable;
 
 public class AliasingTest {
@@ -62,7 +62,7 @@ public class AliasingTest {
 		AtAddress atA = new AtAddress(a, 0);
 		Variable b = new Variable("b");
 		Immediate one = new Immediate(1);
-		Parameter p = new Parameter(state, 0);
+		StorableValue p = state.parameter(0);
 
 		/*
 		 * fn one_plus_one(a) { 
@@ -96,7 +96,7 @@ public class AliasingTest {
 		AtAddress atA = new AtAddress(a, 0);
 		Variable b = new Variable("b");
 		Immediate one = new Immediate(1);
-		Parameter p = new Parameter(state, 0);
+		StorableValue p = state.parameter(0);
 
 		/*
 		 * fn one_plus_one(a) { 
