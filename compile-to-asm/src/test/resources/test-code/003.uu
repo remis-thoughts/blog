@@ -2,4 +2,4 @@ fn identity(x) {
   return x;
 };
 
-return identity(3);
+return identity(0x3);

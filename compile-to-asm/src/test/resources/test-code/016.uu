@@ -1,5 +1,5 @@
-if ≥(2, 3) {
-	return 0;
+if ≥(0x2, 0x3) {
+	return 0x0;
 } else {
-	return 16;
+	return 0x10;
 };

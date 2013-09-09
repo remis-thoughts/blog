@@ -10,12 +10,10 @@ import static com.blogspot.remisthoughts.compiletoasm.DebugUtils.printShouldBeSw
 import static com.blogspot.remisthoughts.compiletoasm.DebugUtils.printVariableLife;
 import static com.blogspot.remisthoughts.compiletoasm.TestUtils.assertAllAssigned;
 import static com.google.common.collect.Iterables.filter;
-import static com.google.common.collect.Iterables.isEmpty;
 import static org.gnu.glpk.GLPK.glp_init_iocp;
 import static org.gnu.glpk.GLPK.glp_intopt;
 import static org.gnu.glpk.GLPKConstants.GLP_ON;
 import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertTrue;
 
 import java.util.Arrays;
 import java.util.List;
@@ -47,9 +45,7 @@ public class RegisterAllocationTest {
 		code = afterSolve(code, cfg, problem);
 
 		code = Lists.newArrayList(filter(code, noNoOps));
-		for (Instruction i : code) {
-			assertTrue("expected '" + i + "' to have no variables", isEmpty(i.uses(Variable.class)));
-		}
+		assertAllAssigned(code);
 		System.out.println(Joiner.on('\n').join(code));
 		return code;
 	}
@@ -144,7 +140,7 @@ public class RegisterAllocationTest {
 
 		List<Instruction> solved = afterSolve(code, cfg, lpProblem);
 		assertAllAssigned(solved);
-		assertEquals(12, solved.size());
+		assertEquals(10, solved.size());
 	}
 
 	@Test
@@ -218,7 +214,7 @@ public class RegisterAllocationTest {
 
 		List<Instruction> solved = afterSolve(code, cfg, lpProblem);
 		assertAllAssigned(solved);
-		assertEquals(10, solved.size());
+		assertEquals(8, solved.size());
 	}
 
 	private static List<Instruction> afterSolve(List<Instruction> code, ControlFlowGraph cfg, glp_prob lpProblem) {

@@ -1,6 +1,6 @@
-a = 15;
+a = 0xF;
 
-fn b_is() { return 12; };
+fn b_is() { return 0xC; };
 b = b_is();
 
 return +(a, b);

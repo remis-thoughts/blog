@@ -1,9 +1,9 @@
 fn fibs(nth) {
-	last = 1;
-	this = 1;
+	last = 0x1;
+	this = 0x1;
 	
-	while >(nth, 0) {
-		nth = -(nth, 1);
+	while >(nth, 0x0) {
+		nth = -(nth, 0x1);
 		next = +(this, last);
 		last = this;
 		this = next;
@@ -12,4 +12,4 @@ fn fibs(nth) {
 	return this;
 };
 
-return -(fibs(7), 1);
+return -(fibs(0x7), 0x1);

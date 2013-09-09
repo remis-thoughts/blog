@@ -1,6 +1,6 @@
-a = #_malloc(8);
-@a = 20;
-@a = +(@(a), 2);
+a = #_malloc(0x8);
+@a = 0x14;
+@a = +(@(a), 0x2);
 ret = @(a);
 #_free(a);
 return ret;

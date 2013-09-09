@@ -1,2 +1,2 @@
-@RET = +(7, 14);
+@RET = +(0x7, 0xE);
 return @(RET);

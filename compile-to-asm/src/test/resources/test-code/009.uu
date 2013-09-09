@@ -9,4 +9,4 @@ fn gogogo(a,b,c,d) {
   return sub(add(a,b), add(c,d));
 };
 
-return gogogo(5,7,1,2);
+return gogogo(0x5, 0x7, 0x1, 0x2);

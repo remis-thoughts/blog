@@ -1,5 +1,5 @@
-if ≡(3, 3) {
-	return 19;
+if ≡(0x3, 0x3) {
+	return 0x13;
 } else {
-	return 0;
+	return 0x0;
 };

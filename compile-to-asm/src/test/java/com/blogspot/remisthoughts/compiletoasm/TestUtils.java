@@ -1,6 +1,7 @@
 package com.blogspot.remisthoughts.compiletoasm;
 
-import static org.junit.Assert.assertEquals;
+import static com.google.common.collect.Iterables.isEmpty;
+import static org.junit.Assert.assertTrue;
 
 import java.util.List;
 
@@ -23,7 +24,7 @@ public class TestUtils {
 
 	public static void assertAllAssigned(List<Instruction> code) {
 		for (Instruction i : code) {
-			assertEquals(0, i.uses(Variable.class).size());
+			assertTrue("expected '" + i + "' to have no variables", isEmpty(i.uses(Variable.class)));
 		}
 	}
 }

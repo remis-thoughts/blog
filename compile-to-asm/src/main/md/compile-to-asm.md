@@ -25,6 +25,8 @@ whileloop : While expression LB (statement SC)* RB
 
 _Globals_ are going to end up in the exported symbols of the compiled binary, so have a different set of restrictions on what characters they can contain. _Locals_ are source-level and private symbols so they are essentially arbitrary (but I'm going to enforce a ruby-style variable naming convention). 
 
+http://stackoverflow.com/questions/2409628/in-antlr-how-do-you-specify-a-specific-number-of-repetitions
+
 ~~~~
 @Antlr Tokens@ +=
 LP : '('; RP : ')'; C : ','; SC : ';'; LB : '{'; RB : '}'; 
@@ -33,7 +35,7 @@ If : 'if'; Else : 'else'; While : 'while';
 Local : '_'* ('a'..'z') ('a'..'z'|'_'|'0'..'9')*;
 Global : '_'* ('A'..'Z') ('A'..'Z'|'_'|'0'..'9')*;
 FFI : '#' ('a'..'z'|'A'..'Z'|'0'..'9'|'_')+;
-Number : ('0'..'9')+;
+Number @init{int n=0;} : '0x' (('0'..'9' | 'A' .. 'F') {++n;})+ {n > 0 && n <= 16}?;
 Intrinsic : '+' | '-' | '&' | '|' | '\u00ab' | '\u00bb' ; Deref : '@'; StackAlloc : '$';
 Conditional : '<' | '>' | '\u2261' | '\u2260' | '\u2264' | '\u2265';
 WS : (' ' | '\t' | '\r' | '\n') {$channel=HIDDEN;};
@@ -65,7 +67,7 @@ What we're compiling for
 
 ~~~~
 @Other Helpers@ +=
-private static UnsignedLong SIZE = UnsignedLong.asUnsigned(8);
+private static final long SIZE = 8;
 ~~~~
 
 ## (I) AST To Assembly Instructions ## 
@@ -120,14 +122,14 @@ private static final Instruction align = new Instruction() {
   public String toString() { return @Align x86 Code@; }
 };
 @Other Helpers@ +=
-private static final UnsignedLong ALIGN_STACK_TO = UnsignedLong.asUnsigned(16);
+private static final long ALIGN_STACK_TO = 16;
 @Immediate Members@ += 
 Immediate alignAllocation() {
-  UnsignedLong overhangBytes = value.remainder(ALIGN_STACK_TO);
-  if(overhangBytes.equals(ZERO))
+  long overhangBytes = value % ALIGN_STACK_TO;
+  if(overhangBytes == 0)
     return this;
   else
-    return new Immediate(value.add(ALIGN_STACK_TO.subtract(overhangBytes)));
+    return new Immediate(value + ALIGN_STACK_TO - overhangBytes);
 }
 ~~~~
 
@@ -193,11 +195,9 @@ interface Value {}
 interface StorableValue extends Value {}
 @Value Classes@
 static final class Immediate implements Value {
-  final UnsignedLong value;
-  Immediate(String value) { this.value = UnsignedLong.valueOf(value); }
-  Immediate(long value) { this.value = UnsignedLong.asUnsigned(value); }
-  private Immediate(UnsignedLong value) { this.value = value; }
-  public boolean equals(Object o) { return o instanceof Immediate && ((Immediate)o).value.equals(value);}
+  final long value;
+  Immediate(long value) { this.value = value; }
+  public boolean equals(Object o) { return o instanceof Immediate && ((Immediate)o).value == value;}
   public String toString() { @Immediate x86 Code@ }
   @Immediate Members@
 }
@@ -250,7 +250,7 @@ static final class Call extends Instruction {
 @Parsing State Members@ +=
 Instruction storeArg(Value arg, int position) {
   if(framePointer == null)
-    return move(arg, new AtAddress(rsp, position * SIZE.longValue()));
+    return move(arg, new AtAddress(rsp, position * SIZE));
   else
     return new Push(arg);
 }
@@ -286,7 +286,7 @@ private void call(Tree t) {
 ~~~~
 @Remove Args From Stack@ +=
 if(framePointer != null)
-  code.add(Op.addq.with(new Immediate(storedArgs * SIZE.longValue()).alignAllocation(), rsp));
+  code.add(Op.addq.with(new Immediate(storedArgs * SIZE).alignAllocation(), rsp));
 ~~~~
 
 Note that we'll assume the function being called is a local variable if it has the same name as a local variable in this function - otherwise it'll be a label which the linker will resolve for us.
@@ -421,7 +421,7 @@ private Value getAsValue(Tree t) {
               { @Parse A Stack Allocation@ }
             }
         case Number :
-            return new Immediate(t.getText());
+            return new Immediate(Long.parseLong(t.getText().substring(2), 16));
         default :
             throw new IllegalArgumentException();
     }
@@ -483,6 +483,7 @@ static final class ParsingState {
     @Get Function Name@
     @Set Up Stack Allocation@
     @Set Up Alignment@
+    @Decide If We Should Use The Red Zone@
     @Identify Callee Saves Registers@
     @Parse Function Parameters@
     @Keep Track Of Declared Variables@
@@ -711,7 +712,7 @@ if(numParams > maxInRegs && (numParams - maxInRegs) % 2 != 0)
 @Remove Function Call Params From Stack@ +=
 int correction = 0;
 if((numParams - maxInRegs) % 2 != 0) correction = 1;
-state.code.add(Op.addq.with(new Immediate((numParams - maxInRegs + correction) * SIZE.longValue()), rsp));
+state.code.add(Op.addq.with(new Immediate((numParams - maxInRegs + correction) * SIZE), rsp));
 ~~~~
 
 Memory stuff. Need _MemoryAddress_ interface as we can't have x86 instructions like _movq (%rax), (%rdi)_
@@ -781,18 +782,18 @@ Stack variables are _Values_ that are pointers onto this function's stack space.
 ~~~~
 @Value Classes@ +=
 static final class StackVar {
-  final UnsignedLong bytesIntoStack; final UnsignedLong size;
-  StackVar(UnsignedLong bytesIntoStack, UnsignedLong size) {
+  final long bytesIntoStack; final long size;
+  StackVar(long bytesIntoStack, long size) {
     this.bytesIntoStack = bytesIntoStack; this.size = size;
   }
 }
 @Parsing State Members@ +=
 private final Map<Variable, StackVar> stackVars = Maps.newTreeMap();
-private UnsignedLong stackBytes = ZERO;
+private long stackBytes = 0;
   StackVar stackVar(Variable name, Immediate bytes) {
   if(!stackVars.containsKey(name)) {
     stackVars.put(name, new StackVar(stackBytes, bytes.value));
-    stackBytes = stackBytes.add(bytes.value);
+    stackBytes += bytes.value;
   } 
   return stackVars.get(name); 
 }
@@ -807,9 +808,9 @@ StorableValue stackVarsRelativeTo() {
 }
 long stackVarOffset(StackVar s) {
   if(framePointer == null)
-    return s.bytesIntoStack.longValue(); // stack pointer + n bytes
+    return s.bytesIntoStack; // stack pointer + n bytes
   else
-    return -s.bytesIntoStack.add(SIZE).longValue(); // frame pointer - (n+8) bytes
+    return -(s.bytesIntoStack + SIZE); // frame pointer - (n+8) bytes
 }
 Instruction stackVarOffset(StackVar s, Variable v) {
   long offset = stackVarOffset(s);
@@ -849,7 +850,7 @@ static final class Parameter implements com.google.common.base.Supplier<Long> {
     this.function = function; this.number = number; 
   }
   public Long get() {
-    return (number + 1) * SIZE.longValue() + function.staticStackBytes().value.longValue();
+    return (number + 1) * SIZE + function.staticStackBytes().value;
   }
 }
 @Parsing State Members@ +=
@@ -857,7 +858,7 @@ StorableValue parameter(int number) {
   if (framePointer == null) {
     return new AtAddress(rsp, new Parameter(this, number));
   } else {
-    return new AtAddress(framePointer, (number + 1) * SIZE.longValue());
+    return new AtAddress(framePointer, (number + 1) * SIZE);
   }
 }
 ~~~~
@@ -1039,6 +1040,7 @@ while (!maybeDead.isEmpty()) {
     @Found Dead Instruction@
   }
 }
+@Remove Dead Code@
 ~~~~
 
 We make each jump to a unique target, so if we remove a jump, remove a target!
@@ -2051,22 +2053,33 @@ static boolean hasFnCalls(Tree t) {
 ignoreAlignment = !hasFnCalls(get(def, 2));
 ~~~~
 
+http://en.wikipedia.org/wiki/Red_zone_(computing) . Similar to ignoreAlignment!
+
+~~~~
+@Parsing State Members@ +=
+final boolean useRedZone;
+@Decide If We Should Use The Red Zone@ +=
+useRedZone = !hasFnCalls(get(def, 2));
+~~~~
+
 Now we know how many local vars we need, we can reserve the appropriate amount of space. However, we must preserve 16-byte alignment when we're making function calls, so rather than rounding the stack pointer before every function call we'll just over-allocate 8 bytes of stack space. Also, when we enter a function we'll be 8 bytes off alignment as the call instruction will have pushed the return address. 
 
 ~~~~
 @Parsing State Members@ +=
 Immediate staticStackBytes() {
-  UnsignedLong ret = stackBytes;
+  long ret = stackBytes;
   if(framePointer == null)
-    ret = ret.add(UnsignedLong.asUnsigned(mostStackArgs).multiply(SIZE));
-  UnsignedLong overhang = ret.add(isMainFn() || ignoreAlignment ? ZERO : SIZE).remainder(ALIGN_STACK_TO);
-  if (!overhang.equals(ZERO))
-    ret = ret.add(ALIGN_STACK_TO.subtract(overhang));
+    ret += mostStackArgs * SIZE;
+  long overhang = (ret + (isMainFn() || ignoreAlignment ? 0 : SIZE)) % ALIGN_STACK_TO;
+  if (overhang != 0)
+    ret += ALIGN_STACK_TO - overhang;
+  if (useRedZone)
+    ret = Math.max(0, ret - 128);
   return new Immediate(ret);
 }
 @Allocate Stack Space For Variables@ +=
 Immediate staticBytes = state.staticStackBytes();
-if(!staticBytes.value.equals(ZERO)) {
+if(staticBytes.value != 0) {
   state.code.add(
     state.framePointer == null ? 1 : 2, 
     Op.subq.with(staticBytes, Register.rsp));
@@ -2100,7 +2113,7 @@ else
 @Text x86 Code@ += ".text"
 @Ret x86 Code@ += "ret"
 @Define Label x86 Code@ += return String.format("%s:", label.name);
-@Immediate x86 Code@ += return String.format("$0x%s", value.toString(16));
+@Immediate x86 Code@ += return String.format("$0x%s", Long.toHexString(value));
 @Jump x86 Code@ += return String.format("j%s %s", cond == null ? "mp" : cond, to.name);
 @Move x86 Code@ += 
 if(cond == null)
@@ -2114,7 +2127,7 @@ if(at instanceof Label)
 else if(offset.get() == 0)
   return String.format("(%s)", at);
 else
-  return String.format("%s0x%s(%s)", offset.get() < 0 ? "-" : "", Long.toString(Math.abs(offset.get()), 16), at);
+  return String.format("%s0x%s(%s)", offset.get() < 0 ? "-" : "", Long.toHexString(Math.abs(offset.get())), at);
 @Swap x86 Code@ += return String.format("xchg %s, %s", arg1, arg2);
 ~~~~
 
@@ -2127,8 +2140,8 @@ if(!program.globals.isEmpty()) {
   writer.append(".data\n");
   for(Entry<Label, Immediate> global : program.globals.entrySet()) 
     writer
-      .append(global.getKey().name).append(": .long 0x")
-      .append(global.getValue().value.toString(16)).append("\n");
+      .append(global.getKey().name).append(": .long ")
+      .append(global.getValue().toString().substring(1)).append("\n");
 }
 writer.append(".text\n");
 for(Instruction i : filter(concat(program.text), noNoOps)) 
@@ -2179,7 +2192,6 @@ import static com.blogspot.remisthoughts.compiletoasm.Compiler.*;
 import static com.google.common.collect.Iterables.*;
 import static com.google.common.collect.Multimaps.*;
 import static com.google.common.base.Predicates.*;
-import static com.google.common.primitives.UnsignedLong.*;
 import static org.gnu.glpk.GLPK.*;
 import static org.gnu.glpk.GLPKConstants.*;
 import java.io.*;

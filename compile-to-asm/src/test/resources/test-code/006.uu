@@ -8,4 +8,4 @@ fn do_stuff(a, b, c) {
     return sub(add(a, b), c);
 };
 
-return do_stuff(10, 5, 9);
+return do_stuff(0xA, 0x5, 0x9);

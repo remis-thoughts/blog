@@ -1,4 +1,4 @@
-if 0 {
-	return 0;
+if 0x0 {
+	return 0x0;
 };
-return 10;
+return 0xA;

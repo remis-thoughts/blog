@@ -31,7 +31,7 @@ import com.google.common.io.Resources;
  * file name.
  */
 @RunWith(Parameterized.class)
-public class CompilerTest {
+public class CompilerIT {
 	private static final String GCC_CMD = "gcc -m64 -Wall -o %s %s";
 
 	@Parameters
@@ -47,7 +47,7 @@ public class CompilerTest {
 	private static File tmp = new File(System.getProperty("java.io.tmpdir"));
 	private final File src;
 
-	public CompilerTest(File src) {
+	public CompilerIT(File src) {
 		this.src = src;
 	}
 
