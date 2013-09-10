@@ -1,49 +1,140 @@
-# Writing a Compiler: x86 Assembly Code Generation #
+# Writing a Compiler Back-End: ASTs to x86-64 Assembly Using Integer Programming #
 
-http://meri-stuff.blogspot.co.uk/2011/09/antlr-tutorial-expression-language.html#RewriteRules
-http://www.antlr.org/wiki/display/~admin/2008/11/30/Example+tree+rewriting+with+patterns
+## Introduction ##
+
+This is a [Literate](http://en.wikipedia.org/wiki/Literate_programming) Java implementation of a compiler that uses the integer programming from [this paper](http://grothoff.org/christian/lcpc2006.pdf) to generate x86-64 Assembly code ([AT&T](http://en.wikibooks.org/wiki/X86_Assembly/GAS_Syntax) format) from a toy imperative language. As this article only focuses on code generation, I'll use [antlr](http://www.antlr.org) to generate the lexer & parser from the grammar. 
+
+## The language ##
+
+A programme consists of a series of statements or function definitions. The top-level statements are swept into the _main function (whether or not symbols need a [leading underscore](http://stackoverflow.com/a/1035937/42543) is OS-specific). The grammer uses antlr's [re-write](http://meri-stuff.blogspot.co.uk/2011/09/antlr-tutorial-expression-language.html#RewriteRules) [rules](http://www.antlr.org/wiki/display/~admin/2008/11/30/Example+tree+rewriting+with+patterns) to build the programme's [Abstract Syntax Tree](http://en.wikipedia.org/wiki/Abstract_syntax_tree) (AST).
 
 ~~~~
+@Antlr Tokens@ +=
+SC : ';'; 
+@Synthetic Tokens@ +=
+Root;
 @Antlr Parse Rules@ +=
-eval : ((statement | fundef) SC)+ -> ^(Root fundef* ^(Definition ^(Name Global["main"]) ^(Parameters) ^(Body statement*)));
 statement : funcall | ret | assign | whileloop | ifelse;
-expression : variable | Number | funcall | FFI;
-variable : Local | Global;
-callable : variable| Intrinsic | Conditional | Deref | StackAlloc | FFI;
-assignable : variable | Deref assignable -> ^(Deref assignable) | FFI;
-ret : Return expression -> ^(Return expression);
-assign : assignable Assign expression -> ^(Assign assignable expression);
-funcall : callable LP (expression (C expression)*)? RP -> ^(Call callable ^(Parameters expression*));
+eval : ((statement | fundef) SC)+ -> ^(Root fundef* ^(Definition ^(Name Global["main"]) ^(Parameters) ^(Body statement*)));
+~~~~
+
+The language is Turing-complete, with two C-like control-flow structures. If-statements have an optional else-clause, and both structures use braces to group their statements. Any expression that evaluates to a non-zero number is considered 'true'.
+
+~~~~
+@Antlr Tokens@ +=
+LB : '{'; RB : '}'; 
+If : 'if'; Else : 'else'; While : 'while';
+Conditional : '<' | '>' | '\u2261' | '\u2260' | '\u2264' | '\u2265';
+@Synthetic Tokens@ +=
+Test; IfTrue; IfFalse; Body;
+@Antlr Parse Rules@ +=
 iftrue : (statement SC)*; iffalse : (statement SC)*;
 ifelse : If expression LB iftrue RB (Else LB iffalse RB)? 
   -> ^(If ^(Test expression) ^(IfTrue iftrue) ^(IfFalse iffalse)?);
-fundef : Definition variable? LP (Local (C Local)*)? RP LB (statement SC)* RB 
-  -> ^(Definition ^(Name variable) ^(Parameters Local*) ^(Body statement*));
 whileloop : While expression LB (statement SC)* RB
   -> ^(While ^(Test expression) ^(Body statement*));
 ~~~~
 
-_Globals_ are going to end up in the exported symbols of the compiled binary, so have a different set of restrictions on what characters they can contain. _Locals_ are source-level and private symbols so they are essentially arbitrary (but I'm going to enforce a ruby-style variable naming convention). 
-
-http://stackoverflow.com/questions/2409628/in-antlr-how-do-you-specify-a-specific-number-of-repetitions
+The langauge is also [untyped](http://en.wikipedia.org/wiki/Programming_language#Typed_versus_untyped_languages) - all values are 64-bit integers (it doesn't expose the x86's [floating point](http://en.wikibooks.org/wiki/X86_Assembly/Floating_Point) registers or operations), and can represent values, memory addresses or function pointers. This makes it easy to add a [foreign function interface](http://en.wikipedia.org/wiki/Foreign_function_interface) (FFI). The assembly code the compiler generates conforms to the [System V AMD64 ABI](http://en.wikipedia.org/wiki/X86_calling_conventions#x86-64_calling_conventions) (not the Microsoft x64 calling convention that Windows uses). We'll go into this in much more detail later.
 
 ~~~~
 @Antlr Tokens@ +=
-LP : '('; RP : ')'; C : ','; SC : ';'; LB : '{'; RB : '}'; 
-Definition : 'fn'; Return : 'return'; Assign : '=';
-If : 'if'; Else : 'else'; While : 'while';
-Local : '_'* ('a'..'z') ('a'..'z'|'_'|'0'..'9')*;
-Global : '_'* ('A'..'Z') ('A'..'Z'|'_'|'0'..'9')*;
-FFI : '#' ('a'..'z'|'A'..'Z'|'0'..'9'|'_')+;
-Number @init{int n=0;} : '0x' (('0'..'9' | 'A' .. 'F') {++n;})+ {n > 0 && n <= 16}?;
-Intrinsic : '+' | '-' | '&' | '|' | '\u00ab' | '\u00bb' ; Deref : '@'; StackAlloc : '$';
-Conditional : '<' | '>' | '\u2261' | '\u2260' | '\u2264' | '\u2265';
-WS : (' ' | '\t' | '\r' | '\n') {$channel=HIDDEN;};
-@Synthetic Tokens@ +=
-tokens { Parameters; Call; Body; Root; Name; Test; IfTrue; IfFalse; } // for AST re-writing
+LP : '('; RP : ')'; C : ','; Definition : 'fn'; Return : 'return';
+@Synthetic Tokens@ += 
+Parameters; Call; Name;
+@Antlr Parse Rules@ +=
+funcall : callable LP (expression (C expression)*)? RP -> ^(Call callable ^(Parameters expression*));
+fundef : Definition variable? LP (Local (C Local)*)? RP LB (statement SC)* RB 
+  -> ^(Definition ^(Name variable) ^(Parameters Local*) ^(Body statement*));
 ~~~~
 
-Overall structure of the Java code
+As the language doesn't specify whether numbers are signed or unsigned, all literals are specified in [hex](http://en.wikipedia.org/wiki/Hexadecimal). These literals are [limited](http://stackoverflow.com/questions/2409628/in-antlr-how-do-you-specify-a-specific-number-of-repetitions
+) to at most 64 bits.
+
+~~~~
+@Antlr Tokens@ +=
+Number @init{int n=0;} : '0x' (('0'..'9' | 'A' .. 'F') {++n;})+ {n > 0 && n <= 16}?;
+~~~~
+
+We'll also let programmes specify which symbols (both functions and global variables) they want to _export_. Other programmes can only linked (either statically or [dynamically](http://www.tldp.org/HOWTO/Program-Library-HOWTO/shared-libraries.html)) against external symbols. You can see what symbols a library or executable contains (and exports) using GNU [nm](http://sourceware.org/binutils/docs-2.16/binutils/nm.html), e.g.:
+
+<pre>
+$ nm -r /usr/lib/libc.dylib
+  U dyld_stub_binder
+  U _xpc_atfork_prepare
+  U _xpc_atfork_parent
+  U _xpc_atfork_child
+  U _write
+  U _unlink
+  U _time
+  ...
+</pre>
+
+As a stylistic point, we'll force global (exported) variables to be upper case, and local (not-exported) variables to be lower case. However, we can't place restrictions on the names of foreign functions, so we'll prefix them with a '#'.
+
+~~~~
+@Antlr Tokens@ +=
+FFI : '#' ('a'..'z'|'A'..'Z'|'0'..'9'|'_')+;
+Local : '_'* ('a'..'z') ('a'..'z'|'_'|'0'..'9')*;
+Global : '_'* ('A'..'Z') ('A'..'Z'|'_'|'0'..'9')*;
+@Antlr Parse Rules@ +=
+variable : Local | Global;
+~~~~
+
+The final language feature I'll introduce are "intrinsic" functions, which are built-in functions that compile down to a single Assembly instruction. As this is only a toy language I'll just include intrinsics for some unsigned integer arithmetic operations, like <tt>+</tt> for the [ADD](http://en.wikipedia.org/wiki/X86_instruction_listings) instruction.
+
+~~~~
+@Antlr Tokens@ +=
+Intrinsic : '+' | '-' | '&' | '|' | '\u00ab' | '\u00bb' ;
+~~~~
+
+Memory de-refencing and [Stack](http://en.wikipedia.org/wiki/Stack-based_memory_allocation)-based memory allocation are similar to intrinsics; they are represented by symbols that are 'called' like any other function. We'll go into the layout of the stack (and where stack-based allocation fits into this) in much more detail later.
+
+~~~~
+@Antlr Tokens@ +=
+Deref : '@'; StackAlloc : '$';
+@Antlr Parse Rules@ +=
+callable : variable| Intrinsic | Conditional | Deref | StackAlloc | FFI;
+~~~~
+
+The remainder of the grammar arranges these components in a pretty straight-forward imperative style.
+
+~~~~
+@Antlr Tokens@ +=
+Assign : '=';
+@Antlr Parse Rules@ +=
+expression : variable | Number | funcall | FFI;
+assignable : variable | Deref assignable -> ^(Deref assignable) | FFI;
+ret : Return expression -> ^(Return expression);
+assign : assignable Assign expression -> ^(Assign assignable expression);
+~~~~
+
+Whitespace doesn't affect how the AST is built.
+
+~~~~
+@Antlr Parse Rules@ +=
+WS : (' ' | '\t' | '\r' | '\n') {$channel=HIDDEN;};
+~~~~
+
+As an example of the langauge, a function to calculate the n'th Fibonacci number (taken from the compiler's [integration tests](https://github.com/remis-thoughts/blog/tree/master/compile-to-asm/src/test/resources/test-code)) is below. Note that this implementation will always terminate as it treats its input argument as an unsigned integer.
+
+<pre>
+fn fibs(nth) {
+  last = 0x1;
+  this = 0x1;  
+  while >(nth, 0x0) {
+    nth = -(nth, 0x1);
+    next = +(this, last);
+    last = this;
+    this = next;
+  };  
+  return this;
+};
+</pre>
+
+## Code Structure ##
+
+The outline of the Java class the compiler lives in is below. The code is divided into two main sections; the first transforms each function in the antlr AST into an array of Assembly instructions, however these instructions still refer to the variable names in the source code. The second section uses [linear programming](http://en.wikipedia.org/wiki/Linear_programming) to assign the variables referenced in each instruction to a register. This assignment must preserve the values of every variable, and if there aren't any registers available to store a value in, that value should be preserved on the stack. 
 
 ~~~~
 @com/blogspot/remisthoughts/compiletoasm/Compiler.java:*@ +=
@@ -53,17 +144,16 @@ public final class Compiler {
   public static void compile(InputStream srcIn, OutputStream asmOut) throws Exception {
     @Build The AST@ 
     ProgramState program = new ProgramState();
-    @First Pass@
+    @First Section@
     @Write The Output@
   }
   @Static Classes@
   @Instruction Classes@
-  @Antlr Helpers@
   @Other Helpers@
 }
 ~~~~
 
-What we're compiling for
+We're compiling for an x86-64 architecture with 8-byte pointers; we'll use this constant frequently.
 
 ~~~~
 @Other Helpers@ +=
@@ -76,7 +166,7 @@ private static final long SIZE = 8;
 The first pass: turning an AST into pseudo-assembly, with variables, not registers. Each function should be written into its own _List_ of _Instructions_, and we'll have an extra _List_ for _Instructions_ to go at the end of the _text_ section. We'll flatten nested functions - creating randomly-generated _Labels_ for anonymous functions as needed.
 
 ~~~~
-@First Pass@ +=
+@First Section@ +=
 program.text.add(Arrays.asList(Compiler.align));
 for(Tree child : children(ast)) {
   parseDefinition(child, program);
@@ -897,7 +987,7 @@ Now we know whether or not we're using dynamic stack allocation, but we still do
 ## (II) Register Allocation via Linear Programming ##
 
 We'll do this function-by-function
-http://www.xypron.de/projects/linopt/apidocs/index.html (the paper)[http://grothoff.org/christian/lcpc2006.pdf]
+http://www.xypron.de/projects/linopt/apidocs/index.html [the paper](http://grothoff.org/christian/lcpc2006.pdf)
 Note: insert stack moves first so frame pointer variable is resolved later.
 
 ~~~~
@@ -2216,7 +2306,7 @@ options {
   output=AST;
   ASTLabelType=CommonTree;
 }
-@Synthetic Tokens@
+tokens { @Synthetic Tokens@ }
 @lexer::header { package com.blogspot.remisthoughts.compiletoasm; }
 @header { package com.blogspot.remisthoughts.compiletoasm; }
 @Build The AST@ +=
@@ -2260,7 +2350,7 @@ grammar Unsigned;
 ~~~~
 
 ~~~~
-@Antlr Helpers@ +=
+@Other Helpers@ +=
 static Tree get(Tree from, int... indices){
   for(int index : indices) from = from.getChild(index);
   return from;
