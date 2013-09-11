@@ -11,6 +11,7 @@ import java.util.List;
 
 import org.junit.Test;
 
+import com.blogspot.remisthoughts.compiletoasm.Compiler.BinaryOp;
 import com.blogspot.remisthoughts.compiletoasm.Compiler.Call;
 import com.blogspot.remisthoughts.compiletoasm.Compiler.ControlFlowGraph;
 import com.blogspot.remisthoughts.compiletoasm.Compiler.Definition;
@@ -40,7 +41,7 @@ public class NeedsAssigningTest {
 				move(Register.rsp, framePointer),
 				move(one, a),
 				move(a, b),
-				Op.addq.with(one, b),
+				new BinaryOp(Op.addq, one, b),
 				move(b, a),
 				move(a, Register.rdi),
 				new Call(new Label("_sqrt")),

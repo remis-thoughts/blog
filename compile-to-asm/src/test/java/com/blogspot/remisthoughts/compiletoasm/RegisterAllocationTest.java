@@ -23,6 +23,7 @@ import org.gnu.glpk.glp_prob;
 import org.junit.Test;
 
 import com.blogspot.remisthoughts.compiletoasm.Compiler.AtAddress;
+import com.blogspot.remisthoughts.compiletoasm.Compiler.BinaryOp;
 import com.blogspot.remisthoughts.compiletoasm.Compiler.Call;
 import com.blogspot.remisthoughts.compiletoasm.Compiler.ControlFlowGraph;
 import com.blogspot.remisthoughts.compiletoasm.Compiler.Definition;
@@ -65,7 +66,7 @@ public class RegisterAllocationTest {
 				new Definition(new Label("one_plus_one"), false),
 				move(one, a),
 				move(a, b),
-				Op.addq.with(one, b),
+				new BinaryOp(Op.addq, one, b),
 				move(b, a),
 				move(a, Register.rax),
 				ret);
@@ -114,7 +115,7 @@ public class RegisterAllocationTest {
 				move(Register.r15, save_r15),
 				move(Register.rdi, a),
 				move(three, var0),
-				Op.addq.with(two, var0),
+				new BinaryOp(Op.addq, two, var0),
 				move(var0, atA),
 				move(atA, ret),
 				move(a, Register.rdi),

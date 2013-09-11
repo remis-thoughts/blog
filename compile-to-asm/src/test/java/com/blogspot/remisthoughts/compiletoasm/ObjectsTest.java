@@ -10,6 +10,7 @@ import static org.junit.Assert.assertTrue;
 import org.junit.Test;
 
 import com.blogspot.remisthoughts.compiletoasm.Compiler.AtAddress;
+import com.blogspot.remisthoughts.compiletoasm.Compiler.BinaryOp;
 import com.blogspot.remisthoughts.compiletoasm.Compiler.Immediate;
 import com.blogspot.remisthoughts.compiletoasm.Compiler.Move;
 import com.blogspot.remisthoughts.compiletoasm.Compiler.Op;
@@ -48,15 +49,15 @@ public class ObjectsTest {
 
 	@Test
 	public void testMemoryAddresses_binop_var2mem() throws Exception {
-		assertTrue(Op.addq.with(b, a).readsFrom(Value.class).contains(a));
-		assertTrue(Op.addq.with(b, a).readsFrom(Value.class).contains(b));
-		assertTrue(Op.addq.with(b, a).writesTo(Value.class, WILL_ERASE).contains(a));
-		assertFalse(Op.addq.with(b, a).writesTo(Value.class, WILL_ERASE).contains(b));
+		assertTrue(new BinaryOp(Op.addq, b, a).readsFrom(Value.class).contains(a));
+		assertTrue(new BinaryOp(Op.addq, b, a).readsFrom(Value.class).contains(b));
+		assertTrue(new BinaryOp(Op.addq, b, a).writesTo(Value.class, WILL_ERASE).contains(a));
+		assertFalse(new BinaryOp(Op.addq, b, a).writesTo(Value.class, WILL_ERASE).contains(b));
 
-		assertTrue(Op.addq.with(b, atA).readsFrom(Value.class).contains(a));
-		assertTrue(Op.addq.with(b, atA).readsFrom(Value.class).contains(b));
-		assertFalse(Op.addq.with(b, atA).writesTo(Value.class, WILL_ERASE).contains(a));
-		assertFalse(Op.addq.with(b, atA).writesTo(Value.class, WILL_ERASE).contains(b));
+		assertTrue(new BinaryOp(Op.addq, b, atA).readsFrom(Value.class).contains(a));
+		assertTrue(new BinaryOp(Op.addq, b, atA).readsFrom(Value.class).contains(b));
+		assertFalse(new BinaryOp(Op.addq, b, atA).writesTo(Value.class, WILL_ERASE).contains(a));
+		assertFalse(new BinaryOp(Op.addq, b, atA).writesTo(Value.class, WILL_ERASE).contains(b));
 	}
 
 	@Test
@@ -74,15 +75,15 @@ public class ObjectsTest {
 
 	@Test
 	public void testMemoryAddresses_binop_mem2var() throws Exception {
-		assertTrue(Op.addq.with(a, b).readsFrom(Value.class).contains(a));
-		assertTrue(Op.addq.with(a, b).readsFrom(Value.class).contains(b));
-		assertFalse(Op.addq.with(a, b).writesTo(Value.class, WILL_ERASE).contains(a));
-		assertTrue(Op.addq.with(a, b).writesTo(Value.class, WILL_ERASE).contains(b));
+		assertTrue(new BinaryOp(Op.addq, a, b).readsFrom(Value.class).contains(a));
+		assertTrue(new BinaryOp(Op.addq, a, b).readsFrom(Value.class).contains(b));
+		assertFalse(new BinaryOp(Op.addq, a, b).writesTo(Value.class, WILL_ERASE).contains(a));
+		assertTrue(new BinaryOp(Op.addq, a, b).writesTo(Value.class, WILL_ERASE).contains(b));
 
-		assertTrue(Op.addq.with(atA, b).readsFrom(Value.class).contains(a));
-		assertTrue(Op.addq.with(atA, b).readsFrom(Value.class).contains(b));
-		assertFalse(Op.addq.with(atA, b).writesTo(Value.class, WILL_ERASE).contains(a));
-		assertTrue(Op.addq.with(atA, b).writesTo(Value.class, WILL_ERASE).contains(b));
+		assertTrue(new BinaryOp(Op.addq, atA, b).readsFrom(Value.class).contains(a));
+		assertTrue(new BinaryOp(Op.addq, atA, b).readsFrom(Value.class).contains(b));
+		assertFalse(new BinaryOp(Op.addq, atA, b).writesTo(Value.class, WILL_ERASE).contains(a));
+		assertTrue(new BinaryOp(Op.addq, atA, b).writesTo(Value.class, WILL_ERASE).contains(b));
 	}
 
 	@Test

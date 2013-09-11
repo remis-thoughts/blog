@@ -2,9 +2,9 @@
 
 ## Introduction ##
 
-This is a [Literate](http://en.wikipedia.org/wiki/Literate_programming) Java implementation of a compiler that uses the integer programming from [this paper](http://grothoff.org/christian/lcpc2006.pdf) to generate x86-64 Assembly code ([AT&T](http://en.wikibooks.org/wiki/X86_Assembly/GAS_Syntax) format) from a toy imperative language. As this article only focuses on code generation, I'll use [antlr](http://www.antlr.org) to generate the lexer & parser from the grammar. 
+This is a [Literate](http://en.wikipedia.org/wiki/Literate_programming) Java implementation of a compiler that uses the integer programming from [this paper](http://grothoff.org/christian/lcpc2006.pdf) to generate x86-64 Assembly code ([AT&T](http://en.wikibooks.org/wiki/X86_Assembly/GAS_Syntax) format) from a toy imperative language. As this article only focuses on code generation, I'll use [antlr](http://www.antlr.org) to generate the lexer & parser from the grammar and will make no attempt to optimise the code being compiled. 
 
-## The language ##
+### The language ###
 
 A programme consists of a series of statements or function definitions. The top-level statements are swept into the _main function (whether or not symbols need a [leading underscore](http://stackoverflow.com/a/1035937/42543) is OS-specific). The grammer uses antlr's [re-write](http://meri-stuff.blogspot.co.uk/2011/09/antlr-tutorial-expression-language.html#RewriteRules) [rules](http://www.antlr.org/wiki/display/~admin/2008/11/30/Example+tree+rewriting+with+patterns) to build the programme's [Abstract Syntax Tree](http://en.wikipedia.org/wiki/Abstract_syntax_tree) (AST).
 
@@ -132,7 +132,7 @@ fn fibs(nth) {
 };
 </pre>
 
-## Code Structure ##
+### Code Structure ###
 
 The outline of the Java class the compiler lives in is below. The code is divided into two main sections; the first transforms each function in the antlr AST into an array of Assembly instructions, however these instructions still refer to the variable names in the source code. The second section uses [linear programming](http://en.wikipedia.org/wiki/Linear_programming) to assign the variables referenced in each instruction to a register. This assignment must preserve the values of every variable, and if there aren't any registers available to store a value in, that value should be preserved on the stack. 
 
@@ -148,7 +148,6 @@ public final class Compiler {
     @Write The Output@
   }
   @Static Classes@
-  @Instruction Classes@
   @Other Helpers@
 }
 ~~~~
@@ -160,10 +159,11 @@ We're compiling for an x86-64 architecture with 8-byte pointers; we'll use this 
 private static final long SIZE = 8;
 ~~~~
 
-## (I) AST To Assembly Instructions ## 
+## (I) AST To Assembly Instructions ##
 
-[Useful lecture notes](http://www.classes.cs.uchicago.edu/archive/2011/spring/22620-1/docs/handout-03.pdf)
-The first pass: turning an AST into pseudo-assembly, with variables, not registers. Each function should be written into its own _List_ of _Instructions_, and we'll have an extra _List_ for _Instructions_ to go at the end of the _text_ section. We'll flatten nested functions - creating randomly-generated _Labels_ for anonymous functions as needed.
+The first pass: turning an AST into pseudo-assembly, with variables, not registers. 
+
+Each function should be written into its own <tt>List</tt> of <tt>Instruction<tt>s, and these will all end up in the [text](http://en.wikipedia.org/wiki/Code_segment) segment of the outputted Assembly code. The segment (and some other constants) [determine the permission](http://ftp.linux.org.uk/pub/linux/alpha/alpha/asm10.html#perm_tbl) of the memory that the code is loaded into at runtime. The <tt>align</tt> instruction will make the assembler [insert dummy instructions](http://stackoverflow.com/a/11277804/42543) so that the first instruction of the first function begins on a 8-byte boundary.
 
 ~~~~
 @First Section@ +=
@@ -171,18 +171,40 @@ program.text.add(Arrays.asList(Compiler.align));
 for(Tree child : children(ast)) {
   parseDefinition(child, program);
 }
+@Static Classes@ +=
+private static final Instruction align = new Instruction() {
+  public String toString() { return @Align x86 Code@; }
+};
 ~~~~
 
-Objects to represent the subset of assembly we'll generate. Note that these may correspond to more than one x86 assembly instruction (but only a contiguous series of instructions).
+### The Object Model ###
+
+<tt>align</tt> is an <tt>Instruction</tt>; one of many types that represent the subset of Assembly instructions the compiler will generate. The remaining <tt>Instruction</tt> subclasses are shown in the hierarchy below (via [asciiflow](http://www.asciiflow.com/#)):
+
+<pre>
+                                 +-----------+
+                                 |Instruction|
+                                 +-----+-----+
+                                       |
+     +---------+---------+---------+---+--+-----+------+------+------+------+
+     |         |         |         |      |     |      |      |      |      |
+     |         |         |         |      |     |      |      |      |      |
+ +---v----+ +--v-+ +-----v----+ +--v-+ +--v-+ +-v-+ +--v-+ +--v-+ +--v--+ +-v-+
+ |BinaryOp| |Call| |Definition| |Jump| |Move| |Pop| |Push| |Swap| |align| |ret|
+ +--------+ +----+ +----------+ +----+ +----+ +---+ +----+ +----+ +-----+ +---+
+</pre>
+
+We'll leave <tt>Instruction</tt>'s definition mostly empty for now - we'll introduce its members when we need them.
 
 ~~~~
-@Instruction Classes@ +=
+@Static Classes@ +=
 abstract static class Instruction { @Instruction Members@ }
-static final class Definition extends Instruction {
-  final Label label; final boolean isGlobal; 
-  Definition(Label label, boolean isGlobal) { this.label = label; this.isGlobal = isGlobal; }
-  public String toString() { @Definition x86 Code@ }
-}
+~~~~
+
+The "intrinsic" function calls mentioned above will map directly to instances of the <tt>BinaryOp</tt> class. While not all [x86 instructions](http://ref.x86asm.net/coder64.html) take two arguments, all the "intrinsics" this compiler supports take two, and they all modify the second operand. 
+
+~~~~
+@Static Classes@ +=
 enum Op { 
   addq("+") { @ADDQ@ }, 
   subq("-") { @SUBQ@ },
@@ -191,9 +213,6 @@ enum Op {
   cmpq("?") { @CMPQ@ },
   shlq("«") { @SHLQ@ },
   shrq("»") { @SHRQ@ };
-  Instruction with(Value arg1, StorableValue arg2) { 
-    return new BinaryOp(this, arg1, arg2); 
-  }
   @Op Members@
 };
 static final class BinaryOp extends Instruction {
@@ -204,13 +223,122 @@ static final class BinaryOp extends Instruction {
 }
 ~~~~
 
+There's also a class hierarchy to represent the different types of operand. In the final output, operands can be literals ("immediates"), registers or memory locations pointed to by a register (["register indirect addressing"](http://en.wikipedia.org/wiki/Addressing_mode#Register_indirect)). However, [at most](http://cs.smith.edu/~thiebaut/ArtOfAssembly/CH04/CH04-3.html#HEADING3-113) one operand in a BinaryOp can be indirect (i.e. a value in memory). We also want to generate [position-independent](http://en.wikipedia.org/wiki/Position-independent_code) Assembly code, so we don't want to generate absolute memory addresses.
+
+We'll enforce the distinction between literals and registers using Java's type system. All operands are <tt>Value</tt>s, but operands that can be modified are subtypes of <tt>StorableValue</tt>:
+
+~~~~
+@Static Classes@ +=
+interface Value {}
+interface StorableValue extends Value {}
+@Value Classes@
+static final class Immediate implements Value {
+  final long value;
+  Immediate(long value) { this.value = value; }
+  public boolean equals(Object o) { return o instanceof Immediate && ((Immediate)o).value == value;}
+  public String toString() { @Immediate x86 Code@ }
+  @Immediate Members@
+}
+~~~~
+
+The remaining <tt>Value</tt> types look like this:
+
+<pre>
+                                +-----+
+                                |Value|
+                                +--+--+
+                                   |
+                           +-------+-------+
+                           |               |
+                     +-----v-------+  +----v----+
+                     |StorableValue|  |Immediate|
+                     +-----+-------+  +---------+
+                           |
+                  +--------+-+--------+----------+
+                  |          |        |          |
+              +---v-----+ +--v--+ +---v----+ +---v----+
+              |AtAddress| |Label| |Register| |Variable|
+              +---------+ +-----+ +--------+ +--------+
+</pre>
+
+<tt>Variable</tt> is the only class here that won't appear in the final output; the second section of this article explains how we replace all the <tt>Variable</tt> instances with <tt>Register</tt> or <tt>AtAddress</tt> instances. It'd be useful if we could generate anonymous yet unique <tt>Variable</tt>s; the zero-arg constructor uses a atomic global counter to achieve this. 
+
+~~~~
+@Static Classes@ +=
+static final class Variable implements StorableValue, Comparable<Variable> {
+  final String name;
+  Variable(String name) { this.name = name; }
+  Variable() { this("VAR" + uniqueness.getAndIncrement()); };
+  public String toString() { return name; }
+  @Variable Members@
+}
+static final AtomicInteger uniqueness = new AtomicInteger();
+~~~~
+
+<tt>AtAddress</tt> [decorates](http://en.wikipedia.org/wiki/Decorator_pattern) a register (or <tt>Variable</tt>), using it to specify what memory address to look up. [Base plus offset](http://en.wikipedia.org/wiki/Addressing_mode#Base_plus_offset.2C_and_variations) addressing is a generalisation of register indirect addressing; the description includes an literal value to add to the memory address in the register before dereferencing it. For example, <tt>mov 0x4(%rax), %rbx</tt> where register <tt>rax</tt> contains 0x7fff5fbff9b8 means take the memory address in register <tt>rax</tt> (0x7fff5fbff9b8), add four to it (0x7fff5fbff9bc), then read 8 bytes from memory starting at that address. These 8 bytes will be in [little endian](http://en.wikipedia.org/wiki/Endianness) format on an x86-64 processor, so reverse the sequence of bytes then combine them to get a 64-bit integer, and store that integer in register <tt>rbx</tt>.
+
+~~~~
+@Static Classes@ +=
+static class AtAddress implements StorableValue, Resolvable {
+  final StorableValue at; final Supplier<Long> offset;
+  AtAddress(StorableValue at, Supplier<Long> offset) {
+    this.at = at; this.offset = offset;
+  }
+  AtAddress(StorableValue at, long offset) {
+    this(at, Suppliers.ofInstance(offset));
+  }
+  public String toString() { @At Address x86 Code@ }
+  public boolean equals(Object o) {
+    if(!(o instanceof AtAddress)) return false;
+    AtAddress other = (AtAddress) o;
+    return at.equals(other.at) && offset.equals(other.offset);
+  }
+  public int hashCode() { return at.hashCode(); }
+  @At Address Members@
+}
+~~~~
+
+<tt>Label</tt>s are named locations in memory. Some of the labels in the Assembly code the compiler generates include the start of each function (so the label will point at the text segment of the memory) and the location of any global variables defined in the source code (see later). These labels will be included as symbols in the global offset table (GOT) - where they may or may not be marked as exported - so when other programmes call functions (or access variables) in the binary the linker knows where to jump to (or read from or write to) in the binary's code - more details [here](http://eli.thegreenplace.net/2011/11/03/position-independent-code-pic-in-shared-libraries).
+
+Like the <tt>Variable</tt> type, <tt>Label</tt> includes a no-arg constructor to generate unique labels.
+
+~~~~
+@Static Classes@ +=
+static final class Label implements StorableValue, Comparable<Label> {
+  final String name;
+  Label(String name) { this.name = name; }
+  Label() { this("L" + uniqueness.getAndIncrement()); }
+  public int compareTo(Label other) {
+    return name.compareTo(other.name);
+  }
+  public boolean equals(Object o) { 
+    return o instanceof Label && ((Label)o).name.equals(name);
+  }
+  public int hashCode() { return name.hashCode(); }
+  public String toString() { @Label x86 Code@ }
+}
+~~~~
+
+We'll add an <tt>Instruction</tt> that defines a label; the <tt>isGlobal</tt> flag is true if this symbol should be marked as exported in the GOT. As labels have to be unique (i.e. only appear once in a file) the equality test doesn't check the <tt>isGlobal</tt> flag.
+
+~~~~
+@Static Classes@ +=
+static final class Definition extends Instruction {
+  final Label label; final boolean isGlobal; 
+  Definition(Label label, boolean isGlobal) { 
+    this.label = label; this.isGlobal = isGlobal; 
+  }
+  public boolean equals(Object o) { 
+    return o instanceof Definition && ((Definition)o).label.equals(label);
+  }
+  public int hashCode() { return label.hashCode(); }
+  public String toString() { @Definition x86 Code@ }
+}
+~~~~
+
 Maybe a note on (code) alignment?
 
 ~~~~
-@Instruction Classes@ +=
-private static final Instruction align = new Instruction() {
-  public String toString() { return @Align x86 Code@; }
-};
 @Other Helpers@ +=
 private static final long ALIGN_STACK_TO = 16;
 @Immediate Members@ += 
@@ -220,22 +348,6 @@ Immediate alignAllocation() {
     return this;
   else
     return new Immediate(value + ALIGN_STACK_TO - overhangBytes);
-}
-~~~~
-
-The data section. Labels are references to symbols defined either in this file or in one of the files linked to.
-
-~~~~
-@Static Classes@ +=
-static final class Label implements StorableValue, Comparable<Label> {
-  final String name;
-  Label(String name) { this.name = name; }
-  Label() { this("L" + uniqueness.getAndIncrement()); } // for anonymous fns
-  public int compareTo(Label other) {
-    return name.compareTo(other.name);
-  }
-  public String toString() { @Label x86 Code@ }
-  @Label Members@
 }
 ~~~~
 
@@ -263,7 +375,7 @@ enum Condition {
 Moves can be conditional: [and apparently faster](https://mail.mozilla.org/pipermail/tamarin-devel/2008-April/000454.html)
 
 ~~~~
-@Instruction Classes@ +=
+@Static Classes@ +=
 static final class Move extends Instruction {
   final Value from; final StorableValue to; final Condition cond;
   Move(Value from, StorableValue to, Condition cond) { 
@@ -279,27 +391,6 @@ static Instruction move(Value from, StorableValue to) {
 
 Generate x86 GAS code - you could probably use a factory to create the _Instruction_ objects if you wanted to support more than one architecture. See [this](http://stackoverflow.com/a/2752639/42543) for why _.type_ isn't supported on mac. See [lib-c free](https://blogs.oracle.com/ksplice/entry/hello_from_a_libc_free). https://developer.apple.com/library/mac/#documentation/DeveloperTools/Reference/Assembler/000-Introduction/introduction.html . [Instruction set (pdf)](http://download.intel.com/design/intarch/manuals/24319101.pdf). 
 
-~~~~
-@Static Classes@ +=
-interface Value {}
-interface StorableValue extends Value {}
-@Value Classes@
-static final class Immediate implements Value {
-  final long value;
-  Immediate(long value) { this.value = value; }
-  public boolean equals(Object o) { return o instanceof Immediate && ((Immediate)o).value == value;}
-  public String toString() { @Immediate x86 Code@ }
-  @Immediate Members@
-}
-static final class Variable implements StorableValue, Comparable<Variable> {
-  final String name;
-  Variable(String name) { this.name = name; }
-  Variable() { this("VAR" + uniqueness.getAndIncrement()); };
-  public String toString() { return name; }
-  @Variable Members@
-}
-static final AtomicInteger uniqueness = new AtomicInteger();
-~~~~
 
 The types of values
 
@@ -326,12 +417,14 @@ enum Register implements StorableValue {
 }
 ~~~~
 
+[Useful lecture notes](http://www.classes.cs.uchicago.edu/archive/2011/spring/22620-1/docs/handout-03.pdf)
 Calling functions [CDECL](http://en.wikipedia.org/wiki/X86_calling_conventions#cdecl).
+We'll flatten nested functions - creating randomly-generated _Labels_ for anonymous functions as needed.
 
 If we have a stack pointer it means we don't know the size of the stack, so we'll use _pushq_ instructions to put arguments on the stack, and we'll pop the arguments off the stack after the function call using an _addq_. However, if we know the stack size exactly we can reserve space on the stack for the parameters at the start of the function, and it'll be reset for free when we leave the function. If there's more than one function we'll reserve space for the function call with the greatest number of stack arguments, so we'll only ever do a single stack allocation and release in the function. However, we don't know if we have a frame pointer until we've processed the whole function, so we'll insert placeholders as we parse calls, and we'll resolve them later.   
 
 ~~~~
-@Instruction Classes@ +=
+@Static Classes@ +=
 static final class Call extends Instruction {
   final Value name;
   Call(Value name) { this.name = name; }
@@ -376,7 +469,10 @@ private void call(Tree t) {
 ~~~~
 @Remove Args From Stack@ +=
 if(framePointer != null)
-  code.add(Op.addq.with(new Immediate(storedArgs * SIZE).alignAllocation(), rsp));
+  code.add(new BinaryOp(
+    Op.addq,
+    new Immediate(storedArgs * SIZE).alignAllocation(), 
+    rsp));
 ~~~~
 
 Note that we'll assume the function being called is a local variable if it has the same name as a local variable in this function - otherwise it'll be a label which the linker will resolve for us.
@@ -456,7 +552,7 @@ Value arg1 = getAsValue(get(t, 1, 0));
 Value arg2 = getAsValue(get(t, 1, 1));
 Variable ret = new Variable();
 code.add(move(arg1, ret));
-code.add(Op.parse(text(t, 0)).with(arg2, ret));
+code.add(new BinaryOp(Op.parse(text(t, 0)), arg2, ret));
 return ret;
 ~~~~
 
@@ -474,7 +570,7 @@ private static Condition parse(String c) {
 Condition cond = Condition.parse(text(t, 0));
 Value arg1 = getAsValue(get(t, 1, 1));
 StorableValue arg2 = to(getAsValue(get(t, 1, 0)), StorableValue.class);
-code.add(Op.cmpq.with(arg1, arg2));
+code.add(new BinaryOp(Op.cmpq, arg1, arg2));
 Variable ret = new Variable();
 code.add(move(new Immediate(1), ret));
 Variable zero = new Variable();
@@ -641,7 +737,7 @@ private static final String CALLEE_SAVE_VAR = "save!";
 _ret_ is the return function - and as it takes no arguments we'll just have one global object to represent it.
 
 ~~~~
-@Instruction Classes@ +=
+@Static Classes@ +=
 static final Instruction ret = new Instruction() {
   @Ret Members@
   public String toString() { return @Ret x86 Code@; }
@@ -663,7 +759,7 @@ Label endIf = parseIf(
   get(statement, 1), // then
   numChildren(statement) == 3 ? get(statement, 2) : null); // else 
 if(endIf != null)
-  code.add(new DefineLabel(endIf));
+  code.add(new Definition(endIf, false));
 @Parsing State Members@ +=
 private Label parseIf(Tree test, Tree ifTrue, Tree ifFalse) {
   StorableValue trueOrFalse = to(getAsValue(get(test, 0)), StorableValue.class);
@@ -690,7 +786,7 @@ if(getLast(code) instanceof Move && ((Move)getLast(code)).cond != null) {
   code.subList(code.size() - 3, code.size()).clear();
 } else {
   jumpCond = Condition.e;
-  code.add(Op.cmpq.with(new Immediate(0), trueOrFalse));
+  code.add(new BinaryOp(Op.cmpq, new Immediate(0), trueOrFalse));
 }
 ~~~~
 
@@ -711,20 +807,14 @@ if(getLast(code).isNextInstructionReachable())
   code.add(new Jump(end, null));
 else
   end = null;
-code.add(new DefineLabel(ifFalseLabel));
+code.add(new Definition(ifFalseLabel, false));
 parseStatements(children(ifFalse));
 ~~~~
 
 Jumping about
 
 ~~~~
-@Instruction Classes@ +=
-private static class DefineLabel extends Instruction {
-  final Label label;
-  DefineLabel(Label label) { this.label = label; }
-  public String toString() { @Define Label x86 Code@ }
-  public boolean equals(Object o) { return o instanceof DefineLabel && ((DefineLabel)o).label.equals(label); }
-}
+@Static Classes@ +=
 private static class Jump extends Instruction {
   final Label to; final Condition cond;
   Jump(Label to, Condition cond) { 
@@ -741,14 +831,14 @@ We don't allow dead code, so assume if it is a constant it's a while-true loop.
 
 ~~~~
 @Parse A While Statement@ +=
-Label l = new Label(); code.add(new DefineLabel(l));
+Label l = new Label(); code.add(new Definition(l, false));
 if(get(statement, 0, 0).getType() == Number) {
   parseStatements(children(get(statement, 1)));
   code.add(new Jump(l, null)); 
 } else {
   Label endWhile = parseIf(get(statement, 0), get(statement, 1), null);
   code.add(new Jump(l, null)); 
-  code.add(new DefineLabel(endWhile));
+  code.add(new Definition(endWhile, false));
 } 
 ~~~~
 
@@ -776,7 +866,7 @@ if(state.isMainFn()) {
     alignStack()));
   addBeforeRets(state, new Pop(rsp));
 }
-@Instruction Classes@ +=
+@Static Classes@ +=
 private static final class Push extends Instruction {
   final Value value;
   Push(Value value) { this.value = value; }
@@ -789,7 +879,7 @@ private static final class Pop extends Instruction {
   public String toString() { @Pop x86 Code@ }
 }
 static Instruction alignStack() {
-  return Op.andq.with(new Immediate(0xFFFFFFFFFFFFFFF0L), rsp);
+  return new BinaryOp(Op.andq, new Immediate(0xFFFFFFFFFFFFFFF0L), rsp);
 }
 ~~~~
 
@@ -798,34 +888,19 @@ static Instruction alignStack() {
 ~~~~
 @Before We Push Function Params Onto Stack@ += 
 if(numParams > maxInRegs && (numParams - maxInRegs) % 2 != 0)
-  state.code.add(Op.subq.with(new Immediate(SIZE), rsp));
+  state.code.add(new BinaryOp(Op.subq, new Immediate(SIZE), rsp));
 @Remove Function Call Params From Stack@ +=
 int correction = 0;
 if((numParams - maxInRegs) % 2 != 0) correction = 1;
-state.code.add(Op.addq.with(new Immediate((numParams - maxInRegs + correction) * SIZE), rsp));
+state.code.add(new BinaryOp(
+  Op.addq,
+  new Immediate((numParams - maxInRegs + correction) * SIZE),
+  rsp));
 ~~~~
 
 Memory stuff. Need _MemoryAddress_ interface as we can't have x86 instructions like _movq (%rax), (%rdi)_
 
 ~~~~
-@Static Classes@ +=
-static class AtAddress implements StorableValue, Resolvable {
-  final StorableValue at; final Supplier<Long> offset;
-  AtAddress(StorableValue at, Supplier<Long> offset) {
-    this.at = at; this.offset = offset;
-  }
-  AtAddress(StorableValue at, long offset) {
-    this(at, Suppliers.ofInstance(offset));
-  }
-  public String toString() { @At Address x86 Code@ }
-  public boolean equals(Object o) {
-    if(!(o instanceof AtAddress)) return false;
-    AtAddress other = (AtAddress) o;
-    return at.equals(other.at) && offset.equals(other.offset);
-  }
-  public int hashCode() { return at.hashCode(); }
-  @At Address Members@
-}
 @Parse A Dereference@ +=
 Value val = to(getAsValue(get(t, 1, 0)), Value.class);
 if(val instanceof StorableValue && !(val instanceof AtAddress))
@@ -904,10 +979,10 @@ long stackVarOffset(StackVar s) {
 }
 Instruction stackVarOffset(StackVar s, Variable v) {
   long offset = stackVarOffset(s);
-  if(offset < 0)
-    return Op.subq.with(new Immediate(-offset), v); 
-  else   
-    return Op.addq.with(new Immediate(offset), v);
+  return new BinaryOp(
+    offset < 0 ? Op.subq : Op.addq,
+    new Immediate(Math.abs(offset)), 
+    v); 
 }
 ~~~~
 
@@ -923,7 +998,7 @@ if(size instanceof Immediate) {
   code.add(stackVarOffset(v, ret));
   return ret;
 } else {
-  code.add(Op.subq.with(size, Register.rsp));
+  code.add(new BinaryOp(Op.subq, size, Register.rsp));
   code.add(alignStack()); // round allocation up to nearest 16 bytes
   code.add(move(Register.rsp, ret)); // point at lowest allocated byte
   return ret;
@@ -1071,7 +1146,7 @@ for(int i = 0; i < code.size(); ++i ) {
     nextNode[i] = prevNode[i+1];
   }
   if(instr.couldJumpTo() != null) {
-    int nextInstr = code.indexOf(new DefineLabel(instr.couldJumpTo()));
+    int nextInstr = code.indexOf(new Definition(instr.couldJumpTo(), false));
     if(prevNode[nextInstr] != UNASSIGNED) nextNode[i] = prevNode[nextInstr]; // e.g. a loop
     else if(nextNode[i] != UNASSIGNED) prevNode[nextInstr] = nextNode[i];
     else nextNode[i] = prevNode[nextInstr] = highestNode++; 
@@ -1139,7 +1214,7 @@ We make each jump to a unique target, so if we remove a jump, remove a target!
 @Found Dead Instruction@ +=
 Instruction inst = code.get(i); 
 if (inst instanceof Jump)
-  dead.set(code.indexOf(new DefineLabel(((Jump) inst).to)));
+  dead.set(code.indexOf(new Definition(((Jump) inst).to, false)));
 ~~~~
 
 ~~~~
@@ -1872,7 +1947,7 @@ Now we know where to put variables, we can update the instructions. We'll make t
 Instruction rewrite(Map<Value, Value> resolutions) { return this; }
 @BinaryOp Members@ +=
 Instruction rewrite(Map<Value, Value> resolutions) { 
-  return op.with(resolve(arg1, resolutions), resolve(arg2, resolutions)); 
+  return new BinaryOp(op, resolve(arg1, resolutions), resolve(arg2, resolutions)); 
 }
 @Push Members@ += 
 Instruction rewrite(Map<Value, Value> resolutions) {
@@ -2061,7 +2136,7 @@ if(!Sets.intersection(a.readsFrom(Register.class), b.writesTo(Register.class, CA
 We can break deadlocks using the XCHG instruction to swap two registers or a memory location and a register. The latter is very expensive, so try and switch registers wherever possible! To clarify, writesTo means destructively write to, so a swap returns none(..) here as it doesn't destroy either input.
 
 ~~~~
-@Instruction Classes@ +=
+@Static Classes@ +=
 static final class Swap extends Instruction {
   final StorableValue arg1; final StorableValue arg2; 
   Swap(StorableValue arg1, StorableValue arg2) { this.arg1 = arg1; this.arg2 = arg2; }
@@ -2172,9 +2247,9 @@ Immediate staticBytes = state.staticStackBytes();
 if(staticBytes.value != 0) {
   state.code.add(
     state.framePointer == null ? 1 : 2, 
-    Op.subq.with(staticBytes, Register.rsp));
+    new BinaryOp(Op.subq, staticBytes, rsp));
   if(state.framePointer == null)
-    addBeforeRets(state, Op.addq.with(staticBytes, Register.rsp));
+    addBeforeRets(state, new BinaryOp(Op.addq, staticBytes, rsp));
 }
 ~~~~
 
@@ -2202,7 +2277,6 @@ else
 @Align x86 Code@ += ".align " + SIZE
 @Text x86 Code@ += ".text"
 @Ret x86 Code@ += "ret"
-@Define Label x86 Code@ += return String.format("%s:", label.name);
 @Immediate x86 Code@ += return String.format("$0x%s", Long.toHexString(value));
 @Jump x86 Code@ += return String.format("j%s %s", cond == null ? "mp" : cond, to.name);
 @Move x86 Code@ += 
@@ -2387,6 +2461,8 @@ private static boolean copyFrom(BitSet set, int indexFrom, int indexTo, int num)
   return ret;
 }
 ~~~~
+
+http://www.cs.virginia.edu/~evans/cs216/guides/x86.html
 
 tools (universal gcc needed or you'll get linker errors like :
 ld: warning: ignoring file /opt/local/lib/gcc47/libgcc_ext.10.5.dylib, missing required architecture i386 in file

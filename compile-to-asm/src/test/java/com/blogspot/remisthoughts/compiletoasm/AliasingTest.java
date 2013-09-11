@@ -10,6 +10,7 @@ import java.util.List;
 import org.junit.Test;
 
 import com.blogspot.remisthoughts.compiletoasm.Compiler.AtAddress;
+import com.blogspot.remisthoughts.compiletoasm.Compiler.BinaryOp;
 import com.blogspot.remisthoughts.compiletoasm.Compiler.ControlFlowGraph;
 import com.blogspot.remisthoughts.compiletoasm.Compiler.Definition;
 import com.blogspot.remisthoughts.compiletoasm.Compiler.Immediate;
@@ -39,7 +40,7 @@ public class AliasingTest {
 				new Definition(new Label("one_plus_one"), false),
 				move(one, a),
 				move(a, b),
-				Op.addq.with(one, b),
+				new BinaryOp(Op.addq, one, b),
 				move(b, a),
 				move(a, Register.rax),
 				ret);

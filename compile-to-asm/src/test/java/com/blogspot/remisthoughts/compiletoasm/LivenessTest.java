@@ -8,6 +8,7 @@ import java.util.List;
 
 import org.junit.Test;
 
+import com.blogspot.remisthoughts.compiletoasm.Compiler.BinaryOp;
 import com.blogspot.remisthoughts.compiletoasm.Compiler.Condition;
 import com.blogspot.remisthoughts.compiletoasm.Compiler.ControlFlowGraph;
 import com.blogspot.remisthoughts.compiletoasm.Compiler.Immediate;
@@ -25,7 +26,7 @@ public class LivenessTest {
 		List<Instruction> code = Lists.newArrayList(
 				move(Register.rax, vars[0]),
 				move(Register.rbx, vars[1]),
-				Op.addq.with(vars[0], vars[1]),
+				new BinaryOp(Op.addq, vars[0], vars[1]),
 				move(vars[1], Register.rax),
 				Compiler.ret);
 
@@ -57,7 +58,7 @@ public class LivenessTest {
 		List<Instruction> code = Lists.newArrayList(
 				move(new Immediate(2), vars[0]), // mov 2, a
 				move(vars[0], vars[1]), // mov a, b
-				Op.addq.with(new Immediate(3), vars[1]), // add 3, b
+				new BinaryOp(Op.addq, new Immediate(3), vars[1]), // add 3, b
 				move(vars[1], vars[0]), // mov b, a
 				move(vars[0], Register.rax), // mov a, %rax
 				Compiler.ret);
@@ -91,7 +92,7 @@ public class LivenessTest {
 		Variable[] vars = { new Variable("x"), new Variable("zero"), new Variable("ret") };
 		List<Instruction> code = Lists.newArrayList(
 				move(new Immediate(2), vars[0]), // mov 2, x
-				Op.cmpq.with(new Immediate(3), vars[0]), // cmp 3, x
+				new BinaryOp(Op.cmpq, new Immediate(3), vars[0]), // cmp 3, x
 				move(new Immediate(1), vars[2]), // mov 1, ret
 				move(new Immediate(0), vars[1]), // mov 0, zero
 				new Move(vars[1], vars[2], Condition.b), // cmovb zero, ret
