@@ -2,7 +2,7 @@
 
 ## Introduction ##
 
-This is a [Literate](http://en.wikipedia.org/wiki/Literate_programming) Java implementation of a compiler that uses the integer programming from [this paper](http://grothoff.org/christian/lcpc2006.pdf) to generate x86-64 Assembly code ([AT&T](http://en.wikibooks.org/wiki/X86_Assembly/GAS_Syntax) format) from a toy imperative language. As this article only focuses on code generation, I'll use [antlr](http://www.antlr.org) to generate the lexer & parser from the grammar and will make no attempt to optimise the code being compiled. 
+This is a [Literate](http://en.wikipedia.org/wiki/Literate_programming) Java implementation of a compiler that uses the integer programming from [this paper](http://grothoff.org/christian/lcpc2006.pdf) to generate x86-64 Assembly code ([AT&T](http://en.wikibooks.org/wiki/X86_Assembly/GAS_Syntax) format) from a toy imperative language. As this article only focuses on code generation, I'll use [antlr](http://www.antlr.org) to generate the lexer & parser from the grammar and will make no attempt to optimise the code being compiled or produce helpful error messages! 
 
 ### The language ###
 
@@ -223,9 +223,22 @@ static final class BinaryOp extends Instruction {
 }
 ~~~~
 
+ The UTF-8 string passed to the constructor of each enum constant corresponds to the list of UTF-8 strings that are valid <tt>Intrinsic</tt> tokens in the antlr grammar. A helper method in the <tt>Op</tt> enum does a lookup against this mapping in O(number of intrinsics) time. If the compiler is modified to support more instrinsic operations we should probably change this to a O(1) hash-based lookup. 
+
+~~~~
+@Op Members@ +=
+final String c;
+Op(String c) { this.c = c; }
+private static Op parse(String c) { 
+  for(Op op : values()) if(op.c.equals(c)) return op;
+  throw new IllegalArgumentException();  
+}
+~~~~
+
+
 There's also a class hierarchy to represent the different types of operand. In the final output, operands can be literals ("immediates"), registers or memory locations pointed to by a register (["register indirect addressing"](http://en.wikipedia.org/wiki/Addressing_mode#Register_indirect)). However, [at most](http://cs.smith.edu/~thiebaut/ArtOfAssembly/CH04/CH04-3.html#HEADING3-113) one operand in a BinaryOp can be indirect (i.e. a value in memory). We also want to generate [position-independent](http://en.wikipedia.org/wiki/Position-independent_code) Assembly code, so we don't want to generate absolute memory addresses.
 
-We'll enforce the distinction between literals and registers using Java's type system. All operands are <tt>Value</tt>s, but operands that can be modified are subtypes of <tt>StorableValue</tt>:
+We'll enforce the distinction between literals and registers using Java's type system. All operands are <tt>Value</tt>s, but operands that can be modified are subtypes of <tt>StorableValue</tt>. The class below is called <tt>Immediate</tt> as that's what a literal in an assembly instruction is called. 
 
 ~~~~
 @Static Classes@ +=
@@ -269,8 +282,10 @@ static final class Variable implements StorableValue, Comparable<Variable> {
   final String name;
   Variable(String name) { this.name = name; }
   Variable() { this("VAR" + uniqueness.getAndIncrement()); };
+  public boolean equals(Object o) { return o instanceof Variable && ((Variable)o).name.equals(name); }
+  public int hashCode() { return name.hashCode(); }
+  public int compareTo(Variable o) { return name.compareTo(o.name); }
   public String toString() { return name; }
-  @Variable Members@
 }
 static final AtomicInteger uniqueness = new AtomicInteger();
 ~~~~
@@ -336,43 +351,23 @@ static final class Definition extends Instruction {
 }
 ~~~~
 
-Maybe a note on (code) alignment?
-
-~~~~
-@Other Helpers@ +=
-private static final long ALIGN_STACK_TO = 16;
-@Immediate Members@ += 
-Immediate alignAllocation() {
-  long overhangBytes = value % ALIGN_STACK_TO;
-  if(overhangBytes == 0)
-    return this;
-  else
-    return new Immediate(value + ALIGN_STACK_TO - overhangBytes);
-}
-~~~~
-
-Some instructions are conditional. Overload this to represent condition intrinsics.
+Some instructions are conditional - they only get executed if certain [flags](http://en.wikipedia.org/wiki/FLAGS_register) in the CPU's flag register are set. These flag bits are set as side-effects when other instructions are executed. For example, if <tt>add %rax, %rbx</tt> [overflows](http://en.wikipedia.org/wiki/Arithmetic_overflow) (i.e. <tt>rax + rbx > 2^64</tt>) then the _overflow_ bit (the 11th bit) in the flags register is set. If the next instruction was <tt>jo %rcx</tt>, then as the overflow flag is set the instruction will be executed and control flow jumps to the instruction at the memory address in <tt>rcx</tt>. We'll only use a few of the conditions supported by the x86 instruction set:
 
 ~~~~
 @Other Helpers@ +=
 enum Condition {
   b("<"), a(">"), e("≡"), ne("≠"), be("≤"), ae("≥");
-  Condition inverse() {
-    switch(this) {
-      case b:  return ae;
-      case a:  return be;
-      case e:  return ne;
-      case ne: return e;
-      case be: return a;
-      case ae: return b;
-    }
-    throw new IllegalStateException();
+  String c; 
+  Condition(String c) { this.c = c; }
+  private static Condition parse(String c) { 
+    for(Condition cond : values()) if(Objects.equal(cond.c, c)) return cond;
+    throw new IllegalArgumentException();  
   }
   @Condition Members@
 }
 ~~~~
 
-Moves can be conditional: [and apparently faster](https://mail.mozilla.org/pipermail/tamarin-devel/2008-April/000454.html)
+The last instruction we'll introduce for now is <tt>Move</tt>. It has a <tt>cond</tt> field to (optionally) store a condition. This instruction actually has "copy" semantics; the second operand is set to the value of the first, and the first operand is left unchanged. We'll add a helper method for generating unconditional moves here too:
 
 ~~~~
 @Static Classes@ +=
@@ -388,6 +383,328 @@ static Instruction move(Value from, StorableValue to) {
   return new Move(from, to, null);
 }
 ~~~~
+
+When we compile conditional (if-) statements later we could use conditional jump or conditional move instructions. The relative performance of these two choices [differ](https://mail.mozilla.org/pipermail/tamarin-devel/2008-April/000454.html) by processor implementation, so we'll arbitarily decide that our compiler will generate conditional moves.
+
+### State Objects ###
+
+We'll map each function independentally (remember we swept all statements in the source code that weren't in a function into the <tt>_main</tt> function in the antlr grammar).
+
+We'll need to have the global state (which we'll keep in a single instance of <tt>ProgramState</tt>) handy, in case a function defines any global variables or otherwise needs to access the global state. We'll also need an object to hold the per-function state (an instance of <tt>ParsingState</tt>), such as the parameters and any variables it declares. The per-function state should keep a reference to the <tt>ProgramState</tt> so that we can easily construct new <tt>ParsingState</tt>s as we come across nested function definitions.
+
+~~~~
+@Other Helpers@ +=
+static final class ProgramState {
+  final List<List<Instruction>> text = Lists.newArrayList();
+  final Map<Label, Immediate> globals = Maps.newTreeMap();
+}
+static final class ParsingState {
+  List<Instruction> code = Lists.newArrayList();
+  Map<Variable, StorableValue> params = Maps.newTreeMap(); 
+  ProgramState program;
+  Set<Variable> declaredVars = Sets.newTreeSet();
+  Label myName;
+  ParsingState(Tree def, ProgramState program) {
+    (this.program = program).text.add(code);
+    @Get Function Name@
+    @Set Up Stack Allocation@
+    @Set Up Alignment@
+    @Decide If We Should Use The Red Zone@
+    @Identify Callee Saves Registers@
+    @Parse Function Parameters@
+    @Keep Track Of Declared Variables@
+  }
+  @Parsing State Members@
+}
+~~~~
+
+### Recursing Down Into The AST ###
+
+A typical function definition AST looks like this:
+
+<pre>
+                               +-----+  +-----+    +-----+
+                               |Local|  |Local|    |Local|
+                               | "c" |  | "b" |    | "c" |
+                               +-----+  +-----+    +-----+
+                                  ^        ^          ^
+                                  +---+----+          |
++-------------+ +-----+ +-----+   +---+--+        +---+--+
+|    Global   | |Local| |Local|   |Assign|        |Return|
+|"hello_world"| | "a" | | "b" |   +------+        +------+
++-------------+ +-----+ +-----+      ^                ^
+       ^           ^       ^         +--------+-------+
+       |           +---+---+                  |
+     +-+--+      +-----+----+              +--+-+
+     |Name|      |Parameters|              |Body|
+     +----+      +----------+              +----+
+       ^               ^                      ^
+       +---------------+----------------------+
+                 +-----+----+
+                 |Definition|
+                 +----------+  
+</pre>
+
+We're going to be doing a lot of tree navigation, so here's some helper methods to access a tree node's type (e.g. Body or Return), a tree node's text (e.g. "hello_world" in the example above), to access nodes along a given path and to get all the direct children of a tree node along a given path:
+
+~~~~
+@Other Helpers@ +=
+static Tree get(Tree from, int... indices){
+  for(int index : indices) from = from.getChild(index);
+  return from;
+}
+private static String text(Tree from, int... indices){ return get(from, indices).getText(); }
+private static int type(Tree from, int... indices){ return get(from, indices).getType(); }
+private static int numChildren(Tree from, int... indices){ return get(from, indices).getChildCount(); }
+private static boolean hasChildren(Tree from, int... indices){ return numChildren(from, indices) > 0; }
+private static Iterable<Tree> children(Tree from, int... indices){ 
+  Iterable<Tree> ret = (Iterable<Tree>)((BaseTree)get(from, indices)).getChildren();
+  return ret == null ? Collections.<Tree>emptyList() : ret; 
+}
+~~~~
+
+For example, <tt>children(&lt;the definition node&gt;, 2)</tt> would return a list containing the "Assign" and "Return" nodes, and <tt>get(&lt;the body node&gt;, 0, 1)</tt> would return the Local "b" node.
+
+It turns out that we can parse each statement of a function independently. However, as a return statement is optional in the language we'll add a <tt>ret</tt> instruction to the generated Assembly code if there's not one. As we'll see later, this will return whatever's in the <tt>rax</tt> register as the return value of the function. We'll return the function's symbol as a <tt>Label</tt> in case the calling code needs to assign it to a variable, but doesn't know what the function's name will be (e.g. if this function is anonymous).
+
+~~~~
+@Other Helpers@ +=
+static Label parseDefinition(Tree def, ProgramState program) {
+  ParsingState state = new ParsingState(def, program);  
+  state.parseStatements(children(def, 2));
+  if(getLast(state.code) != ret) {
+    @No Return Statement Given@ 
+    state.addReturn();
+  }
+  @Do Register Allocation@
+  @Is This The Main Function@
+  return state.myName;
+}
+~~~~
+
+What we do for each statement depends on the statement's type, so we'll switch on that:
+
+~~~~
+@Parsing State Members@ +=
+private void parseStatements(Iterable<Tree> statements) {
+  for (Tree statement : statements) {
+    switch (type(statement)) {
+      case Call :   call(statement); break;
+      case Return : @Parse A Return Statement@ break;
+      case Assign : @Parse An Assign Statement@ break;
+      case While :  @Parse A While Statement@ break;
+      case If :     @Parse An If Statement@ break;
+    }
+  }
+}
+~~~~
+
+### Processing Statements (1) ###
+
+We'll start with the simplest statement - a return. According to [the ABI](http://www.x86-64.org/documentation/abi.pdf), values are returned in the <tt>rax</tt> register, so we'll add a <tt>Move</tt> instruction to put the return value into the right register, then calls the same <tt>addReturn</tt> method we saw in <tt>parseDefinition</tt>. We'll look at <tt>getAsValue</tt> shortly - as the expression attached to the return node can be quite complicated (e.g. the return value of a function call, or the <tt>Label</tt> returned by a nested function defintion) we'll have to calculate that first. The <tt>Value</tt> that is the net result of this expression is returned by <tt>getAsValue</tt>.
+
+~~~~
+@Parse A Return Statement@ +=
+Value ret = getAsValue(get(statement,0));
+code.add(move(ret, Register.rax));
+addReturn();
+~~~~
+
+<tt>addReturn</tt> exists to ensure the Assembly code we generate for our function maintains the invariants in [ABI](http://www.x86-64.org/documentation/abi.pdf). In particular, we must ensure that the values in the following six registers when we leave the function must be the same as when our function was called.
+
+~~~~
+@Other Helpers@ +=
+static final Register[] CALLEE_SAVES = { rbx, rbp, r12, r13, r14, r15 };
+~~~~
+
+We'll move the values in the registers we have to save into <tt>Variable</tt>s. These instructions are added in the constructor of the <tt>ParsingState</tt>, so will be before any instructions added by the statements we process. The variable names have an exclamation mark in them so they can't collide with variable names in the code we're compiling. We'll move the saved values back into their corresponding registers before we return from the function.
+
+~~~~
+@Identify Callee Saves Registers@ +=
+for(Register r : Register.CALLEE_SAVES)
+  code.add(move(r, new Variable(CALLEE_SAVE_VAR + r)));
+@Parsing State Members@ +=
+void addReturn() {
+  for(Register r : Register.CALLEE_SAVES)
+    code.add(move(new Variable(CALLEE_SAVE_VAR + r), r));
+  @Before Returning From Function@
+  code.add(Compiler.ret);
+}
+@Other Helpers@ +=
+private static final String CALLEE_SAVE_VAR = "save!";
+~~~~
+
+Here, <tt>ret</tt> is a singleton instance as the instruction has no operands, and so the <tt>Instruction</tt> object has no internal state.
+
+~~~~
+@Static Classes@ +=
+static final Instruction ret = new Instruction() {
+  @Ret Members@
+  public String toString() { return @Ret x86 Code@; }
+};
+~~~~
+
+### Processing Expressions ###
+
+We'll return to <tt>getAsValue</tt>. In a similar way to <tt>parseStatements</tt> we'll use a switch statement to process each type of expression independently. As expressions can contain other expressions (such as in the example AST of <tt>my_func(MY_GLOBAL,@(my_address))</tt> below) this function is often called recursively to flatten the tree of expressions into a list of Assembly instructions.
+
+<pre>
+                    +------------+
+                    |   Local    |
+                    |"my_address"|
+                    +------------+
+                           ^
+        +-----------+   +--+--+
+        |  Global   |   |Deref|
+        |"MY_GLOBAL"|   +-----+
+        +-----------+      ^
+               ^           |
+               +-----+-----+
++---------+    +-----+----+
+|  Local  |    |Parameters|
+|"my_func"|    +----------+
++---------+          ^
+    ^                |
+    +------+---------+
+         +-+--+
+         |Call|
+         +----+
+</pre>
+
+The switch statement - note that for a <tt>Definition</tt> node the <tt>Value</tt> returned is the <tt>Label</tt> containing the newly-defined function's symbol. As each function appends instructions to its own <tt>List</tt> of instructions in its <tt>ParsingState</tt>, and these <tt>List</tt>s are appended to the <tt>List</tt> of <tt>List</tt>s in the <tt>ProgramState</tt> the functions appear in generated Assembly code in the order they are defined. The separate <tt>List</tt>s of instructions ensure that no two functions' instructions are interleaved.
+
+~~~~
+@Parsing State Members@ += 
+private Value getAsValue(Tree t) {
+      switch (t.getType()) {
+        case Definition:
+            return parseDefinition(t, program);
+        case Global:
+            { @Get A Global@ }
+        case Local:
+            { @Get A Local@ }
+        case FFI:
+            { @Get A FFI@ }
+        case Call:
+            { @Get A Call@ }
+        case Number :
+            { @Get A Literal@ }
+        default :
+            throw new IllegalArgumentException();
+    }
+}
+~~~~
+
+Sometimes we'll need to ensure the <tt>Value</tt> is a <tt>StorableValue</tt> as the <tt>BinaryOp</tt> instructions can't have two literals or two memory addresses as operands. If we see this we'll move one of the literals or memory addresses to a new (unique) <tt>Variable</tt> using the code below, and we'll use that <tt>Variable</tt> as one of the original instruction's operands.
+
+~~~~
+@Parsing State Members@ += 
+private StorableValue toStorable(Value v) {
+  if (StorableValue.class.isAssignableFrom(v.getClass())) 
+    return (VALUE) v;
+  Variable var = new Variable();
+  code.add(move(v, var));
+  return var;
+}
+~~~~
+
+If the AST node is a <tt>Local</tt> it could be a reference to a local variable defined in this function or a reference to one of the parameters (as they are AST nodes of type <tt>Local</tt> too). We've seen that one of the <tt>ParsingState</tt>'s fields is a <tt>Map</tt> of <tt>Variable</tt> names to <tt>Value</tt>s that access those parameters (but not how that map's built up yet). We'll look up our new <tt>Variable</tt> in this map to see if it's actually a reference to one of the function parameter - and if so we'll return the <tt>StorableValue</tt> that accesses it instead.
+
+~~~~
+@Get A Local@ +=
+Variable v = new Variable(text);
+return params.containsKey(v) ? params.get(v) : v;
+~~~~
+
+If the expression is a reference to a symbol defined elsewhere, we'll just extract the symbol name from the AST node's text by stripping off the leading "#". We'll leave this label our generated Assembly code, and when it's assembled the assembler will add it to the GOT as an undefined symbol. When the assembled code is linked the (static or dynamic) linker will look for a definition of this symbol elsewhere, and will fail if it can't find a shared library, executable or one of the other files it's linking that exports the symbol.
+
+~~~~
+@Get A FFI@ +=
+return new Label(text(t).substring(1))
+~~~~
+
+<tt>Global</tt> symbols are <tt>Label</tt>s like the (FFI) symbols above, however we have to put them in the generated code's [data segment](http://en.wikipedia.org/wiki/Data_segment). As above we'll add a leading underscore to the variable's name as it appears in the source code to comply with the Linux & OSX ABI. We'll also initialize all the variables to zero. This means that the assembler will write zeros to the data segment of the binary it outputs, and at runtime the [loader (not the linker)](http://www.linuxjournal.com/article/6463) copies these zeros into the addresses of the process that the loader has assigned the corresponding symbols to.
+
+~~~~
+@Get A Global@ +=
+Label ret = new Label("_" + text(t));
+if(!program.globals.containsKey(ret))
+  program.globals.put(ret, new Immediate(0));
+return ret;
+~~~~
+
+Literals expressions are easy to evaluate. We'll strip off the leading "0x" string that appears in the source code (it's just for clarity) as Java's <tt>Long.parseLong</tt> only expects digits from the numeric base in the second argument (base 16 means it only wants digits that are 0-9 and A-E). 
+
+~~~~
+@Get A Literal@ +=
+return new Immediate(Long.parseLong(t.getText().substring(2), 16));
+~~~~
+
+The remaining case in <tt>getAsValue</tt> deals with <tt>Call</tt> nodes in the AST. In our source language C-like call syntax is used for several things besides function calls, so we'll need another switch statement to disambiguate:
+
+~~~~
+@Get A Call@ +=
+switch(type(t, 0)) {
+  case Local:
+  case Global:
+  case FFI:
+    { call(t); @Keep the Return Value@ }
+  case Intrinsic: 
+    { @Parse An Intrinsic Call@ }
+  case Conditional:
+    { @Parse A Conditional Call@ }
+  case Deref:
+    { @Parse A Dereference@ }
+  case StackAlloc:
+    { @Parse A Stack Allocation@ }
+}
+~~~~
+
+I said above that "intrinsics", or UTF-8 symbols in the source code corresponded to exactly one Assembly instruction. However, the semantics of the langauge we're compiling don't match up with the x86 semantics of these instructions. When we compile <tt>c = +(a, b)</tt> we don't want to generate Assembly code that modifies <tt>b</tt>, so we can't output <tt>add a, b; mov b, c</tt>. Instead we'll create a temporary variable and copy one of the operands into it, so when we perform the desired <tt>Op</tt> on it we no longer modify the original operands as side-effects; for <tt>c = +(a, b)</tt> we'd generate <tt>mov b, c; add a, c</tt> (remembering that an x86 <tt>mov</tt> has copy semantics).
+
+~~~~
+@Parse An Intrinsic Call@ +=
+Value arg1 = getAsValue(get(t, 1, 0));
+Value arg2 = toStorable(getAsValue(get(t, 1, 1)));
+Variable ret = new Variable();
+code.add(move(arg1, ret));
+code.add(new BinaryOp(Op.parse(text(t, 0)), arg2, ret));
+return ret;
+~~~~
+
+~~~~
+@Condition Members@ +=
+  Condition inverse() {
+    switch(this) {
+      case b:  return ae;
+      case a:  return be;
+      case e:  return ne;
+      case ne: return e;
+      case be: return a;
+      case ae: return b;
+    }
+    throw new IllegalStateException();
+  }
+@Parse A Conditional Call@ +=
+Condition cond = Condition.parse(text(t, 0));
+Value arg1 = getAsValue(get(t, 1, 1));
+StorableValue arg2 = toStorable(getAsValue(get(t, 1, 0)));
+code.add(new BinaryOp(Op.cmpq, arg1, arg2));
+Variable ret = new Variable();
+code.add(move(new Immediate(1), ret));
+Variable zero = new Variable();
+code.add(move(new Immediate(0), zero));
+code.add(new Move(zero, ret, cond.inverse()));
+return ret;
+~~~~
+
+### Processing Statements (2) ###
+
+ This method deals with tearing down 
+Stack frames. [Enter](http://www.read.seas.harvard.edu/~kohler/class/04f-aos/ref/i386/ENTER.htm)
+http://www.agner.org/optimize/calling%5Fconventions.pdf http://blogs.embarcadero.com/eboling/2009/05/20/5607
+
+
 
 Generate x86 GAS code - you could probably use a factory to create the _Instruction_ objects if you wanted to support more than one architecture. See [this](http://stackoverflow.com/a/2752639/42543) for why _.type_ isn't supported on mac. See [lib-c free](https://blogs.oracle.com/ksplice/entry/hello_from_a_libc_free). https://developer.apple.com/library/mac/#documentation/DeveloperTools/Reference/Assembler/000-Introduction/introduction.html . [Instruction set (pdf)](http://download.intel.com/design/intarch/manuals/24319101.pdf). 
 
@@ -412,7 +729,6 @@ enum Register implements StorableValue {
   static final Register[] ASSIGNABLE = { 
     rax, rbx, rcx, rdx, rbp, rsi, rdi, r8, r9, r10, r11, r12, r13, r14, r15, THESTACK 
   };
-  static final Register[] CALLEE_SAVES = { rbx, rbp, r12, r13, r14, r15 };
   static final Register[] PARAMETERS = { rdi, rsi, rdx, rcx, r8, r9 };
 }
 ~~~~
@@ -439,6 +755,21 @@ Instruction storeArg(Value arg, int position) {
 }
 ~~~~
 
+Maybe a note on (code) alignment?
+
+~~~~
+@Other Helpers@ +=
+private static final long ALIGN_STACK_TO = 16;
+@Immediate Members@ += 
+Immediate alignAllocation() {
+  long overhangBytes = value % ALIGN_STACK_TO;
+  if(overhangBytes == 0)
+    return this;
+  else
+    return new Immediate(value + ALIGN_STACK_TO - overhangBytes);
+}
+~~~~
+
 ~~~~
 @Parsing State Members@ +=
 private void call(Tree t) {
@@ -461,7 +792,7 @@ private void call(Tree t) {
   for(int r = 0; r < registerArgs; ++r) // regs second so they don't get flattened by mem switch
     code.add(move(values.get(r), Register.PARAMETERS[r]));
   @Track Stack Arg Watermark@
-  code.add(new Call(getAsValue(get(t,0))));
+  code.add(new Call(new Label("_" + text(t, 0))));
   @Remove Args From Stack@
 }
 ~~~~
@@ -482,15 +813,6 @@ Note that we'll assume the function being called is a local variable if it has t
 private int mostStackArgs = 0;
 @Track Stack Arg Watermark@ +=
 mostStackArgs = Math.max(mostStackArgs, storedArgs);
-~~~~
-
-According to [the ABI (pdf)](http://www.x86-64.org/documentation/abi.pdf), values are returned in the _rax_ register.
-
-~~~~
-@Parse A Return Statement@ +=
-Value ret = getAsValue(get(statement,0));
-code.add(move(ret, Register.rax));
-addReturn();
 ~~~~
 
 ..and after we've returned:
@@ -537,88 +859,7 @@ if(numDerefs == 1
 } 
 ~~~~
 
-Built-ins: one symbol corresponds to an assembly instruction. We'll assume they only have two 
 
-~~~~
-@Op Members@ +=
-final String c;
-Op(String c) { this.c = c; }
-private static Op parse(String c) { 
-  for(Op op : values()) if(Objects.equal(op.c, c)) return op;
-  throw new IllegalArgumentException();  
-}
-@Parse An Intrinsic Call@ +=
-Value arg1 = getAsValue(get(t, 1, 0));
-Value arg2 = getAsValue(get(t, 1, 1));
-Variable ret = new Variable();
-code.add(move(arg1, ret));
-code.add(new BinaryOp(Op.parse(text(t, 0)), arg2, ret));
-return ret;
-~~~~
-
-Some build-ins are conditional
-
-~~~~
-@Condition Members@ +=
-String c; 
-Condition(String c) { this.c = c; }
-private static Condition parse(String c) { 
-  for(Condition cond : values()) if(Objects.equal(cond.c, c)) return cond;
-  throw new IllegalArgumentException();  
-}
-@Parse A Conditional Call@ +=
-Condition cond = Condition.parse(text(t, 0));
-Value arg1 = getAsValue(get(t, 1, 1));
-StorableValue arg2 = to(getAsValue(get(t, 1, 0)), StorableValue.class);
-code.add(new BinaryOp(Op.cmpq, arg1, arg2));
-Variable ret = new Variable();
-code.add(move(new Immediate(1), ret));
-Variable zero = new Variable();
-code.add(move(new Immediate(0), zero));
-code.add(new Move(zero, ret, cond.inverse()));
-return ret;
-~~~~
-
-~~~~
-@Parsing State Members@ += 
-private Value getAsValue(Tree t) {
-      switch (t.getType()) {
-        case Definition:
-            return parseDefinition(t, program);
-        case Global:
-            { @Get A Global@ }
-        case Local:
-            { @Get A Local@ }
-        case FFI:
-            return new Label(text(t).substring(1));
-        case Call:
-            switch(type(t, 0)) {
-              case Local:
-              case Global:
-              case FFI:
-                { call(t); @Keep the Return Value@ }
-              case Intrinsic: 
-                { @Parse An Intrinsic Call@ }
-            case Conditional:
-              { @Parse A Conditional Call@ }
-            case Deref:
-              { @Parse A Dereference@ }
-            case StackAlloc:
-              { @Parse A Stack Allocation@ }
-            }
-        case Number :
-            return new Immediate(Long.parseLong(t.getText().substring(2), 16));
-        default :
-            throw new IllegalArgumentException();
-    }
-}
-private <VALUE extends Value> VALUE to(Value v, Class<VALUE> as) {
-  if (as.isAssignableFrom(v.getClass())) return (VALUE) v;
-  Variable var = new Variable();
-  code.add(move(v, var));
-  return (VALUE) var;
-}
-~~~~
 
 Functions
 
@@ -630,80 +871,6 @@ myName = hasChildren(def, 0) ? new Label("_" + text(def, 0, 0)) : new Label();
 code.add(new Definition(myName, hasChildren(def, 0) && type(def, 0, 0) == Global));
 ~~~~
 
-~~~~
-@Get A Local@ +=
-return type(t.getParent()) == Call ? new Label("_" + text(t)) : resolveVar(text(t));
-~~~~
-
-~~~~
-@Other Helpers@ +=
-static Label parseDefinition(Tree def, ProgramState program) {
-  ParsingState state = new ParsingState(def, program);  
-  state.parseStatements(children(def, 2));
-  if(getLast(state.code) != ret) {
-    @No Return Statement Given@ 
-    state.addReturn();
-  }
-  @Do Register Allocation@
-  @Is This The Main Function@
-  return state.myName;
-}
-~~~~
-
-These will come up a lot
-
-~~~~
-@Other Helpers@ +=
-static final class ProgramState {
-  final List<List<Instruction>> text = Lists.newArrayList();
-  final Map<Label, Immediate> globals = Maps.newTreeMap();
-}
-static final class ParsingState {
-  List<Instruction> code = Lists.newArrayList();
-  Map<Variable, StorableValue> params = Maps.newTreeMap(); 
-  ProgramState program;
-  Set<Variable> declaredVars = Sets.newTreeSet();
-  Label myName;
-  ParsingState(Tree def, ProgramState program) {
-    (this.program = program).text.add(code);
-    @Get Function Name@
-    @Set Up Stack Allocation@
-    @Set Up Alignment@
-    @Decide If We Should Use The Red Zone@
-    @Identify Callee Saves Registers@
-    @Parse Function Parameters@
-    @Keep Track Of Declared Variables@
-  }
-  @Parsing State Members@
-}
-~~~~
-
-Parse a block of statements
-
-~~~~
-@Parsing State Members@ +=
-private void parseStatements(Iterable<Tree> statements) {
-  for (Tree statement : statements) {
-    switch (type(statement)) {
-      case Call :   call(statement); break;
-      case Return : @Parse A Return Statement@ break;
-      case Assign : @Parse An Assign Statement@ break;
-      case While :  @Parse A While Statement@ break;
-      case If :     @Parse An If Statement@ break;
-    }
-  }
-}
-~~~~
-
-~~~~
-@Get A Global@ +=
-if(type(t.getParent()) == Call) 
-  return new Label("_" + text(t));
-Label ret = new Label(text(t));
-if(!program.globals.containsKey(ret))
-  program.globals.put(ret, new Immediate(0));
-return ret;
-~~~~
 
 Keeping track of user-specified (not auto-inserted) variables in the code. This is for function calls - how do we tell if the string function "name" is a symbol or a variable for dynamic dispatch? We'll assume symbol unless clearly a var as we don't have imports or other ways to tell what symbols can be dynamically linked
 
@@ -714,34 +881,9 @@ declaredVars.add(v);
 declaredVars.add(var);
 ~~~~
 
-Stack frames. [Enter](http://www.read.seas.harvard.edu/~kohler/class/04f-aos/ref/i386/ENTER.htm)
-http://www.agner.org/optimize/calling%5Fconventions.pdf http://blogs.embarcadero.com/eboling/2009/05/20/5607
-Note that CALLEE_SAVE_VAR shouldn't be user-enterable or this will confuse things, hence "!"
-Adding the rax-rax move so we definitely have one instruction the return value register, which makes scanning backwards easier.
-
-~~~~
-@Identify Callee Saves Registers@ +=
-for(Register r : Register.CALLEE_SAVES)
-  code.add(move(r, new Variable(CALLEE_SAVE_VAR + r)));
-@Parsing State Members@ +=
-void addReturn() {
-  for(Register r : Register.CALLEE_SAVES)
-    code.add(move(new Variable(CALLEE_SAVE_VAR + r), r));
-  @Restore Stack Pointer@
-  code.add(Compiler.ret);
-}
-@Other Helpers@ +=
-private static final String CALLEE_SAVE_VAR = "save!";
-~~~~
-
 _ret_ is the return function - and as it takes no arguments we'll just have one global object to represent it.
 
 ~~~~
-@Static Classes@ +=
-static final Instruction ret = new Instruction() {
-  @Ret Members@
-  public String toString() { return @Ret x86 Code@; }
-};
 @Other Helpers@ += 
 static void addBeforeRets(ParsingState state, Instruction inst) {
   for(int i = 0; i < state.code.size(); ++i)
@@ -762,7 +904,7 @@ if(endIf != null)
   code.add(new Definition(endIf, false));
 @Parsing State Members@ +=
 private Label parseIf(Tree test, Tree ifTrue, Tree ifFalse) {
-  StorableValue trueOrFalse = to(getAsValue(get(test, 0)), StorableValue.class);
+  StorableValue trueOrFalse = toStorable(getAsValue(get(test, 0)));
   @Do If Comparison Check@
   Label end = new Label();
   if(ifFalse == null) {
@@ -902,7 +1044,7 @@ Memory stuff. Need _MemoryAddress_ interface as we can't have x86 instructions l
 
 ~~~~
 @Parse A Dereference@ +=
-Value val = to(getAsValue(get(t, 1, 0)), Value.class);
+Value val = getAsValue(get(t, 1, 0));
 if(val instanceof StorableValue && !(val instanceof AtAddress))
   return new AtAddress((StorableValue)val, 0);
 else {
@@ -937,7 +1079,7 @@ if(hasDynamicAllocation(get(def, 2))) {
 We restore the frame pointer for the main function even though we don't need to here so that it's live for the duration of the function.
 
 ~~~~
-@Restore Stack Pointer@ +=
+@Before Returning From Function@ +=
 if(framePointer != null)
   code.add(move(framePointer, Register.rsp));
 ~~~~
@@ -1043,19 +1185,6 @@ for(int p = 0, count = numChildren(def, 1); p < count; ++p) {
 ~~~~
 
 When we're parsing a function call, we'll keep track of the maximum number of stack parameters, so if we're statically-only allocating we'll know how much space we'll need.
-
-
-~~~~
-@Parsing State Members@ +=
-StorableValue resolveVar(String text) {
-  Variable v = new Variable(text);
-  return params.containsKey(v) ? params.get(v) : v;
-}
-@Variable Members@ +=
-public boolean equals(Object o) { return o instanceof Variable && ((Variable)o).name.equals(name); }
-public int hashCode() { return name.hashCode(); }
-public int compareTo(Variable o) { return name.compareTo(o.name); }
-~~~~
 
 Now we know whether or not we're using dynamic stack allocation, but we still don't know how many static bytes we'll need as we might spill some variables to the stack in the register allocation phase (next). However, we'll insert the stack pointer code here so it gets allocated correctly. 
 
@@ -2423,21 +2552,6 @@ grammar Unsigned;
 @Antlr Parse Rules@
 ~~~~
 
-~~~~
-@Other Helpers@ +=
-static Tree get(Tree from, int... indices){
-  for(int index : indices) from = from.getChild(index);
-  return from;
-}
-private static String text(Tree from, int... indices){ return get(from, indices).getText(); }
-private static int type(Tree from, int... indices){ return get(from, indices).getType(); }
-private static int numChildren(Tree from, int... indices){ return get(from, indices).getChildCount(); }
-private static boolean hasChildren(Tree from, int... indices){ return numChildren(from, indices) > 0; }
-private static Iterable<Tree> children(Tree from, int... indices){ 
-  Iterable<Tree> ret = (Iterable<Tree>)((BaseTree)get(from, indices)).getChildren();
-  return ret == null ? Collections.<Tree>emptyList() : ret; 
-}
-~~~~
 
 Some array helpers (we do a lot of linear searching, but not enough to warrant sorting for a binary search or building a hash map).
 
