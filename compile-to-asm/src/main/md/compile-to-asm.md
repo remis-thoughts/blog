@@ -752,9 +752,9 @@ We'll start by using <tt>getAsValue</tt> to generate code that evaluate all the 
 @Parsing State Members@ +=
 private void call(Tree t) {
   List<Value> values = Lists.newArrayList();
-  for (Tree argument : children(t, 1)) {
+  for (Tree argument : children(t, 1))
     values.add(getAsValue(argument));
-  }
+  @Ensure Stack Is Aligned@
   @Put Parameters In Registers Or On The Stack@
   @Track Stack Arg Watermark@
   @Make The Call@
@@ -815,29 +815,69 @@ if(hasDynamicAllocation(get(def, 2))) {
 
 The two methods of laying out the stack memory means we'll generate Assembly code like GCC with the [-fomit-frame-pointer](http://gcc.gnu.org/onlinedocs/gcc-3.4.4/gcc/Optimize-Options.html) option turned on.
 
+If we know total number of stack bytes allocated, and we know the most number of stack arguments used by any function this function calls, then we only need to do a single stack allocation each function, regardless of the number of function calls this function makes. For example, if a function has eight parameters, makes a call to a function with seven parameters, makes a call to a function with eigth parameters, has one stack allocation of 16 bytes and (after the register assignment in section 2 of the article) needs to store the values of two variables on the stack at different points in the function, then the stack would look like:
 
+<pre>
+               +-----------------+
+This           | 8th Parameter   |
+function's     +-----------------+
+parameters     | 7th Parameter   |
+               +-----------------+
+               | Return Address  |
+               +-----------------+
+This           |8-byte Variable  |
+function's     +-----------------+
+statically     |8-byte Variable  |
+allocated      +-----------------+
+stack          |    16-byte      |
+variables      |    Variable     |
+               |                 |
+               +-----------------+
+               |Gap for Alignment|
+               +-----------------+
+Parameters for | 8th Parameter   |
+functions this +-----------------+
+function calls | 7th Parameter   | &gt;--- stack pointer
+               +-----------------+
+</pre>
 
+However, if a function contains dynamic stack allocation we don't know where the top of the stack will be - so we can't statically allocate space for passing parameters to function calls as we may give the space on the stack to dynamic allocations. In the example above, if the function also dynamically allocated some memory (but we don't know how much), and also calls a function with nine arguments then the stack would look like:
 
- This method deals with tearing down 
-Stack frames. [Enter](http://www.read.seas.harvard.edu/~kohler/class/04f-aos/ref/i386/ENTER.htm)
+<pre>
+               +-----------------+
+This           | 8th Parameter   |
+function's     +-----------------+
+parameters     | 7th Parameter   |
+               +-----------------+
+               | Return Address  | &gt;--- frame pointer
+               +-----------------+
+This           |8-byte Variable  |
+function's     +-----------------+
+statically     |8-byte Variable  |
+allocated      +-----------------+
+stack          |    16-byte      |
+variables      |    Variable     |
+               |                 |
+               +-----------------+
+               |Gap for Alignment| &gt;--- stack pointer (before dynamic allocation)
+               +-----------------+
+               |  Dynamically    |
+               |  allocated      |
+               |variable, padded |
+               |  to 16-byte     |
+               |   alignment     | &gt;--- stack pointer (after dynamic allocation)
+               +-----------------+
+               |Gap for Alignment|
+               +-----------------+
+Parameters for | 7th Parameter   |
+functions this +-----------------+
+function calls | 8th Parameter   |
+               +-----------------+
+               | 9th Parameter   | &gt;--- stack pointer (just before function call)
+               +-----------------+
+</pre>
 
-
-
-
-Generate x86 GAS code - you could probably use a factory to create the _Instruction_ objects if you wanted to support more than one architecture. See [this](http://stackoverflow.com/a/2752639/42543) for why _.type_ isn't supported on mac. See [lib-c free](https://blogs.oracle.com/ksplice/entry/hello_from_a_libc_free). https://developer.apple.com/library/mac/#documentation/DeveloperTools/Reference/Assembler/000-Introduction/introduction.html . [Instruction set (pdf)](http://download.intel.com/design/intarch/manuals/24319101.pdf). 
-
-
-The types of values
-
-|| Type || Can Be A Memory Address ||
-| Immediate | No (absolute addressing not supported on OSX x86-64) |
-| Register | No (it's an absolute address) |
-| Label | Always a memory address |
-
-[Useful lecture notes](http://www.classes.cs.uchicago.edu/archive/2011/spring/22620-1/docs/handout-03.pdf)
-We'll flatten nested functions - creating randomly-generated _Labels_ for anonymous functions as needed.
-
-If we have a stack pointer it means we don't know the size of the stack, so we'll use _pushq_ instructions to put arguments on the stack, and we'll pop the arguments off the stack after the function call using an _addq_. However, if we know the stack size exactly we can reserve space on the stack for the parameters at the start of the function, and it'll be reset for free when we leave the function. If there's more than one function we'll reserve space for the function call with the greatest number of stack arguments, so we'll only ever do a single stack allocation and release in the function. However, we don't know if we have a frame pointer until we've processed the whole function, so we'll insert placeholders as we parse calls, and we'll resolve them later.   
+In general, the compiler tests to see if the <tt>framePointer</tt> variable is null to decide whether it's generating code for a statically-allocated or a dynmaically-allocated function. When moving <tt>Value</tt>s onto the stack to pass them as parameters to another function, a statically allocated function can just move the <tt>Value</tt> into the pre-allocated spot - otherwise we'll have to use a <tt>push</tt> instruction to decrement <tt>rsp</tt> by eight and store the <tt>Value</tt> in the new location <tt>rsp</tt> points to:
 
 ~~~~
 @Parsing State Members@ +=
@@ -847,6 +887,34 @@ Instruction storeArg(Value arg, int position) {
   else
     return new Push(arg);
 }
+@Static Classes@ +=
+static final class Push extends Instruction {
+  final Value value;
+  Push(Value value) { this.value = value; }
+  public String toString() { @Push x86 Code@ }
+  @Push Members@
+}
+~~~~
+
+The 8-byte gaps labelled "Gap for Alignment" in the diagrams above are to comply with another part of [the ABI](http://www.uclibc.org/docs/psABI-x86_64.pdf): the stack must always be 16-byte aligned (i.e. <tt>rsp</tt> must have the lowest four bits set to zero). The compiler can generate Assembly code that leaves the stack pointer 8-byte aligned (e.g. if no static stack bytes were allocated, the 8-byte return address that the <tt>call</tt> instruction put on the stack means the stack pointer would not be 16-byte aligned). In fact, [OSX will terminate a process](http://blogs.embarcadero.com/eboling/2009/05/20/5607) that calls a dynamically-linked function when the stack isn't aligned correctly. When dealing with functions that dynamically allocate stack memory, we'll ensure that we always push a multiple of two arguments so we maintain 16-byte alignment - and if we're calling a function with an odd number of arguments we'll add a dummy zero parameter that the function being called will never read:
+
+~~~~
+@Ensure Stack Is Aligned@ +=
+if(framePointer != null
+&& values.size() > PARAMETERS.length
+&& values.size() % 2 == 1)
+  values.add(new Immediate(0));
+~~~~
+
+If a function's stack space is allocated statically then we don't need to do anything after a function call. The parameters that were passed will remain on the stack until overwritten by a subsequent function call, but when control flow returns from the function all the arguments will be discarded. However, if we're compiling a function that dynamically allocates stack memory we'll remove the parameters from the stack. We don't have to do this as subsequent dynamic allocations will just use the memory after the unneeded parameters, but we'll rather improve the stack's [spatial locality](http://en.wikipedia.org/wiki/Locality_of_reference) for the cost of an <tt>add</tt> instruction.
+
+~~~~
+@Remove Args From Stack@ +=
+if(framePointer != null)
+  code.add(new BinaryOp(
+    Op.addq,
+    new Immediate(storedArgs * SIZE), 
+    rsp));
 ~~~~
 
 The x86 <tt>mov</tt> instruction doesn't allow both operands to be indirect (i.e. values in memory), however the [push](http://ref.x86asm.net/coder64.html#x50) instruction allows registers and indirect values as its operand. This means if we're not using <tt>Push</tt> instructions to pass parameters on the stack (i.e. if we have dynamic stack memory allocations), so we'll have to load any parameter <tt>Value</tt>s that are in memory: 
@@ -860,36 +928,55 @@ if(arg instanceof AtAddress && framePointer != null) {
 }
 ~~~~
 
+### Function Parameters ###
 
-Maybe a note on (code) alignment?  http://blogs.embarcadero.com/eboling/2009/05/20/5607
 
 ~~~~
-@Other Helpers@ +=
-private static final long ALIGN_STACK_TO = 16;
-@Immediate Members@ += 
-Immediate alignAllocation() {
-  long overhangBytes = value % ALIGN_STACK_TO;
-  if(overhangBytes == 0)
-    return this;
+@Static Classes@ +=
+static final class Parameter implements com.google.common.base.Supplier<Long> {
+  final ParsingState function; final int number;
+  Parameter(ParsingState function, int number) {
+    this.function = function; this.number = number; 
+  }
+  public Long get() {
+    return (number + 1) * SIZE + function.staticStackBytes().value;
+  }
+}
+@Parsing State Members@ +=
+StorableValue parameter(int number) {
+  if (framePointer == null) {
+    return new AtAddress(rsp, new Parameter(this, number));
+  } else {
+    return new AtAddress(framePointer, (number + 1) * SIZE);
+  }
+}
+~~~~
+
+We'll keep a track of offsets below the current frame's pointer (later parameters get bigger offsets) - and we'll either subtract these from the frame pointer or subtract these plus static allocation size from the stack pointer depending on whether we're doing statci+dynamic or static-only allocation.
+
+~~~~
+@Parse Function Parameters@ +=
+for(int p = 0, count = numChildren(def, 1); p < count; ++p) {
+  Variable v = new Variable(text(def, 1, p));
+  if(p < PARAMETERS.length)
+    code.add(move(PARAMETERS[p], v));
   else
-    return new Immediate(value + ALIGN_STACK_TO - overhangBytes);
+    params.put(v, parameter(p - PARAMETERS.length));
+  @Keep Track Of Declared Parameter@
 }
 ~~~~
 
 
 
-~~~~
-@Remove Args From Stack@ +=
-if(framePointer != null)
-  code.add(new BinaryOp(
-    Op.addq,
-    new Immediate(storedArgs * SIZE).alignAllocation(), 
-    rsp));
-~~~~
 
-Note that we'll assume the function being called is a local variable if it has the same name as a local variable in this function - otherwise it'll be a label which the linker will resolve for us.
 
-..and after we've returned:
+
+ This method deals with tearing down 
+Stack frames. [Enter](http://www.read.seas.harvard.edu/~kohler/class/04f-aos/ref/i386/ENTER.htm)
+Generate x86 GAS code - you could probably use a factory to create the _Instruction_ objects if you wanted to support more than one architecture. See [this](http://stackoverflow.com/a/2752639/42543) for why _.type_ isn't supported on mac. See [lib-c free](https://blogs.oracle.com/ksplice/entry/hello_from_a_libc_free). https://developer.apple.com/library/mac/#documentation/DeveloperTools/Reference/Assembler/000-Introduction/introduction.html . [Instruction set (pdf)](http://download.intel.com/design/intarch/manuals/24319101.pdf). 
+
+[Useful lecture notes](http://www.classes.cs.uchicago.edu/archive/2011/spring/22620-1/docs/handout-03.pdf)
+
 
 Assignment (to locals and globals)
 
@@ -1075,13 +1162,6 @@ if(state.isMainFn()) {
     alignStack()));
   addBeforeRets(state, new Pop(rsp));
 }
-@Static Classes@ +=
-private static final class Push extends Instruction {
-  final Value value;
-  Push(Value value) { this.value = value; }
-  public String toString() { @Push x86 Code@ }
-  @Push Members@
-}
 private static final class Pop extends Instruction {
   final StorableValue value;
   Pop(StorableValue value) { this.value = value; }
@@ -1091,22 +1171,6 @@ static Instruction alignStack() {
   return new BinaryOp(Op.andq, new Immediate(0xFFFFFFFFFFFFFFF0L), rsp);
 }
 ~~~~
-
-...and when we're calling a function, we should preserve stack alignment, so if we're pushing an odd number of args onto the stack we'll have to pad the stack with 8 bytes first to leave it at a 16 byte boundary. 
-
-~~~~
-@Before We Push Function Params Onto Stack@ += 
-if(numParams > maxInRegs && (numParams - maxInRegs) % 2 != 0)
-  state.code.add(new BinaryOp(Op.subq, new Immediate(SIZE), rsp));
-@Remove Function Call Params From Stack@ +=
-int correction = 0;
-if((numParams - maxInRegs) % 2 != 0) correction = 1;
-state.code.add(new BinaryOp(
-  Op.addq,
-  new Immediate((numParams - maxInRegs + correction) * SIZE),
-  rsp));
-~~~~
-
 
 We restore the frame pointer for the main function even though we don't need to here so that it's live for the duration of the function.
 
@@ -1178,47 +1242,6 @@ if(size instanceof Immediate) {
   return ret;
 }
 ~~~~
-
-Dealing with parameters. Make _Variable_ comparable and add _equals_ methods so we can use it as a key to a collection. Note thatsome are passed in registers and others on the stack. If we have a stack pointer we'll just push these, as we don't know where the top of the stack is (we'll only have a stack pointer if we've dynamically allocated memory). However, under static-only allocation, we can pre-allocate the space needed for the maximum number of parameters (choosing to save CPU cycles over stack bytes).
-
-~~~~
-@Static Classes@ +=
-static final class Parameter implements com.google.common.base.Supplier<Long> {
-  final ParsingState function; final int number;
-  Parameter(ParsingState function, int number) {
-    this.function = function; this.number = number; 
-  }
-  public Long get() {
-    return (number + 1) * SIZE + function.staticStackBytes().value;
-  }
-}
-@Parsing State Members@ +=
-StorableValue parameter(int number) {
-  if (framePointer == null) {
-    return new AtAddress(rsp, new Parameter(this, number));
-  } else {
-    return new AtAddress(framePointer, (number + 1) * SIZE);
-  }
-}
-~~~~
-
-We'll keep a track of offsets below the current frame's pointer (later parameters get bigger offsets) - and we'll either subtract these from the frame pointer or subtract these plus static allocation size from the stack pointer depending on whether we're doing statci+dynamic or static-only allocation.
-
-~~~~
-@Parse Function Parameters@ +=
-for(int p = 0, count = numChildren(def, 1); p < count; ++p) {
-  Variable v = new Variable(text(def, 1, p));
-  if(p < PARAMETERS.length)
-    code.add(move(PARAMETERS[p], v));
-  else
-    params.put(v, parameter(p - PARAMETERS.length));
-  @Keep Track Of Declared Parameter@
-}
-~~~~
-
-When we're parsing a function call, we'll keep track of the maximum number of stack parameters, so if we're statically-only allocating we'll know how much space we'll need.
-
-Now we know whether or not we're using dynamic stack allocation, but we still don't know how many static bytes we'll need as we might spill some variables to the stack in the register allocation phase (next). However, we'll insert the stack pointer code here so it gets allocated correctly. 
 
 ## (II) Register Allocation via Linear Programming ##
 
