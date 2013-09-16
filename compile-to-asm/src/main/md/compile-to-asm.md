@@ -235,7 +235,6 @@ private static Op parse(String c) {
 }
 ~~~~
 
-
 There's also a class hierarchy to represent the different types of operand. In the final output, operands can be literals ("immediates"), registers or memory locations pointed to by a register (["register indirect addressing"](http://en.wikipedia.org/wiki/Addressing_mode#Register_indirect)). However, [at most](http://cs.smith.edu/~thiebaut/ArtOfAssembly/CH04/CH04-3.html#HEADING3-113) one operand in a BinaryOp can be indirect (i.e. a value in memory). We also want to generate [position-independent](http://en.wikipedia.org/wiki/Position-independent_code) Assembly code, so we don't want to generate absolute memory addresses.
 
 We'll enforce the distinction between literals and registers using Java's type system. All operands are <tt>Value</tt>s, but operands that can be modified are subtypes of <tt>StorableValue</tt>. The class below is called <tt>Immediate</tt> as that's what a literal in an assembly instruction is called. 
@@ -251,6 +250,19 @@ static final class Immediate implements Value {
   public boolean equals(Object o) { return o instanceof Immediate && ((Immediate)o).value == value;}
   public String toString() { @Immediate x86 Code@ }
   @Immediate Members@
+}
+~~~~
+
+As we are compiling for a single architecture (x86-64) we can "hard-code" the register names in an enum. The language we're compiling doesn't support floating-point values, so we don't need to include the [eight xmm registers](http://en.wikipedia.org/wiki/Streaming_SIMD_Extensions#Registers) added by the SSE instruction set. This means we can't call other functions that expect floating point values as parameters. The enum also has a dummy value, <tt>THESTACK</tt>. We'll use this in the second section of the article when assigning variables to registers. If we have more variables that available registers we'll store some of them on the stack. The algorithm for deciding which variable goes where will assign variables to the <tt>THESTACK</tt> register to indicate this.
+
+~~~~
+@Value Classes@ +=
+enum Register implements StorableValue {
+  rax, rbx, rcx, rdx, rsp /*stack pointer*/, 
+  rbp /*frame pointer*/, rsi, rdi, r8, r9, 
+  r10, r11, r12, r13, r14, r15, THESTACK,
+  rip /*instruction pointer*/;
+  public String toString() { return String.format("%%%s", name()); }
 }
 ~~~~
 
@@ -322,7 +334,7 @@ Like the <tt>Variable</tt> type, <tt>Label</tt> includes a no-arg constructor to
 static final class Label implements StorableValue, Comparable<Label> {
   final String name;
   Label(String name) { this.name = name; }
-  Label() { this("L" + uniqueness.getAndIncrement()); }
+  Label() { this("_l" + uniqueness.getAndIncrement()); }
   public int compareTo(Label other) {
     return name.compareTo(other.name);
   }
@@ -351,7 +363,7 @@ static final class Definition extends Instruction {
 }
 ~~~~
 
-Some instructions are conditional - they only get executed if certain [flags](http://en.wikipedia.org/wiki/FLAGS_register) in the CPU's flag register are set. These flag bits are set as side-effects when other instructions are executed. For example, if <tt>add %rax, %rbx</tt> [overflows](http://en.wikipedia.org/wiki/Arithmetic_overflow) (i.e. <tt>rax + rbx > 2^64</tt>) then the _overflow_ bit (the 11th bit) in the flags register is set. If the next instruction was <tt>jo %rcx</tt>, then as the overflow flag is set the instruction will be executed and control flow jumps to the instruction at the memory address in <tt>rcx</tt>. We'll only use a few of the conditions supported by the x86 instruction set:
+Some instructions are conditional - they only get executed if certain [flags](http://en.wikipedia.org/wiki/FLAGS_register) in the CPU's flag register are set. These flag bits are set as side-effects when other instructions are executed. For example, if <tt>add %rax, %rbx</tt> [overflows](http://en.wikipedia.org/wiki/Arithmetic_overflow) (i.e. <tt>rax + rbx > 2^64</tt>) then the _overflow_ bit (the 11th bit) in the flags register is set. If the next instruction was <tt>jo %rcx</tt>, then as the overflow flag is set the instruction will be executed and control flow jumps to the instruction at the memory address in <tt>rcx</tt>. We'll only use a few of the conditions supported by the x86 instruction set, and we'll only use the conditions that treat the two operands being compared as _unsigned_ 64-bit integers.
 
 ~~~~
 @Other Helpers@ +=
@@ -499,7 +511,7 @@ private void parseStatements(Iterable<Tree> statements) {
 }
 ~~~~
 
-### Processing Statements (1) ###
+### Processing Statements ###
 
 We'll start with the simplest statement - a return. According to [the ABI](http://www.x86-64.org/documentation/abi.pdf), values are returned in the <tt>rax</tt> register, so we'll add a <tt>Move</tt> instruction to put the return value into the right register, then calls the same <tt>addReturn</tt> method we saw in <tt>parseDefinition</tt>. We'll look at <tt>getAsValue</tt> shortly - as the expression attached to the return node can be quite complicated (e.g. the return value of a function call, or the <tt>Label</tt> returned by a nested function defintion) we'll have to calculate that first. The <tt>Value</tt> that is the net result of this expression is returned by <tt>getAsValue</tt>.
 
@@ -521,11 +533,11 @@ We'll move the values in the registers we have to save into <tt>Variable</tt>s. 
 
 ~~~~
 @Identify Callee Saves Registers@ +=
-for(Register r : Register.CALLEE_SAVES)
+for(Register r : CALLEE_SAVES)
   code.add(move(r, new Variable(CALLEE_SAVE_VAR + r)));
 @Parsing State Members@ +=
 void addReturn() {
-  for(Register r : Register.CALLEE_SAVES)
+  for(Register r : CALLEE_SAVES)
     code.add(move(new Variable(CALLEE_SAVE_VAR + r), r));
   @Before Returning From Function@
   code.add(Compiler.ret);
@@ -648,7 +660,7 @@ switch(type(t, 0)) {
   case Local:
   case Global:
   case FFI:
-    { call(t); @Keep the Return Value@ }
+    { @Parse A Function Call@ }
   case Intrinsic: 
     { @Parse An Intrinsic Call@ }
   case Conditional:
@@ -672,37 +684,143 @@ code.add(new BinaryOp(Op.parse(text(t, 0)), arg2, ret));
 return ret;
 ~~~~
 
+The various <tt>Condition</tt> tokens in the langauge's grammar (e.g. <, ≠) can be used as boolean functions - functions that return <tt>0x1</tt> for true and <tt>0x0</tt> for false. The [CMP](http://ref.x86asm.net/coder64.html#x38) x86 instruction subtracts the second operand from the first (using signed arithmetic) and sets the overflow, sign, zero, adjust, parity and carry flags based on the results (there's a longer description in [Intel's architecture manual](http://www.intel.com/content/dam/www/public/us/en/documents/manuals/64-ia-32-architectures-software-developer-manual-325462.pdf) and a good overview [here](https://www.hellboundhackers.org/articles/729-jumps-flags-and-the-cmp-instruction.html)). The conditional <tt>mov</tt> instruction reads these flags, and is only executed if the [necessary flags](http://x86.renejeschke.de/html/file_module_x86_id_34.html) are set. We'll therefore set the result to zero, and conditionally move a one into it:
+
 ~~~~
-@Condition Members@ +=
-  Condition inverse() {
-    switch(this) {
-      case b:  return ae;
-      case a:  return be;
-      case e:  return ne;
-      case ne: return e;
-      case be: return a;
-      case ae: return b;
-    }
-    throw new IllegalStateException();
-  }
 @Parse A Conditional Call@ +=
 Condition cond = Condition.parse(text(t, 0));
 Value arg1 = getAsValue(get(t, 1, 1));
 StorableValue arg2 = toStorable(getAsValue(get(t, 1, 0)));
 code.add(new BinaryOp(Op.cmpq, arg1, arg2));
 Variable ret = new Variable();
-code.add(move(new Immediate(1), ret));
-Variable zero = new Variable();
-code.add(move(new Immediate(0), zero));
-code.add(new Move(zero, ret, cond.inverse()));
+code.add(move(new Immediate(0), ret));
+code.add(new Move(new Immediate(1), ret, cond));
 return ret;
 ~~~~
 
-### Processing Statements (2) ###
+A <tt>Dereference</tt> in the language is another "intrinsic". It means we should use the argument as a memory address, and should return the value at that address. We'll have to take a bit of care dealing with nested dereferences (e.g. <tt>@(@(my_address))</tt>) as x86 instructions only support a single dereference (e.g. <tt>mov (%rax), %rax</tt> is valid, but <tt>mov ((%rax)), %rax</tt> isn't). In this case we'll insert an intermediate variable, so if we're dereferencing a <tt>Value</tt> that is already an indirect address we'll load the second memory address from memory into a register, and use it to load the actual value (so <tt>@(@(my_address))</tt> becomes <tt>mov (my_address), tmp; mov (tmp), the_result</tt>):
+
+~~~~
+@Parse A Dereference@ +=
+Value val = getAsValue(get(t, 1, 0));
+if(val instanceof StorableValue && !(val instanceof AtAddress))
+  return new AtAddress((StorableValue)val, 0);
+else {
+  Variable ret = new Variable();
+  code.add(move(val, ret));
+  return new AtAddress(ret, 0);
+} 
+~~~~
+
+### Function Calls ###
+
+An architecture's [calling convention](http://www.agner.org/optimize/calling%5Fconventions.pdf) determines where to put a function's arguments before jumping to the first instruction of that function, where to read the return value from when control flow returns and how many bytes the stack should be aligned to. While 32-bit x86 architectures have a huge variety ([the list](http://en.wikipedia.org/wiki/X86_calling_conventions#List_of_x86_calling_conventions) includes cdecl, stdcall, fastcall & thiscall) the x86-64 landscape is a lot simpler. This compiler will output code that uses the [System V AMD ABI](http://people.freebsd.org/~obrien/amd64-elf-abi.pdf), which is used by the Linux, BSD & OSX OSes. The [Microsoft x86] convention (http://msdn.microsoft.com/en-us/library/9b372w95%28v=VS.80%29.aspx) only differs slightly - fewer function parameters are passed in registers - so it should be relatively simple to modify the compiler to produce Windows-compatible Assembly code.
+
+However, both x86-64 conventions agree that 64-bit integers are returned in the <tt>rax</tt> register:
+
+~~~~
+@Parse A Function Call@ +=
+call(t);
+Variable var = new Variable();
+code.add(move(Register.rax, var));
+return var;
+~~~~
+
+The System V AMD ABI says that the first six integer parameters should be passed in the registers below, while the Microsoft x86 convention uses only <tt>rcx</tt>, <tt>rdx</tt>, <tt>r8</tt> and <tt>r9</tt> to pass the first four integer parameters. As noted above this compiler won't generate code that passes floating point parameters via the xmm registers.
+
+~~~~
+@Other Helpers@ +=
+static final Register[] PARAMETERS = { rdi, rsi, rdx, rcx, r8, r9 };
+~~~~
+
+As the language supports function pointers <tt>Call</tt> instructions can have a <tt>Label</tt> or a <tt>Register</tt> as their operand.
+
+~~~~
+@Static Classes@ +=
+static final class Call extends Instruction {
+  final Value name;
+  Call(Value name) { this.name = name; }
+  public String toString() { @Call x86 Code@ }
+}
+@Make The Call@ +=
+code.add(new Call(getAsValue(get(t, 0))));
+~~~~
+
+We'll start by using <tt>getAsValue</tt> to generate code that evaluate all the expressions we're going to pass as parameters. These expressions can be complicated (and can even include other function calls). We need to keep all the parameter <tt>Value</tt>s we've calculated so far, which reduces the registers available for evaluating subsequent parameters. While we can't avoid this for the six parameters we're passing in registers, we could calculate the parameter values we're passing on the stack and put them there - so they don't need to take up registers. However, this means we can't use the stack layout described in next, so we won't do this.
+
+~~~~
+@Parsing State Members@ +=
+private void call(Tree t) {
+  List<Value> values = Lists.newArrayList();
+  for (Tree argument : children(t, 1)) {
+    values.add(getAsValue(argument));
+  }
+  @Put Parameters In Registers Or On The Stack@
+  @Track Stack Arg Watermark@
+  @Make The Call@
+  @Remove Args From Stack@
+}
+~~~~
+
+We'll add instructions to move the first six parameters (or all of them if there are less than six) into the registers named in the ABI (the <tt>PARAMETERS</tt> array). The values passed on the stack should be in stored reverse order, so the last parameter is furthest in to the stack, and the seventh parameter (the first parameter not stored in a register) is at the top of the stack. The <tt>storeArg</tt> method puts the parameter <tt>Value</tt> at the right index in the stack, but we'll have to cover the stack layout before we see how that works. 
+
+We need to be reasonably careful when moving parameter <tt>Value</tt>s into the <tt>PARAMETERS</tt> register; they should be the last instructions before we execute the <tt>Call</tt> so 
+
+~~~~
+@Put Parameters In Registers Or On The Stack@ +=
+int numArgs = values.size(), 
+    registerArgs = Math.min(numArgs, PARAMETERS.length),
+    storedArgs = numArgs - registerArgs;
+for(int r = storedArgs - 1; r >= 0; --r) {
+  Value arg = values.get(registerArgs + r);
+  @Move Values From Memory@
+  code.add(storeArg(arg, r));
+}
+for(int r = 0; r < registerArgs; ++r) // regs second so they don't get flattened by mem switch
+  code.add(move(values.get(r), PARAMETERS[r]));
+~~~~
+
+We'll also keep track of the most number of stack parameters a function has across any of the calls in its code. This will be useful later when we're laying out the stack memory for this function.
+
+~~~~
+@Parsing State Members@ +=
+private int mostStackArgs = 0;
+@Track Stack Arg Watermark@ +=
+mostStackArgs = Math.max(mostStackArgs, storedArgs);
+~~~~
+
+### The Stack Layout ###
+
+We've gone about as far as we can without explaining what the stack contains at runtime. At runtime, the stack stores memory allocated by a function call (<tt>$</tt> in our language, or [<tt>alloca</tt>](http://man7.org/linux/man-pages/man3/alloca.3.html) in C). The stack also stores the values of variables that can't be stored in registers (when there are too many; we avoid this where possible as RAM access is much slower than register access). Finally, the stack also stores the seventh and later parameter values when calling another function.
+
+The compiler stack memory is laid out in two different ways, depending on whether we know at compile-time how much is needed. The only case where we don't know is if there are dynamic stack allocations (<tt>$</tt> calls) with arguments that aren't <tt>Immediate</tt>s. A function has to leave the stack pointer where it was at the start of the function (note that the <tt>call</tt> instruction pushes the return address on the stack, and the <tt>ret</tt> instruction removes the return address off the stack). We allocate memory on the stack by subtracting the number of bytes needed from the stack pointer (the <tt>rsp</tt> register). The <tt>rsp</tt> register always points to an allocated byte of memory. If we know how many bytes we need at compile time, we can just subtract that number from the stack pointer at the start of the function, and add it back to the stack pointer just before every <tt>ret</tt> in the function's generated code. However, if we don't know how much memory we'll need to allocate, we'll use a [frame pointer](http://en.wikipedia.org/wiki/Call_stack#The_stack_and_frame_pointers). This means we'll store the value of the stack pointer at the start of the function in a <tt>Variable</tt>, and before every <tt>ret</tt> in the function we'll copy this value back into <tt>rsp</tt>.
+
+~~~~
+@Parsing State Members@ +=
+final StorableValue framePointer;
+@Other Helpers@ +=
+static boolean hasDynamicAllocation(Tree t) {
+  if(type(t) == StackAlloc && type(t.getParent(), 1, 0) != Number) return true;
+  for(Tree child : children(t))
+    if(hasDynamicAllocation(child)) return true;
+  return false;
+}
+@Set Up Stack Allocation@ +=
+if(hasDynamicAllocation(get(def, 2))) {
+  framePointer = new Variable();
+  code.add(move(rsp, framePointer));
+} else
+  framePointer = null;
+~~~~
+
+The two methods of laying out the stack memory means we'll generate Assembly code like GCC with the [-fomit-frame-pointer](http://gcc.gnu.org/onlinedocs/gcc-3.4.4/gcc/Optimize-Options.html) option turned on.
+
+
+
 
  This method deals with tearing down 
 Stack frames. [Enter](http://www.read.seas.harvard.edu/~kohler/class/04f-aos/ref/i386/ENTER.htm)
-http://www.agner.org/optimize/calling%5Fconventions.pdf http://blogs.embarcadero.com/eboling/2009/05/20/5607
+
 
 
 
@@ -716,36 +834,12 @@ The types of values
 | Register | No (it's an absolute address) |
 | Label | Always a memory address |
 
-The registers (and their types). NB: omit frame pointer here - and add _THESTACK_ as a synthetic var.
-
-~~~~
-@Value Classes@ +=
-enum Register implements StorableValue {
-  rax, rbx, rcx, rdx, rsp /*stack pointer*/, 
-  rbp /*frame pointer*/, rsi, rdi, r8, r9, 
-  r10, r11, r12, r13, r14, r15, THESTACK,
-  rip /*instruction pointer*/;
-  public String toString() { return String.format("%%%s", name()); }
-  static final Register[] ASSIGNABLE = { 
-    rax, rbx, rcx, rdx, rbp, rsi, rdi, r8, r9, r10, r11, r12, r13, r14, r15, THESTACK 
-  };
-  static final Register[] PARAMETERS = { rdi, rsi, rdx, rcx, r8, r9 };
-}
-~~~~
-
 [Useful lecture notes](http://www.classes.cs.uchicago.edu/archive/2011/spring/22620-1/docs/handout-03.pdf)
-Calling functions [CDECL](http://en.wikipedia.org/wiki/X86_calling_conventions#cdecl).
 We'll flatten nested functions - creating randomly-generated _Labels_ for anonymous functions as needed.
 
 If we have a stack pointer it means we don't know the size of the stack, so we'll use _pushq_ instructions to put arguments on the stack, and we'll pop the arguments off the stack after the function call using an _addq_. However, if we know the stack size exactly we can reserve space on the stack for the parameters at the start of the function, and it'll be reset for free when we leave the function. If there's more than one function we'll reserve space for the function call with the greatest number of stack arguments, so we'll only ever do a single stack allocation and release in the function. However, we don't know if we have a frame pointer until we've processed the whole function, so we'll insert placeholders as we parse calls, and we'll resolve them later.   
 
 ~~~~
-@Static Classes@ +=
-static final class Call extends Instruction {
-  final Value name;
-  Call(Value name) { this.name = name; }
-  public String toString() { @Call x86 Code@ }
-}
 @Parsing State Members@ +=
 Instruction storeArg(Value arg, int position) {
   if(framePointer == null)
@@ -755,7 +849,19 @@ Instruction storeArg(Value arg, int position) {
 }
 ~~~~
 
-Maybe a note on (code) alignment?
+The x86 <tt>mov</tt> instruction doesn't allow both operands to be indirect (i.e. values in memory), however the [push](http://ref.x86asm.net/coder64.html#x50) instruction allows registers and indirect values as its operand. This means if we're not using <tt>Push</tt> instructions to pass parameters on the stack (i.e. if we have dynamic stack memory allocations), so we'll have to load any parameter <tt>Value</tt>s that are in memory: 
+
+~~~~
+@Move Values From Memory@ +=
+if(arg instanceof AtAddress && framePointer != null) {
+  Variable tmp = new Variable(); 
+  code.add(move(arg, tmp));
+  arg = tmp;
+}
+~~~~
+
+
+Maybe a note on (code) alignment?  http://blogs.embarcadero.com/eboling/2009/05/20/5607
 
 ~~~~
 @Other Helpers@ +=
@@ -770,32 +876,7 @@ Immediate alignAllocation() {
 }
 ~~~~
 
-~~~~
-@Parsing State Members@ +=
-private void call(Tree t) {
-  List<Value> values = Lists.newArrayList();
-  for (Tree argument : children(t, 1)) {
-    values.add(getAsValue(argument));
-  }
-  int numArgs = values.size(), 
-      registerArgs = Math.min(numArgs, Register.PARAMETERS.length),
-      storedArgs = numArgs - registerArgs;
-  for(int r = storedArgs - 1; r >= 0; --r) {
-    Value arg = values.get(registerArgs + r);
-    if(arg instanceof AtAddress) {
-      Variable tmp = new Variable(); 
-      code.add(move(arg, tmp));
-      arg = tmp;
-    }
-    code.add(storeArg(arg, r));
-  }
-  for(int r = 0; r < registerArgs; ++r) // regs second so they don't get flattened by mem switch
-    code.add(move(values.get(r), Register.PARAMETERS[r]));
-  @Track Stack Arg Watermark@
-  code.add(new Call(new Label("_" + text(t, 0))));
-  @Remove Args From Stack@
-}
-~~~~
+
 
 ~~~~
 @Remove Args From Stack@ +=
@@ -808,21 +889,7 @@ if(framePointer != null)
 
 Note that we'll assume the function being called is a local variable if it has the same name as a local variable in this function - otherwise it'll be a label which the linker will resolve for us.
 
-~~~~
-@Parsing State Members@ +=
-private int mostStackArgs = 0;
-@Track Stack Arg Watermark@ +=
-mostStackArgs = Math.max(mostStackArgs, storedArgs);
-~~~~
-
 ..and after we've returned:
-
-~~~~
-@Keep the Return Value@ +=
-Variable var = new Variable();
-code.add(move(Register.rax, var));
-return var;
-~~~~
 
 Assignment (to locals and globals)
 
@@ -969,7 +1036,7 @@ private static class Jump extends Instruction {
 
 A while loop is essentially an if block with an unconditional loop
 
-We don't allow dead code, so assume if it is a constant it's a while-true loop.
+We assume if it is a constant it's a while-true loop.
 
 ~~~~
 @Parse A While Statement@ +=
@@ -1040,41 +1107,6 @@ state.code.add(new BinaryOp(
   rsp));
 ~~~~
 
-Memory stuff. Need _MemoryAddress_ interface as we can't have x86 instructions like _movq (%rax), (%rdi)_
-
-~~~~
-@Parse A Dereference@ +=
-Value val = getAsValue(get(t, 1, 0));
-if(val instanceof StorableValue && !(val instanceof AtAddress))
-  return new AtAddress((StorableValue)val, 0);
-else {
-  Variable ret = new Variable();
-  code.add(move(val, ret));
-  return new AtAddress(ret, 0);
-} 
-~~~~
-
-The stack. Each time we refer to a stack-allocated variable we have to get the same memory address. Also we're only doing statically-determined sizes  - otherwise we'd have to keep the size around in a variable and free it every time we left a function (even assuming it's allocated on all code paths through the system). A stack-size-per node count would help with the nudging problem too...maybe we need stackalloc and stackfree functions? But how do we free something that's in the middle of the stack? Maybe have a static function and a dynamic allocation function? 
-
-We'll have two types of stack allocation - static (where we know how many bytes we'll put on the stack at compile-time) and dynamic. This'll affect how we refer to function parameters on the stack and parameters to functions we call. These classes'll therefore need to refer to the _ParsingState_ to see whether we're using dynamic allocation.
-
-~~~~
-@Parsing State Members@ +=
-final StorableValue framePointer;
-@Other Helpers@ +=
-static boolean hasDynamicAllocation(Tree t) {
-  if(t.getType() == StackAlloc && get(t.getParent(), 1, 0).getType() != Number) return true;
-  for(Tree child : children(t))
-    if(hasDynamicAllocation(child)) return true;
-  return false;
-}
-@Set Up Stack Allocation@ +=
-if(hasDynamicAllocation(get(def, 2))) {
-  framePointer = new Variable();
-  code.add(move(rsp, framePointer));
-} else
-  framePointer = null;
-~~~~
 
 We restore the frame pointer for the main function even though we don't need to here so that it's live for the duration of the function.
 
@@ -1176,10 +1208,10 @@ We'll keep a track of offsets below the current frame's pointer (later parameter
 @Parse Function Parameters@ +=
 for(int p = 0, count = numChildren(def, 1); p < count; ++p) {
   Variable v = new Variable(text(def, 1, p));
-  if(p < Register.PARAMETERS.length)
-    code.add(move(Register.PARAMETERS[p], v));
+  if(p < PARAMETERS.length)
+    code.add(move(PARAMETERS[p], v));
   else
-    params.put(v, parameter(p - Register.PARAMETERS.length));
+    params.put(v, parameter(p - PARAMETERS.length));
   @Keep Track Of Declared Parameter@
 }
 ~~~~
@@ -1482,7 +1514,7 @@ When we start a function we want to make sure the registers we're going to prese
 ~~~~
 @Find Registers Already In Use@ +=
 EnumSet<Register> saved = EnumSet.noneOf(Register.class);
-saved.addAll(Arrays.asList(Register.CALLEE_SAVES));
+saved.addAll(Arrays.asList(CALLEE_SAVES));
 Collection<Integer> next;
 for (int n = FIRST_NODE; !saved.isEmpty(); n = Iterables.getOnlyElement(next)) {
   for (Register r : saved)
@@ -1501,7 +1533,7 @@ Once we've restored the saved registers (and the return value!), we don't want t
 Collection<Integer> prev;
 for (int i : instructionsBeforeNode.get(LAST_NODE)) {
   EnumSet<Register> restored = EnumSet.noneOf(Register.class);
-  restored.addAll(Arrays.asList(Register.CALLEE_SAVES));
+  restored.addAll(Arrays.asList(CALLEE_SAVES));
   @Decide Which Registers To Restore@
   for (int n = prevNode[i]; !saved.isEmpty(); n = prevNode[Iterables.getOnlyElement(prev)]) {
     for (Register r : saved)
@@ -1538,7 +1570,7 @@ boolean needsAssigning(int variable, int node, Register r) {
 @Other Helpers@ += 
 private static final BitSet calleeSavesRegisterIndices = new BitSet();
 static {
-  for(Register r : Register.CALLEE_SAVES)
+  for(Register r : CALLEE_SAVES)
     calleeSavesRegisterIndices.set(r.ordinal());
   calleeSavesRegisterIndices.set(Register.THESTACK.ordinal()); // the stack's saved too!
 }
@@ -1581,7 +1613,14 @@ Collections.sort(columns);
 
 The first (and most important) set of unknowns are the _VarInRegAtInstr_ columns: which register each variable is in at each node in the control flow graph, assuming it's live. 
 
-~~~~~
+~~~~
+@Other Helpers@ +=
+  static final Register[] ASSIGNABLE = { 
+    rax, rbx, rcx, rdx, rbp, rsi, rdi, r8, r9, r10, r11, r12, r13, r14, r15, THESTACK 
+  };
+~~~~
+
+~~~~
 @Other Helpers@ +=
 static final class VarInRegAtInstr extends ColumnKey {
   VarInRegAtInstr(int v, Register r, int n) { super(v, r, n); }
