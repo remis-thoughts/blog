@@ -1,5 +1,6 @@
 package com.blogspot.remisthoughts.compiletoasm;
 
+import static com.blogspot.remisthoughts.compiletoasm.Compiler.ASSIGNABLE;
 import static com.blogspot.remisthoughts.compiletoasm.Compiler.indexOf;
 import static org.gnu.glpk.GLPK._glp_lpx_get_mat_row;
 import static org.gnu.glpk.GLPK.doubleArray_getitem;
@@ -92,7 +93,7 @@ class DebugUtils {
 			int n = cfg.prevNode[i];
 			for (int prevN : cfg.prevNodes.get(n)) {
 				for (int v = 0; v < cfg.variables.length; ++v) {
-					for (Register r : Register.ASSIGNABLE) {
+					for (Register r : ASSIGNABLE) {
 						boolean rPrevN;
 						try {
 							rPrevN = Compiler.whereAmI(lpProblem, cfg, v, prevN) == r;

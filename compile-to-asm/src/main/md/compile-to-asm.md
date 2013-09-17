@@ -243,7 +243,6 @@ We'll enforce the distinction between literals and registers using Java's type s
 @Static Classes@ +=
 interface Value {}
 interface StorableValue extends Value {}
-@Value Classes@
 static final class Immediate implements Value {
   final long value;
   Immediate(long value) { this.value = value; }
@@ -256,7 +255,7 @@ static final class Immediate implements Value {
 As we are compiling for a single architecture (x86-64) we can "hard-code" the register names in an enum. The language we're compiling doesn't support floating-point values, so we don't need to include the [eight xmm registers](http://en.wikipedia.org/wiki/Streaming_SIMD_Extensions#Registers) added by the SSE instruction set. This means we can't call other functions that expect floating point values as parameters. The enum also has a dummy value, <tt>THESTACK</tt>. We'll use this in the second section of the article when assigning variables to registers. If we have more variables that available registers we'll store some of them on the stack. The algorithm for deciding which variable goes where will assign variables to the <tt>THESTACK</tt> register to indicate this.
 
 ~~~~
-@Value Classes@ +=
+@Static Classes@ +=
 enum Register implements StorableValue {
   rax, rbx, rcx, rdx, rsp /*stack pointer*/, 
   rbp /*frame pointer*/, rsi, rdi, r8, r9, 
@@ -420,7 +419,6 @@ static final class ParsingState {
     (this.program = program).text.add(code);
     @Get Function Name@
     @Set Up Stack Allocation@
-    @Set Up Alignment@
     @Decide If We Should Use The Red Zone@
     @Identify Callee Saves Registers@
     @Parse Function Parameters@
@@ -613,7 +611,7 @@ Sometimes we'll need to ensure the <tt>Value</tt> is a <tt>StorableValue</tt> as
 @Parsing State Members@ += 
 private StorableValue toStorable(Value v) {
   if (StorableValue.class.isAssignableFrom(v.getClass())) 
-    return (VALUE) v;
+    return (StorableValue) v;
   Variable var = new Variable();
   code.add(move(v, var));
   return var;
@@ -624,7 +622,7 @@ If the AST node is a <tt>Local</tt> it could be a reference to a local variable 
 
 ~~~~
 @Get A Local@ +=
-Variable v = new Variable(text);
+Variable v = new Variable(text(t));
 return params.containsKey(v) ? params.get(v) : v;
 ~~~~
 
@@ -632,7 +630,7 @@ If the expression is a reference to a symbol defined elsewhere, we'll just extra
 
 ~~~~
 @Get A FFI@ +=
-return new Label(text(t).substring(1))
+return new Label(text(t).substring(1));
 ~~~~
 
 <tt>Global</tt> symbols are <tt>Label</tt>s like the (FFI) symbols above, however we have to put them in the generated code's [data segment](http://en.wikipedia.org/wiki/Data_segment). As above we'll add a leading underscore to the variable's name as it appears in the source code to comply with the Linux & OSX ABI. We'll also initialize all the variables to zero. This means that the assembler will write zeros to the data segment of the binary it outputs, and at runtime the [loader (not the linker)](http://www.linuxjournal.com/article/6463) copies these zeros into the addresses of the process that the loader has assigned the corresponding symbols to.
@@ -756,7 +754,6 @@ private void call(Tree t) {
     values.add(getAsValue(argument));
   @Ensure Stack Is Aligned@
   @Put Parameters In Registers Or On The Stack@
-  @Track Stack Arg Watermark@
   @Make The Call@
   @Remove Args From Stack@
 }
@@ -778,15 +775,6 @@ for(int r = storedArgs - 1; r >= 0; --r) {
 }
 for(int r = 0; r < registerArgs; ++r) // regs second so they don't get flattened by mem switch
   code.add(move(values.get(r), PARAMETERS[r]));
-~~~~
-
-We'll also keep track of the most number of stack parameters a function has across any of the calls in its code. This will be useful later when we're laying out the stack memory for this function.
-
-~~~~
-@Parsing State Members@ +=
-private int mostStackArgs = 0;
-@Track Stack Arg Watermark@ +=
-mostStackArgs = Math.max(mostStackArgs, storedArgs);
 ~~~~
 
 ### The Stack Layout ###
@@ -811,6 +799,15 @@ if(hasDynamicAllocation(get(def, 2))) {
   code.add(move(rsp, framePointer));
 } else
   framePointer = null;
+@After Stack Allocation Setup@
+~~~~
+
+The frame pointer is restored in the <tt>addReturn</tt> method, so it gets inserted before every return statement in the source code and as part of the return statement we add at the end of a function if it isn't already there.
+
+~~~~
+@Before Returning From Function@ +=
+if(framePointer != null)
+  code.add(move(framePointer, Register.rsp));
 ~~~~
 
 The two methods of laying out the stack memory means we'll generate Assembly code like GCC with the [-fomit-frame-pointer](http://gcc.gnu.org/onlinedocs/gcc-3.4.4/gcc/Optimize-Options.html) option turned on.
@@ -825,6 +822,8 @@ parameters     | 7th Parameter   |
                +-----------------+
                | Return Address  |
                +-----------------+
+               |Gap for Alignment|
+               +-----------------+
 This           |8-byte Variable  |
 function's     +-----------------+
 statically     |8-byte Variable  |
@@ -832,8 +831,6 @@ allocated      +-----------------+
 stack          |    16-byte      |
 variables      |    Variable     |
                |                 |
-               +-----------------+
-               |Gap for Alignment|
                +-----------------+
 Parameters for | 8th Parameter   |
 functions this +-----------------+
@@ -928,8 +925,200 @@ if(arg instanceof AtAddress && framePointer != null) {
 }
 ~~~~
 
-### Function Parameters ###
+### Stack Variable Allocation ###
 
+There are diagrams of the two different stack layouts we can generate above. We'll go through how we do this now, but we'll start by calculating the amount of space we'll need to reserve in functions that only have static allocations so we can pass parameters to other functions on the stack. We'll traverse the AST depth-first looking for <tt>Call</tt> nodes to <tt>Local</tt> or <tt>Global</tt> functions, returning the most number of <tt>Parameter</tt> nodes seen in a function call, or <tt>null</tt> if the function doesn't make any calls.
+
+~~~~
+@Parsing State Members@ +=
+private Integer mostStackArgs;
+@Other Helpers@ +=
+static Integer mostStackArgs(Tree t) {
+  if(type(t) == Call
+  && (type(t, 0) == Local || type(t, 0) == Global))
+   return numChildren(t.getParent(), 1);
+  Integer ret = null;
+  for(Tree child : children(t)) {
+    Integer childMax = mostStackArgs(child);
+    ret = ret == null ? childMax : (childMax == null ? ret : Ints.max(ret, childMax));
+  }
+  return ret;
+}
+@Set Up Stack Allocation@ +=
+mostStackArgs = mostStackArgs(get(def, 2));
+~~~~
+
+A stack allocation expression is dynamic if we know the size at compile-time, which for this compiler means the argument to the <tt>$</tt> function is an <tt>Immediate</tt> (we said at the beginning this compiler isn't going to attempt to optimise the source code it's given - but [constant propagation](http://en.wikipedia.org/wiki/Constant_folding#Constant_propagation) may help turn dynamic allocations into static ones). Note that a function with dynamic stack allocations can also have static stack allocations, so the compiler will do the static allocation book-keeping for every function.
+
+~~~~
+@Parse A Stack Allocation@ +=
+Variable ret = new Variable();
+Value size = getAsValue(get(t, 1, 0));
+if(size instanceof Immediate) {
+  @Statically Allocate On Stack@
+} else {
+  @Dynamically Allocate On Stack@
+}
+return ret;
+~~~~
+
+To generate the Assembly code we just need the total number of bytes we need to allocate on the stack. We can use a counter of the numnber of bytes of memory we've allocated so far to generate the offset from the top of the stack of new allocations. This means we'll assign the first allocation the compiler comes across to the memory location nearest the top of the stack (so it has the lowest absolute memory address). The last static allocation we make will be in the memory location closest to the start of the stack (so the bytes immediately after the return address put on the stack by the <tt>call</tt> instruction).
+
+The <tt>allocateOnStack</tt> method returns offsets from the top of the function's statically-allocated memory, but when we generate Assembly instructions that access it we have to determine which address to add these offsets to. For a function with no dynamic allocation we can just use the stack pointer, <tt>rsp</tt>, but when a function has  dynamic allocations the stack pointer can change value over the course of a function. Instead we'll use the frame pointer, but as this points to the return address at the other end of the statically-allocated memory (a higher address than the stack pointer) we'll have to add 8 bytes so we don't overwrite the return address.
+
+~~~~
+@Parsing State Members@ +=
+private long stackBytes;
+long allocateOnStack(Immediate bytes) {
+  long ret = stackBytes;
+  stackBytes += bytes.value;
+  return ret; 
+}
+@After Stack Allocation Setup@ +=
+stackBytes = framePointer == null ? 0 : SIZE;
+~~~~
+
+In the System V AMD ABI [the stack grows downwards](http://stackoverflow.com/a/1691818/42543), so we allocate <tt>n</tt> bytes of memory by subtracting <tt>n</tt> from the stack pointer. We can generate a pointer to the lowest address of the allocated memory by taking our "base pointer" (either the stack pointer or the frame pointer) and adding or subtracting (respectively) the offset. We always want the pointer we return to point at the lowest address in the block of memory that was allocated, so if we're counting down from the frame pointer we'll have to subtract an additional <tt>(n - SIZE)</tt> bytes to get there, as the offset would otherwise be pointing to the highest address in the allocated block. Also, if we're counting up from the stack pointer, we must remember to skip over the slots we've allocated for passing parameters to other functions on the stack.
+
+~~~~
+@Parsing State Members@ +=
+StorableValue stackVarsRelativeTo() {
+  return framePointer == null ? rsp : framePointer;
+}
+long stackVarsRelativeOffset(long allocatedOffset) {
+  if(framePointer == null)
+    return allocatedOffset + (mostStackArgs == null ? 0 : mostStackArgs) * SIZE;
+  else
+    return allocatedOffset + stackBytes;
+}
+@Statically Allocate On Stack@ +=
+long offset = allocateOnStack((Immediate)size);
+code.add(move(stackVarsRelativeTo(), ret));
+code.add(new BinaryOp(
+  framePointer == null ? Op.addq : Op.subq,
+  new Immediate(stackVarsRelativeOffset(offset)), 
+  ret));
+~~~~
+
+We can dynamically allocate memory easily by just subtracting the amount of memory we need from the stack pointer. We want the pointer we return to point to the lowest memory address of the block that we've just allocated, but since the stack grows downwards, and since the stack pointer points to an allocated byte of memory then we get these semantics for free. We can just copy the value of <tt>rsp</tt> after we've done the allocation (i.e. subtracted the size we want from the stack pointer) to the return <tt>Value</tt>.
+
+~~~~
+@Dynamically Allocate On Stack@ +=
+code.add(new BinaryOp(Op.subq, size, Register.rsp));
+@Align The Stack@
+code.add(move(Register.rsp, ret));
+~~~~
+
+We've said above that if we call another function we need the stack pointer to be 16-byte aligned, and if a function has dynamic allocations we can ensure this in one of two ways; we can align the stack after every dynamic allocation or we can align the stack before each function call. In both cases "aligning the stack" means allocating between one and 15 bytes by using a <tt>and</tt> instruction to rounding the stack pointer down to a multiple of 16. The compiler currently generates Assembly code that  aligns the stack after every dynamic allocation as [on some CPUs](http://lemire.me/blog/archives/2012/05/31/data-alignment-for-speed-myth-or-reality) accessing aligned memory is faster than accessing unaligned memory.
+
+~~~~
+@Align The Stack@ +=
+code.add(alignStack());
+@Other Helpers@ +=
+static Instruction alignStack() {
+  return new BinaryOp(Op.andq, new Immediate(0xFFFFFFFFFFFFFFF0L), rsp);
+}
+~~~~
+
+We'll add a helper for when the register assignment algorithm needs to temporarily store some variables on the stack. While we could allocate a new 8-byte chunk of memory every time we wanted to "spill" a register to the stack, we know it's safe to re-use a stack allocation if we're spilling the same variable. If we wanted to be even more efficient, instead of using a single <tt>THESTACK</tt> dummy register to let the assignment algorithm tell us we need to spill a variable we could have one dummy register for each live variable (see section two for a definition of liveness), and add hints to the algorithm to make it re-use dummy registers whereever it can. We would then only need to allocate stack space for the dummy registers that were actually used - which should hopefully be fewer than one register per variable spilled.
+
+~~~~
+@Parsing State Members@ +=
+final Map<Variable, Long> spilled = Maps.newTreeMap();
+long spillVariable(Variable v) {
+  Long ret = spilled.get(v);
+  if(ret == null)
+    spilled.put(v, ret = allocateOnStack(new Immediate(SIZE)));
+  return stackVarsRelativeOffset(ret);
+}
+~~~~
+
+Now we have all we need to calculate the number of bytes of memory we should allocate when entering a function. 
+
+One of the reasons we calculated <tt>mostStackArgs</tt> and set it to null if the function didn't call any others was so that we could take advantage of the [red zone](http://en.wikipedia.org/wiki/Red_zone_(computing)). This is a guarantee from [the ABI](http://www.uclibc.org/docs/psABI-x86_64.pdf) that no interrupt handler or other code will write to the (unallocated) 128 bytes below the stack pointer. If we know we're not going to trample on that memory later (via dynamic stack allocations or by calling other functions that will use it to store their return address & stack memory) then we don't need to explicitly allocate it when entering the function. If we were planning on allocating 128 bytes or less on the stack then we can skip the instructions that subtract and restore <tt>rsp</tt> altogether!
+
+~~~~
+@Parsing State Members@ +=
+final boolean useRedZone;
+@Decide If We Should Use The Red Zone@ +=
+useRedZone = mostStackArgs == null && framePointer == null;
+~~~~
+
+Another special case that will affect the number of bytes we have to allocate is the main function. When the main function is called by a new process on OSX the stack pointer in <tt>rsp</tt> is only 8-byte aligned, as this gdb session anecdotally shows:
+
+<pre>
+Starting program: /private/var/folders/HT/HTSjwIiwHaSNfbnpJnpWX++++TI/-Tmp-/2859 
+Breakpoint 1, 0x0000000100010000 in main ()
+(gdb) info register rsp
+rsp            0x7fff5fbff858   0x7fff5fbff858
+(gdb)
+</pre>
+
+However, when we return from the main function we should restore the original value of <tt>rsp</tt> (regardless of its alignment) otherwise we'll [segfault](http://en.wikipedia.org/wiki/Segmentation_fault) and the OSX will terminate the process. We'll therefore generate the code for the main function slightly differently. We'll push the old value of <tt>rsp</tt> onto the stack, and use a <tt>pop</tt> instruction to restore it to <tt>rsp</tt> when we leave. The <tt>Instruction</tt> <tt>alignStack</tt> returns will leave the stack 16-byte aligned, but we expect to be 8-byte aligned at this point (as a function starts 16-byte aligned but then has the 8 byte return address pushed on the stack). This means for the main function we'll allocate up to 15 extra bytes, but other functions we'll allocate up to 7 extra bytes to ensure that the stack is 16-bit aligned after the static memory allocation.
+
+~~~~
+@Parsing State Members@ +=
+boolean isMainFn() {
+  return myName.name.equals("_main");
+}
+@Is This The Main Function@ +=
+if(state.isMainFn()) {
+  state.code.addAll(1, Arrays.asList(
+    new Push(rsp),
+    alignStack()));
+  addBeforeRets(state, new Pop(rsp));
+}
+@Static Classes@ +=
+private static final class Pop extends Instruction {
+  final StorableValue value;
+  Pop(StorableValue value) { this.value = value; }
+  public String toString() { @Pop x86 Code@ }
+}
+~~~~
+
+As we needed to restore the original stack pointer no matter how we left the main function we need a way of finding all the <tt>ret</tt> instructions in the Assembly code we've generated for a function so we can insert an <tt>Instruction</tt> before each of them. The method below does a linear search, and inserts into the middle of the <tt>code</tt> array of <tt>Instruction</tt>s, so is inefficient and can copy a lot of memory. An [unrolled linked list](http://en.wikipedia.org/wiki/Unrolled_linked_list) - like [SGI's rope for strings](http://www.sgi.com/tech/stl/Rope.html) - would be a better data structure to store the generated code in as this random insertion would be reduced to O(1) from O(n).
+
+~~~~
+@Other Helpers@ += 
+static void addBeforeRets(ParsingState state, Instruction inst) {
+  for(int i = 0; i < state.code.size(); ++i)
+    if(state.code.get(i) == ret) 
+      state.code.add(i++, inst);
+}
+~~~~
+
+We now have all the information we need to calculate the total number of static bytes. This method should only be called after the register assignment algorithm, as if that decides to "spill" registers onto the stack it'll allocate 8 bytes per register spilled, which increases the <tt>stackBytes</tt> field and so changes the number the following method returns. Finally, we'll round the number of bytes we need up to the nearest multiple of 16 so the stack remains 16-byte aligned after the allocation.
+
+~~~~
+@Parsing State Members@ +=
+Immediate staticStackBytes() {
+  long ret = stackBytes;
+  if(framePointer == null)
+    ret += mostStackArgs * SIZE;
+  if (useRedZone)
+    ret = Math.max(0, ret - 128);
+  long multipleOf16 = ret + 15 & 0xFFFFFFFFFFFFFFF0L;
+  if(isMainFn())
+    ret = multipleOf16;
+  else
+    ret = ret > multipleOf16 - 8 ? (multipleOf16 + 8) : (multipleOf16 - 8);
+  return new Immediate(ret);
+}
+~~~~
+
+Now we can add Assembly instructions to subtract this number from <tt>rsp</tt> when entering a function and add it when leaving. However, if the function has dynamic stack allocation we must subtract the number of bytes we need from <tt>rsp</tt> after saving the initial value of <tt>rsp</tt> into the frame pointer variable. As we're ignoring the value of <tt>rsp</tt> when we replace it with the frame pointer on leaving the function we don't have to explicitly free the statically-allocated memory by adding to the stack pointer.
+
+~~~~
+@Allocate Stack Space For Variables@ +=
+Immediate staticBytes = state.staticStackBytes();
+state.code.add(
+  state.framePointer == null ? 1 : 2, 
+  new BinaryOp(Op.subq, staticBytes, rsp));
+if(state.framePointer == null)
+  addBeforeRets(state, new BinaryOp(Op.addq, staticBytes, rsp));
+~~~~
+
+### Function Parameters ###
 
 ~~~~
 @Static Classes@ +=
@@ -966,7 +1155,7 @@ for(int p = 0, count = numChildren(def, 1); p < count; ++p) {
 }
 ~~~~
 
-
+### Control Flow Structures ###
 
 
 
@@ -1037,14 +1226,6 @@ declaredVars.add(var);
 
 _ret_ is the return function - and as it takes no arguments we'll just have one global object to represent it.
 
-~~~~
-@Other Helpers@ += 
-static void addBeforeRets(ParsingState state, Instruction inst) {
-  for(int i = 0; i < state.code.size(); ++i)
-    if(state.code.get(i) == ret) 
-      state.code.add(i++, inst);
-}
-~~~~
 
 If statements 
 
@@ -1136,111 +1317,6 @@ if(get(statement, 0, 0).getType() == Number) {
   code.add(new Jump(l, null)); 
   code.add(new Definition(endWhile, false));
 } 
-~~~~
-
-OSX demands 16-byte alignment when we call a function. Unfortunately, when we start at the _main_ entrypoint, the stack is pretty arbitary:
-
-<pre>
-Starting program: /private/var/folders/HT/HTSjwIiwHaSNfbnpJnpWX++++TI/-Tmp-/2859 
-Breakpoint 1, 0x0000000100010000 in main ()
-(gdb) info register rsp
-rsp            0x7fff5fbff858   0x7fff5fbff858
-(gdb)
-</pre>
-
-However, when we return from main we should restore the original _rsp_ (regardless of its alignment) otherwise we'll segfault. We want the stack aligned at all times, but normally when we enter a function we push the return address to the stack, which means we expect to be 8 bytes off alignment when we start.
-
-~~~~
-@Parsing State Members@ +=
-boolean isMainFn() {
-  return myName.name.equals("_main");
-}
-@Is This The Main Function@ +=
-if(state.isMainFn()) {
-  state.code.addAll(1, Arrays.asList(
-    new Push(rsp),
-    alignStack()));
-  addBeforeRets(state, new Pop(rsp));
-}
-private static final class Pop extends Instruction {
-  final StorableValue value;
-  Pop(StorableValue value) { this.value = value; }
-  public String toString() { @Pop x86 Code@ }
-}
-static Instruction alignStack() {
-  return new BinaryOp(Op.andq, new Immediate(0xFFFFFFFFFFFFFFF0L), rsp);
-}
-~~~~
-
-We restore the frame pointer for the main function even though we don't need to here so that it's live for the duration of the function.
-
-~~~~
-@Before Returning From Function@ +=
-if(framePointer != null)
-  code.add(move(framePointer, Register.rsp));
-~~~~
-
-Stack variables are _Values_ that are pointers onto this function's stack space.
-
-~~~~
-@Value Classes@ +=
-static final class StackVar {
-  final long bytesIntoStack; final long size;
-  StackVar(long bytesIntoStack, long size) {
-    this.bytesIntoStack = bytesIntoStack; this.size = size;
-  }
-}
-@Parsing State Members@ +=
-private final Map<Variable, StackVar> stackVars = Maps.newTreeMap();
-private long stackBytes = 0;
-  StackVar stackVar(Variable name, Immediate bytes) {
-  if(!stackVars.containsKey(name)) {
-    stackVars.put(name, new StackVar(stackBytes, bytes.value));
-    stackBytes += bytes.value;
-  } 
-  return stackVars.get(name); 
-}
-~~~~
-
-We'll work out the memory address of a stack variable differently if we have dynamic allocation. However, even with static allocation we don't know how many entries there will be. We'll hand out new offsets as we get requests, but these will be further away from the stack pointer (i.e. closer to the start of the frame).
-
-~~~~
-@Parsing State Members@ +=
-StorableValue stackVarsRelativeTo() {
-  return framePointer == null ? rsp : framePointer;
-}
-long stackVarOffset(StackVar s) {
-  if(framePointer == null)
-    return s.bytesIntoStack; // stack pointer + n bytes
-  else
-    return -(s.bytesIntoStack + SIZE); // frame pointer - (n+8) bytes
-}
-Instruction stackVarOffset(StackVar s, Variable v) {
-  long offset = stackVarOffset(s);
-  return new BinaryOp(
-    offset < 0 ? Op.subq : Op.addq,
-    new Immediate(Math.abs(offset)), 
-    v); 
-}
-~~~~
-
-Create stack variables by subtracting chunks from the stack, or pre-allocating the space if we know it beforehand. Note that the stack grows downwards, but we want the pointer we return to point to the lowest address.
-
-~~~~
-@Parse A Stack Allocation@ +=
-Variable ret = new Variable();
-Value size = getAsValue(get(t, 1, 0));
-if(size instanceof Immediate) {
-  StackVar v = stackVar(ret, (Immediate)size);
-  code.add(move(stackVarsRelativeTo(), ret));
-  code.add(stackVarOffset(v, ret));
-  return ret;
-} else {
-  code.add(new BinaryOp(Op.subq, size, Register.rsp));
-  code.add(alignStack()); // round allocation up to nearest 16 bytes
-  code.add(move(Register.rsp, ret)); // point at lowest allocated byte
-  return ret;
-}
 ~~~~
 
 ## (II) Register Allocation via Linear Programming ##
@@ -1656,7 +1732,7 @@ static final class VarInRegAtInstr extends ColumnKey {
 @Add Column Keys@ +=
 for (int v = 0; v < variables.length; ++v)
   for(int n = 0; n < numNodes; ++n)
-    for (Register r : Register.ASSIGNABLE)
+    for (Register r : ASSIGNABLE)
       if(needsAssigning(v, n, r))
         columns.add(new VarInRegAtInstr(v, r, n));
 ~~~~
@@ -1677,7 +1753,7 @@ private static final double COST_OF_REG_ACCESS = 1.0;
 @Add Column Keys@ +=
 for (int v = 0; v < variables.length; ++v)
   for(int n = 0; n < numNodes; ++n)
-    for (Register r : Register.ASSIGNABLE)
+    for (Register r : ASSIGNABLE)
       if(needsAssigning(v, n, r))
         columns.add(new NewVarInRegFlag( v, r, n));
 ~~~~
@@ -1796,7 +1872,7 @@ static final class AliasedInSameReg extends ColumnKey {
 private static final double ALIASED_VAR_HINT = -0.5;
 @Add Column Keys@ +=
 for(Integer n : aliasingVars.asMap().keySet())
-  for (Register r : Register.ASSIGNABLE)
+  for (Register r : ASSIGNABLE)
     if(r != Register.THESTACK && !registerInUse(n, r))
       columns.add(new AliasedInSameReg(r, n));
 ~~~~
@@ -1881,7 +1957,7 @@ static final class AliasedVarFlag extends RowKey {
 }
 @Add Row Keys@ +=
 for(Integer n : aliasingVars.asMap().keySet())
-  for (Register r : Register.ASSIGNABLE)
+  for (Register r : ASSIGNABLE)
     if(r != Register.THESTACK  && !registerInUse(n, r))
       rows.add(new AliasedVarFlag(r, n));
 ~~~~
@@ -1913,7 +1989,7 @@ static final class OneVarPerReg extends RowKey {
 }
 @Add Row Keys@ +=
 for (int n = 0; n < numNodes; ++n)
-  for (Register r : Register.ASSIGNABLE)
+  for (Register r : ASSIGNABLE)
     if(r != Register.THESTACK)
       if(aliasingVars.containsKey(n)) {
         for(int avoid : aliasingVars.get(n)) {
@@ -1952,7 +2028,7 @@ static final class VarsNotLost extends RowKey {
 for (int v = 0; v < variables.length; ++v)
   for (int n = 0; n < numNodes; ++n) {
     VarsNotLost constraint = new VarsNotLost(v, n);
-    for (Register r : Register.ASSIGNABLE)
+    for (Register r : ASSIGNABLE)
       if(needsAssigning(v, n, r))
         constraint.registers.add(r);
     if(!constraint.registers.isEmpty())
@@ -1965,7 +2041,7 @@ The last pair of constraints ensure that the _NEW_VAR_IN_REG_FLAG_ works as we w
 ~~~~
 @Add Row Keys@ +=
 for (int v = 0; v < variables.length; ++v)
-  for (Register r : Register.ASSIGNABLE)
+  for (Register r : ASSIGNABLE)
     for(Entry<Integer, Integer> n : nextNodes.entries()) {
       if(needsAssigning(v, n.getKey(), r)
       && needsAssigning(v, n.getValue(), r)) 
@@ -2122,7 +2198,7 @@ We know which register each variable is in at each node now (assuming it's live)
 ~~~~
 @Other Helpers@ +=
 static Register whereAmI(glp_prob allocation, ControlFlowGraph controlFlow, int v, int n) {
-  for(Register r : Register.ASSIGNABLE) {
+  for(Register r : ASSIGNABLE) {
     int index = Collections.binarySearch(controlFlow.columns, new VarInRegAtInstr(v, r, n));
     if(index >= 0 && glp_mip_col_val(allocation, index + 1) > 0.5)
         return r;
@@ -2181,7 +2257,7 @@ for(int i = 0; i < state.code.size(); ++i) {
   Map<Value, Value> resolutions = Maps.newHashMap();
   for(Variable variable : state.code.get(i).uses(Variable.class)) {
     int v = indexOf(controlFlow.variables, variable);
-    for (Register r : Register.ASSIGNABLE) {
+    for (Register r : ASSIGNABLE) {
       int index = Collections.binarySearch(controlFlow.columns, new VarInRegAtInstr(v, r, controlFlow.prevNode[i]));
       if(index >= 0 && glp_mip_col_val(allocation, index + 1) > 0.5) // huge tolerance for 0-1 integer
         resolutions.put(variable, r);
@@ -2196,7 +2272,7 @@ for(int i = 0; i < state.code.size(); ++i) {
 Multimap<Integer, Instruction> stackMovesAfter = HashMultimap.create();
 for (int v = 0; v < controlFlow.variables.length; ++v)
   for (int n = 0; n < controlFlow.numNodes; ++n)
-    for(Register r : Register.ASSIGNABLE) {
+    for(Register r : ASSIGNABLE) {
       int index = Collections.binarySearch(controlFlow.columns, new NewVarInRegFlag(v, r, n));
       if(index >= 0 && glp_mip_col_val(allocation, index + 1) > 0.5)
         for(int i : controlFlow.instructionsBeforeNode.get(n)) {
@@ -2220,8 +2296,7 @@ Register whereWasI = whereAmI(allocation, controlFlow, v, controlFlow.prevNode[i
 
 ~~~~
 @Find Where I Live On The Stack@ +=
-long stackOffset = state.stackVarOffset(
-  state.stackVar(controlFlow.variables[v], new Immediate(SIZE)));
+long stackOffset = state.spillVariable(controlFlow.variables[v]);
 ~~~~
 
 Who knows where the stack pointer is? If it's not in a fixed register, check the GLPK solution:
@@ -2390,61 +2465,6 @@ static <I> void topologicalRemove(
   inOrder.add(i);
 }  
 ~~~~
-
-~~~~
-@Parsing State Members@ +=
-final boolean ignoreAlignment;
-@Other Helpers@ +=
-static boolean hasFnCalls(Tree t) {
-  if(t.getType() == Call
-  && get(t,0).getType() != Intrinsic
-  && get(t,0).getType() != Deref
-  && get(t,0).getType() != StackAlloc
-  && get(t,0).getType() != Conditional) return true;
-  for(Tree child : children(t))
-    if(hasFnCalls(child)) return true;
-  return false;
-}
-@Set Up Alignment@ +=
-ignoreAlignment = !hasFnCalls(get(def, 2));
-~~~~
-
-http://en.wikipedia.org/wiki/Red_zone_(computing) . Similar to ignoreAlignment!
-
-~~~~
-@Parsing State Members@ +=
-final boolean useRedZone;
-@Decide If We Should Use The Red Zone@ +=
-useRedZone = !hasFnCalls(get(def, 2));
-~~~~
-
-Now we know how many local vars we need, we can reserve the appropriate amount of space. However, we must preserve 16-byte alignment when we're making function calls, so rather than rounding the stack pointer before every function call we'll just over-allocate 8 bytes of stack space. Also, when we enter a function we'll be 8 bytes off alignment as the call instruction will have pushed the return address. 
-
-~~~~
-@Parsing State Members@ +=
-Immediate staticStackBytes() {
-  long ret = stackBytes;
-  if(framePointer == null)
-    ret += mostStackArgs * SIZE;
-  long overhang = (ret + (isMainFn() || ignoreAlignment ? 0 : SIZE)) % ALIGN_STACK_TO;
-  if (overhang != 0)
-    ret += ALIGN_STACK_TO - overhang;
-  if (useRedZone)
-    ret = Math.max(0, ret - 128);
-  return new Immediate(ret);
-}
-@Allocate Stack Space For Variables@ +=
-Immediate staticBytes = state.staticStackBytes();
-if(staticBytes.value != 0) {
-  state.code.add(
-    state.framePointer == null ? 1 : 2, 
-    new BinaryOp(Op.subq, staticBytes, rsp));
-  if(state.framePointer == null)
-    addBeforeRets(state, new BinaryOp(Op.addq, staticBytes, rsp));
-}
-~~~~
-
-As we're not using _rbp_ to store the stack frame pointer we'll have to adjust the code we need to access a parameter so we subtract the local variables we've allocated, as well as the offset before the stack frame. The code we generate to call functions is important - as we push values onto the stack this offset will increase. We avoid this by calculating all the _Values_ that are going to be passed as parameters first, before pushing them all onto the stack in one go.
 
 ## (III) Writing the Output ##
 
