@@ -2,7 +2,7 @@
 
 ## Introduction ##
 
-This is a [Literate](http://en.wikipedia.org/wiki/Literate_programming) Java implementation of a compiler that uses the integer programming from [this paper](http://grothoff.org/christian/lcpc2006.pdf) to generate x86-64 Assembly code ([AT&T](http://en.wikibooks.org/wiki/X86_Assembly/GAS_Syntax) format) from a toy imperative language. As this article only focuses on code generation, I'll use [antlr](http://www.antlr.org) to generate the lexer & parser from the grammar and will make no attempt to optimise the code being compiled or produce helpful error messages! 
+This is a [Literate](http://en.wikipedia.org/wiki/Literate_programming) Java implementation of a compiler that uses the integer programming from [this paper](http://grothoff.org/christian/lcpc2006.pdf) to generate [x86-64](http://download.intel.com/design/intarch/manuals/24319101.pdf) Assembly code ([AT&T](http://en.wikibooks.org/wiki/X86_Assembly/GAS_Syntax) format) from a toy imperative language. As this article only focuses on code generation, I'll use [antlr](http://www.antlr.org) to generate the lexer & parser from the grammar and will make no attempt to optimise the code being compiled or produce helpful error messages! 
 
 ### The language ###
 
@@ -15,7 +15,7 @@ SC : ';';
 Root;
 @Antlr Parse Rules@ +=
 statement : funcall | ret | assign | whileloop | ifelse;
-eval : ((statement | fundef) SC)+ -> ^(Root fundef* ^(Definition ^(Name Global["main"]) ^(Parameters) ^(Body statement*)));
+eval : ((statement | fundef) SC)+ -> ^(Root fundef* ^(Definition ^(Name Label["main"]) ^(Parameters) ^(Body statement*)));
 ~~~~
 
 The language is Turing-complete, with two C-like control-flow structures. If-statements have an optional else-clause, and both structures use braces to group their statements. Any expression that evaluates to a non-zero number is considered 'true'.
@@ -44,8 +44,8 @@ LP : '('; RP : ')'; C : ','; Definition : 'fn'; Return : 'return';
 Parameters; Call; Name;
 @Antlr Parse Rules@ +=
 funcall : callable LP (expression (C expression)*)? RP -> ^(Call callable ^(Parameters expression*));
-fundef : Definition variable? LP (Local (C Local)*)? RP LB (statement SC)* RB 
-  -> ^(Definition ^(Name variable) ^(Parameters Local*) ^(Body statement*));
+fundef : Definition Label? LP (Variable (C Variable)*)? RP LB (statement SC)* RB 
+  -> ^(Definition ^(Name Label) ^(Parameters Variable*) ^(Body statement*));
 ~~~~
 
 As the language doesn't specify whether numbers are signed or unsigned, all literals are specified in [hex](http://en.wikipedia.org/wiki/Hexadecimal). These literals are [limited](http://stackoverflow.com/questions/2409628/in-antlr-how-do-you-specify-a-specific-number-of-repetitions
@@ -70,15 +70,15 @@ $ nm -r /usr/lib/libc.dylib
   ...
 </pre>
 
-As a stylistic point, we'll force global (exported) variables to be upper case, and local (not-exported) variables to be lower case. However, we can't place restrictions on the names of foreign functions, so we'll prefix them with a '#'.
+As a stylistic point, we'll force global (exported) functions and variables to be upper case, and local (not-exported) functions and variables to be lower case. However, we can't place restrictions on the names of foreign functions, so we'll prefix them with a '#'. We'll also force locally-declared variables to begin with a <tt>$</tt> to disambiguate calls to unexported functions from calls to function pointers stored in variables. An example: say our code has a local (non-exported) function called <tt>my_func</tt> and a function pointer to a different function stored in a local variable called <tt>my_func</tt>. If we try to compile an expression <tt>my_func();</tt> then it's not obvious which of the two functions we should call - and so we'd have to define scoping rules for our language. 
 
 ~~~~
 @Antlr Tokens@ +=
 FFI : '#' ('a'..'z'|'A'..'Z'|'0'..'9'|'_')+;
-Local : '_'* ('a'..'z') ('a'..'z'|'_'|'0'..'9')*;
-Global : '_'* ('A'..'Z') ('A'..'Z'|'_'|'0'..'9')*;
-@Antlr Parse Rules@ +=
-variable : Local | Global;
+fragment Unexported : '_'* ('a'..'z') ('a'..'z'|'_'|'0'..'9')*;
+fragment Exported : '_'* ('A'..'Z') ('A'..'Z'|'_'|'0'..'9')*;
+Variable : '$' Unexported;
+Label : Unexported | Exported;
 ~~~~
 
 The final language feature I'll introduce are "intrinsic" functions, which are built-in functions that compile down to a single Assembly instruction. As this is only a toy language I'll just include intrinsics for some unsigned integer arithmetic operations, like <tt>+</tt> for the [ADD](http://en.wikipedia.org/wiki/X86_instruction_listings) instruction.
@@ -94,7 +94,7 @@ Memory de-refencing and [Stack](http://en.wikipedia.org/wiki/Stack-based_memory_
 @Antlr Tokens@ +=
 Deref : '@'; StackAlloc : '$';
 @Antlr Parse Rules@ +=
-callable : variable| Intrinsic | Conditional | Deref | StackAlloc | FFI;
+callable : Variable | Label | Intrinsic | Conditional | Deref | StackAlloc | FFI;
 ~~~~
 
 The remainder of the grammar arranges these components in a pretty straight-forward imperative style.
@@ -103,8 +103,8 @@ The remainder of the grammar arranges these components in a pretty straight-forw
 @Antlr Tokens@ +=
 Assign : '=';
 @Antlr Parse Rules@ +=
-expression : variable | Number | funcall | FFI;
-assignable : variable | Deref assignable -> ^(Deref assignable) | FFI;
+expression : Variable | Label | Number | funcall | FFI;
+assignable : Variable | Label | Deref assignable -> ^(Deref assignable) | FFI;
 ret : Return expression -> ^(Return expression);
 assign : assignable Assign expression -> ^(Assign assignable expression);
 ~~~~
@@ -119,16 +119,16 @@ WS : (' ' | '\t' | '\r' | '\n') {$channel=HIDDEN;};
 As an example of the langauge, a function to calculate the n'th Fibonacci number (taken from the compiler's [integration tests](https://github.com/remis-thoughts/blog/tree/master/compile-to-asm/src/test/resources/test-code)) is below. Note that this implementation will always terminate as it treats its input argument as an unsigned integer.
 
 <pre>
-fn fibs(nth) {
-  last = 0x1;
-  this = 0x1;  
-  while >(nth, 0x0) {
-    nth = -(nth, 0x1);
-    next = +(this, last);
-    last = this;
-    this = next;
+fn fibs($nth) {
+  $last = 0x1;
+  $this = 0x1;  
+  while >($nth, 0x0) {
+    $nth = -($nth, 0x1);
+    $next = +($this, $last);
+    $last = $this;
+    $this = $next;
   };  
-  return this;
+  return $this;
 };
 </pre>
 
@@ -244,11 +244,11 @@ We'll enforce the distinction between literals and registers using Java's type s
 interface Value {}
 interface StorableValue extends Value {}
 static final class Immediate implements Value {
-  final long value;
-  Immediate(long value) { this.value = value; }
-  public boolean equals(Object o) { return o instanceof Immediate && ((Immediate)o).value == value;}
+  final Supplier<Long> value;
+  Immediate(long value) { this.value = Suppliers.ofInstance(value); }
+  Immediate(Supplier<Long> value) { this.value = value; }
+  public boolean equals(Object o) { return o instanceof Immediate && ((Immediate)o).value.equals(value);}
   public String toString() { @Immediate x86 Code@ }
-  @Immediate Members@
 }
 ~~~~
 
@@ -345,14 +345,14 @@ static final class Label implements StorableValue, Comparable<Label> {
 }
 ~~~~
 
-We'll add an <tt>Instruction</tt> that defines a label; the <tt>isGlobal</tt> flag is true if this symbol should be marked as exported in the GOT. As labels have to be unique (i.e. only appear once in a file) the equality test doesn't check the <tt>isGlobal</tt> flag.
+We'll add an <tt>Instruction</tt> that defines a label; the <tt>isExported</tt> flag is true if this symbol should be marked as exported in the GOT. As labels have to be unique (i.e. only appear once in a file) the equality test doesn't check the <tt>isExported</tt> flag.
 
 ~~~~
 @Static Classes@ +=
 static final class Definition extends Instruction {
-  final Label label; final boolean isGlobal; 
-  Definition(Label label, boolean isGlobal) { 
-    this.label = label; this.isGlobal = isGlobal; 
+  final Label label; final boolean isExported; 
+  Definition(Label label, boolean isExported) { 
+    this.label = label; this.isExported = isExported; 
   }
   public boolean equals(Object o) { 
     return o instanceof Definition && ((Definition)o).label.equals(label);
@@ -413,7 +413,6 @@ static final class ParsingState {
   List<Instruction> code = Lists.newArrayList();
   Map<Variable, StorableValue> params = Maps.newTreeMap(); 
   ProgramState program;
-  Set<Variable> declaredVars = Sets.newTreeSet();
   Label myName;
   ParsingState(Tree def, ProgramState program) {
     (this.program = program).text.add(code);
@@ -433,23 +432,23 @@ static final class ParsingState {
 A typical function definition AST looks like this:
 
 <pre>
-                               +-----+  +-----+    +-----+
-                               |Local|  |Local|    |Local|
-                               | "c" |  | "b" |    | "c" |
-                               +-----+  +-----+    +-----+
-                                  ^        ^          ^
-                                  +---+----+          |
-+-------------+ +-----+ +-----+   +---+--+        +---+--+
-|    Global   | |Local| |Local|   |Assign|        |Return|
-|"hello_world"| | "a" | | "b" |   +------+        +------+
-+-------------+ +-----+ +-----+      ^                ^
-       ^           ^       ^         +--------+-------+
-       |           +---+---+                  |
-     +-+--+      +-----+----+              +--+-+
-     |Name|      |Parameters|              |Body|
-     +----+      +----------+              +----+
-       ^               ^                      ^
-       +---------------+----------------------+
+                                +--------+ +--------+  +--------+
+                                |Variable| |Variable|  |Variable|
+                                |  "c"   | |  "b"   |  |  "c"   |
+                                +--------+ +--------+  +--------+
+                                       ^        ^          ^
+                                       +---+----+          |
++-------------+ +--------+ +--------+  +---+--+        +---+--+
+|    Label    | |Variable| |Variable|  |Assign|        |Return|
+|"hello_world"| |  "a"   | |  "b"   |  +------+        +------+
++-------------+ +--------+ +--------+     ^                ^
+       ^             ^       ^            +--------+-------+
+       |             +---+---+                     |
+     +-+--+        +-----+----+                 +--+-+
+     |Name|        |Parameters|                 |Body|
+     +----+        +----------+                 +----+
+       ^               ^                           ^
+       +---------------+---------------------------+
                  +-----+----+
                  |Definition|
                  +----------+  
@@ -473,7 +472,7 @@ private static Iterable<Tree> children(Tree from, int... indices){
 }
 ~~~~
 
-For example, <tt>children(&lt;the definition node&gt;, 2)</tt> would return a list containing the "Assign" and "Return" nodes, and <tt>get(&lt;the body node&gt;, 0, 1)</tt> would return the Local "b" node.
+For example, <tt>children(&lt;the definition node&gt;, 2)</tt> would return a list containing the "Assign" and "Return" nodes, and <tt>get(&lt;the body node&gt;, 0, 1)</tt> would return the Variable "b" node.
 
 It turns out that we can parse each statement of a function independently. However, as a return statement is optional in the language we'll add a <tt>ret</tt> instruction to the generated Assembly code if there's not one. As we'll see later, this will return whatever's in the <tt>rax</tt> register as the return value of the function. We'll return the function's symbol as a <tt>Label</tt> in case the calling code needs to assign it to a variable, but doesn't know what the function's name will be (e.g. if this function is anonymous).
 
@@ -490,6 +489,16 @@ static Label parseDefinition(Tree def, ProgramState program) {
   @Is This The Main Function@
   return state.myName;
 }
+~~~~
+
+The first instruction we need to generate is the Assembly label that marks the start of our function in the generated code. We'll add a leading underscore to the variable's name as it appears in the source code to comply with the [Linux & OSX ABI](http://stackoverflow.com/questions/2627511/why-do-c-compilers-prepend-underscores-to-external-names). If the function is anonymous (there's no name in the source code) we'll generate a random one (using the <tt>new Label()</tt> constructor) and ensure that that function isn't exported.
+
+~~~~
+@Get Function Name@ +=
+myName = hasChildren(def, 0) ? new Label("_" + text(def, 0, 0)) : new Label();
+code.add(new Definition(
+  myName, 
+  hasChildren(def, 0) && text(def, 0, 0).equals(text(def, 0, 0).toUpperCase())));
 ~~~~
 
 What we do for each statement depends on the statement's type, so we'll switch on that:
@@ -560,18 +569,18 @@ We'll return to <tt>getAsValue</tt>. In a similar way to <tt>parseStatements</tt
 
 <pre>
                     +------------+
-                    |   Local    |
+                    |  Variable  |
                     |"my_address"|
                     +------------+
                            ^
         +-----------+   +--+--+
-        |  Global   |   |Deref|
+        |  Label    |   |Deref|
         |"MY_GLOBAL"|   +-----+
         +-----------+      ^
                ^           |
                +-----+-----+
 +---------+    +-----+----+
-|  Local  |    |Parameters|
+|Variable |    |Parameters|
 |"my_func"|    +----------+
 +---------+          ^
     ^                |
@@ -589,10 +598,10 @@ private Value getAsValue(Tree t) {
       switch (t.getType()) {
         case Definition:
             return parseDefinition(t, program);
-        case Global:
-            { @Get A Global@ }
-        case Local:
-            { @Get A Local@ }
+        case Label:
+            { @Get A Label@ }
+        case Variable:
+            { @Get A Variable@ }
         case FFI:
             { @Get A FFI@ }
         case Call:
@@ -618,11 +627,11 @@ private StorableValue toStorable(Value v) {
 }
 ~~~~
 
-If the AST node is a <tt>Local</tt> it could be a reference to a local variable defined in this function or a reference to one of the parameters (as they are AST nodes of type <tt>Local</tt> too). We've seen that one of the <tt>ParsingState</tt>'s fields is a <tt>Map</tt> of <tt>Variable</tt> names to <tt>Value</tt>s that access those parameters (but not how that map's built up yet). We'll look up our new <tt>Variable</tt> in this map to see if it's actually a reference to one of the function parameter - and if so we'll return the <tt>StorableValue</tt> that accesses it instead.
+If the AST node is a <tt>Variable</tt> it could be a reference to a local variable defined in this function or a reference to one of the parameters (as they are AST nodes of type <tt>Variable</tt> too). We've seen that one of the <tt>ParsingState</tt>'s fields is a <tt>Map</tt> of <tt>Variable</tt> names to <tt>Value</tt>s that access those parameters (but not how that map's built up yet). We'll look up our new <tt>Variable</tt> in this map to see if it's actually a reference to one of the function parameter - and if so we'll return the <tt>StorableValue</tt> that accesses it instead.
 
 ~~~~
-@Get A Local@ +=
-Variable v = new Variable(text(t));
+@Get A Variable@ +=
+Variable v = new Variable(text(t).substring(1));
 return params.containsKey(v) ? params.get(v) : v;
 ~~~~
 
@@ -633,10 +642,10 @@ If the expression is a reference to a symbol defined elsewhere, we'll just extra
 return new Label(text(t).substring(1));
 ~~~~
 
-<tt>Global</tt> symbols are <tt>Label</tt>s like the (FFI) symbols above, however we have to put them in the generated code's [data segment](http://en.wikipedia.org/wiki/Data_segment). As above we'll add a leading underscore to the variable's name as it appears in the source code to comply with the Linux & OSX ABI. We'll also initialize all the variables to zero. This means that the assembler will write zeros to the data segment of the binary it outputs, and at runtime the [loader (not the linker)](http://www.linuxjournal.com/article/6463) copies these zeros into the addresses of the process that the loader has assigned the corresponding symbols to.
+<tt>Label</tt>s are symbols like the (FFI) symbols above, however we have to put them in the generated code's [data segment](http://en.wikipedia.org/wiki/Data_segment). We'll add a leading <tt>_</tt> to the name in the source code as we did when generating the function's name, and we'll also make sure the variables are initialized to zero. This means that the assembler will write zeros to the data segment of the binary it outputs, and at runtime the [loader (not the linker)](http://www.linuxjournal.com/article/6463) copies these zeros into the addresses of the process that the loader has assigned the corresponding symbols to.
 
 ~~~~
-@Get A Global@ +=
+@Get A Label@ +=
 Label ret = new Label("_" + text(t));
 if(!program.globals.containsKey(ret))
   program.globals.put(ret, new Immediate(0));
@@ -655,8 +664,8 @@ The remaining case in <tt>getAsValue</tt> deals with <tt>Call</tt> nodes in the 
 ~~~~
 @Get A Call@ +=
 switch(type(t, 0)) {
-  case Local:
-  case Global:
+  case Label:
+  case Variable:
   case FFI:
     { @Parse A Function Call@ }
   case Intrinsic: 
@@ -712,7 +721,7 @@ else {
 
 ### Function Calls ###
 
-An architecture's [calling convention](http://www.agner.org/optimize/calling%5Fconventions.pdf) determines where to put a function's arguments before jumping to the first instruction of that function, where to read the return value from when control flow returns and how many bytes the stack should be aligned to. While 32-bit x86 architectures have a huge variety ([the list](http://en.wikipedia.org/wiki/X86_calling_conventions#List_of_x86_calling_conventions) includes cdecl, stdcall, fastcall & thiscall) the x86-64 landscape is a lot simpler. This compiler will output code that uses the [System V AMD ABI](http://people.freebsd.org/~obrien/amd64-elf-abi.pdf), which is used by the Linux, BSD & OSX OSes. The [Microsoft x86] convention (http://msdn.microsoft.com/en-us/library/9b372w95%28v=VS.80%29.aspx) only differs slightly - fewer function parameters are passed in registers - so it should be relatively simple to modify the compiler to produce Windows-compatible Assembly code.
+An architecture's [calling convention](http://www.agner.org/optimize/calling%5Fconventions.pdf) determines where to put a function's arguments before jumping to the first instruction of that function, where to read the return value from when control flow returns and how many bytes the stack should be aligned to. While 32-bit x86 architectures have a huge variety ([the list](http://en.wikipedia.org/wiki/X86_calling_conventions#List_of_x86_calling_conventions) includes cdecl, stdcall, fastcall & thiscall) the x86-64 landscape is a lot simpler. This compiler will output code that uses the [System V AMD ABI](http://people.freebsd.org/~obrien/amd64-elf-abi.pdf), which is used by the Linux, BSD & OSX OSes ([here's](http://www.classes.cs.uchicago.edu/archive/2011/spring/22620-1/docs/handout-03.pdf) a brief overview). The [Microsoft x86] convention (http://msdn.microsoft.com/en-us/library/9b372w95%28v=VS.80%29.aspx) only differs slightly - fewer function parameters are passed in registers - so it should be relatively simple to modify the compiler to produce Windows-compatible Assembly code.
 
 However, both x86-64 conventions agree that 64-bit integers are returned in the <tt>rax</tt> register:
 
@@ -756,6 +765,7 @@ private void call(Tree t) {
   @Put Parameters In Registers Or On The Stack@
   @Make The Call@
   @Remove Args From Stack@
+  @Function Call Bookkeeping@
 }
 ~~~~
 
@@ -927,25 +937,18 @@ if(arg instanceof AtAddress && framePointer != null) {
 
 ### Stack Variable Allocation ###
 
-There are diagrams of the two different stack layouts we can generate above. We'll go through how we do this now, but we'll start by calculating the amount of space we'll need to reserve in functions that only have static allocations so we can pass parameters to other functions on the stack. We'll traverse the AST depth-first looking for <tt>Call</tt> nodes to <tt>Local</tt> or <tt>Global</tt> functions, returning the most number of <tt>Parameter</tt> nodes seen in a function call, or <tt>null</tt> if the function doesn't make any calls.
+There are diagrams of the two different stack layouts we can generate above. We'll go through how we do this now, but we'll start by calculating the amount of space we'll need to reserve in functions that only have static allocations so we can pass parameters to other functions on the stack. When we're compiling function calls we'll keep track of the most number of parameters passed on the stack that we've seen. We'll keep this in an <tt>Integer</tt> (not a primitive <tt>int</tt>) field so we can leave it as <tt>null</tt> if the function doesn't make any calls.
 
 ~~~~
 @Parsing State Members@ +=
 private Integer mostStackArgs;
-@Other Helpers@ +=
-static Integer mostStackArgs(Tree t) {
-  if(type(t) == Call
-  && (type(t, 0) == Local || type(t, 0) == Global))
-   return numChildren(t.getParent(), 1);
-  Integer ret = null;
-  for(Tree child : children(t)) {
-    Integer childMax = mostStackArgs(child);
-    ret = ret == null ? childMax : (childMax == null ? ret : Ints.max(ret, childMax));
-  }
-  return ret;
+@Function Call Bookkeeping@ +=
+if(storedArgs > 0) {
+  if(mostStackArgs == null)
+    mostStackArgs = storedArgs;
+  else
+    mostStackArgs = Math.max(mostStackArgs, storedArgs);
 }
-@Set Up Stack Allocation@ +=
-mostStackArgs = mostStackArgs(get(def, 2));
 ~~~~
 
 A stack allocation expression is dynamic if we know the size at compile-time, which for this compiler means the argument to the <tt>$</tt> function is an <tt>Immediate</tt> (we said at the beginning this compiler isn't going to attempt to optimise the source code it's given - but [constant propagation](http://en.wikipedia.org/wiki/Constant_folding#Constant_propagation) may help turn dynamic allocations into static ones). Note that a function with dynamic stack allocations can also have static stack allocations, so the compiler will do the static allocation book-keeping for every function.
@@ -968,36 +971,50 @@ The <tt>allocateOnStack</tt> method returns offsets from the top of the function
 
 ~~~~
 @Parsing State Members@ +=
-private long stackBytes;
+private long stackBytes = 0;
 long allocateOnStack(Immediate bytes) {
   long ret = stackBytes;
-  stackBytes += bytes.value;
+  stackBytes += bytes.value.get();
   return ret; 
 }
-@After Stack Allocation Setup@ +=
-stackBytes = framePointer == null ? 0 : SIZE;
 ~~~~
 
 In the System V AMD ABI [the stack grows downwards](http://stackoverflow.com/a/1691818/42543), so we allocate <tt>n</tt> bytes of memory by subtracting <tt>n</tt> from the stack pointer. We can generate a pointer to the lowest address of the allocated memory by taking our "base pointer" (either the stack pointer or the frame pointer) and adding or subtracting (respectively) the offset. We always want the pointer we return to point at the lowest address in the block of memory that was allocated, so if we're counting down from the frame pointer we'll have to subtract an additional <tt>(n - SIZE)</tt> bytes to get there, as the offset would otherwise be pointing to the highest address in the allocated block. Also, if we're counting up from the stack pointer, we must remember to skip over the slots we've allocated for passing parameters to other functions on the stack.
 
-~~~~
-@Parsing State Members@ +=
-StorableValue stackVarsRelativeTo() {
-  return framePointer == null ? rsp : framePointer;
-}
-long stackVarsRelativeOffset(long allocatedOffset) {
-  if(framePointer == null)
-    return allocatedOffset + (mostStackArgs == null ? 0 : mostStackArgs) * SIZE;
-  else
-    return allocatedOffset + stackBytes;
-}
+~~~
 @Statically Allocate On Stack@ +=
 long offset = allocateOnStack((Immediate)size);
-code.add(move(stackVarsRelativeTo(), ret));
-code.add(new BinaryOp(
-  framePointer == null ? Op.addq : Op.subq,
-  new Immediate(stackVarsRelativeOffset(offset)), 
-  ret));
+if(framePointer == null) {
+  code.add(move(rsp, ret));
+  code.add(new BinaryOp(
+    Op.addq,
+    new Immediate(new StaticStackVarLocation(this, offset)), 
+    ret));
+} else {
+  code.add(move(framePointer, ret));
+  code.add(new BinaryOp(
+    Op.subq,
+    new Immediate(offset + ((Immediate)size).value.get() + SIZE), 
+    ret));
+}
+~~~~
+
+As we're updating the <tt>mostStackArgs</tt> field as we come across function calls we don't know the final value of <tt>mostStackArgs</tt> until we've processed the whole function. We'll therefore use laziness to delay the calculation of the memory locations in functions that only statically allocate memory on the stack. 
+
+~~~~
+@Static Classes@ +=
+static class StaticStackVarLocation implements com.google.common.base.Supplier<Long> {
+  final ParsingState state; final long offset;
+  StaticStackVarLocation(ParsingState state, long offset) {
+    this.state = state; this.offset = offset;
+  }
+  public Long get() {
+    if(state.mostStackArgs == null)
+      return offset;
+    else
+      return offset + state.mostStackArgs * SIZE;
+  }
+}
 ~~~~
 
 We can dynamically allocate memory easily by just subtracting the amount of memory we need from the stack pointer. We want the pointer we return to point to the lowest memory address of the block that we've just allocated, but since the stack grows downwards, and since the stack pointer points to an allocated byte of memory then we get these semantics for free. We can just copy the value of <tt>rsp</tt> after we've done the allocation (i.e. subtracted the size we want from the stack pointer) to the return <tt>Value</tt>.
@@ -1025,11 +1042,14 @@ We'll add a helper for when the register assignment algorithm needs to temporari
 ~~~~
 @Parsing State Members@ +=
 final Map<Variable, Long> spilled = Maps.newTreeMap();
-long spillVariable(Variable v) {
-  Long ret = spilled.get(v);
-  if(ret == null)
-    spilled.put(v, ret = allocateOnStack(new Immediate(SIZE)));
-  return stackVarsRelativeOffset(ret);
+Supplier<Long> spillVariable(Variable v) {
+  Long offset = spilled.get(v);
+  if(offset == null)
+    spilled.put(v, offset = allocateOnStack(new Immediate(SIZE)));
+  if(framePointer == null)
+    return new StaticStackVarLocation(this, offset);
+  else
+    return Suppliers.ofInstance(offset + 2 * SIZE);
 }
 ~~~~
 
@@ -1076,6 +1096,8 @@ private static final class Pop extends Instruction {
 }
 ~~~~
 
+It's worth mentioning that the magic string "main" is imposed by the standard library our generated Assembly code should be linked against. The [standard library isn't necessary](https://blogs.oracle.com/ksplice/entry/hello_from_a_libc_free); the linker actually looks for a <tt>_start</tt> symbol as the entry point to a compiled programme. Libc's implementation of <tt>_start</tt> [initialises the standard library](http://stackoverflow.com/a/7977208/42543) before calling the <tt>_main</tt> function. 
+
 As we needed to restore the original stack pointer no matter how we left the main function we need a way of finding all the <tt>ret</tt> instructions in the Assembly code we've generated for a function so we can insert an <tt>Instruction</tt> before each of them. The method below does a linear search, and inserts into the middle of the <tt>code</tt> array of <tt>Instruction</tt>s, so is inefficient and can copy a lot of memory. An [unrolled linked list](http://en.wikipedia.org/wiki/Unrolled_linked_list) - like [SGI's rope for strings](http://www.sgi.com/tech/stl/Rope.html) - would be a better data structure to store the generated code in as this random insertion would be reduced to O(1) from O(n).
 
 ~~~~
@@ -1087,147 +1109,220 @@ static void addBeforeRets(ParsingState state, Instruction inst) {
 }
 ~~~~
 
-We now have all the information we need to calculate the total number of static bytes. This method should only be called after the register assignment algorithm, as if that decides to "spill" registers onto the stack it'll allocate 8 bytes per register spilled, which increases the <tt>stackBytes</tt> field and so changes the number the following method returns. Finally, we'll round the number of bytes we need up to the nearest multiple of 16 so the stack remains 16-byte aligned after the allocation.
+We now have all the information we need to calculate the total number of static bytes. This logic is in a <tt>Supplier</tt> so we can delay evaluation until after the register assignment algorithm, as if that decides to "spill" registers onto the stack it'll allocate 8 bytes per register spilled, which increases the <tt>stackBytes</tt> field and so changes the number of bytes we need to allocate. We'll round the number of bytes we need up to the nearest multiple of 16 so the stack remains 16-byte aligned after the allocation.
 
 ~~~~
-@Parsing State Members@ +=
-Immediate staticStackBytes() {
-  long ret = stackBytes;
-  if(framePointer == null)
-    ret += mostStackArgs * SIZE;
-  if (useRedZone)
-    ret = Math.max(0, ret - 128);
-  long multipleOf16 = ret + 15 & 0xFFFFFFFFFFFFFFF0L;
-  if(isMainFn())
-    ret = multipleOf16;
-  else
-    ret = ret > multipleOf16 - 8 ? (multipleOf16 + 8) : (multipleOf16 - 8);
-  return new Immediate(ret);
+@Static Classes@ +=
+static final class StaticStackBytes implements com.google.common.base.Supplier<Long> {
+  final ParsingState state;
+  StaticStackBytes(ParsingState state) {
+    this.state = state;
+  }
+  public Long get() {
+    long ret = state.stackBytes;
+    if(state.framePointer == null 
+    && state.mostStackArgs != null)
+      ret += state.mostStackArgs * SIZE;
+    if (state.useRedZone)
+      ret = Math.max(0, ret - 128);
+    long multipleOf16 = ret + 15 & 0xFFFFFFFFFFFFFFF0L;
+    if(state.isMainFn())
+      return multipleOf16;
+    else
+      return ret > multipleOf16 - 8 ? (multipleOf16 + 8) : (multipleOf16 - 8);
+  }
 }
 ~~~~
 
-Now we can add Assembly instructions to subtract this number from <tt>rsp</tt> when entering a function and add it when leaving. However, if the function has dynamic stack allocation we must subtract the number of bytes we need from <tt>rsp</tt> after saving the initial value of <tt>rsp</tt> into the frame pointer variable. As we're ignoring the value of <tt>rsp</tt> when we replace it with the frame pointer on leaving the function we don't have to explicitly free the statically-allocated memory by adding to the stack pointer.
+Now we can add Assembly instructions to subtract this number from <tt>rsp</tt> when entering a function and add it when leaving. However, if the function has dynamic stack allocation we must subtract the number of bytes we need from <tt>rsp</tt> after saving the initial value of <tt>rsp</tt> into the frame pointer variable. As we're ignoring the value of <tt>rsp</tt> when we replace it with the frame pointer on leaving the function we don't have to explicitly free the statically-allocated memory by adding to the stack pointer. We don't need to do this for the main function as we're going to overwrite <tt>rsp</tt> with the value we <tt>pop</tt> off the stack.
 
 ~~~~
 @Allocate Stack Space For Variables@ +=
-Immediate staticBytes = state.staticStackBytes();
+Immediate bytes = new Immediate(new StaticStackBytes(state));
 state.code.add(
   state.framePointer == null ? 1 : 2, 
-  new BinaryOp(Op.subq, staticBytes, rsp));
-if(state.framePointer == null)
-  addBeforeRets(state, new BinaryOp(Op.addq, staticBytes, rsp));
+  new BinaryOp(Op.subq, bytes, rsp));
+if(state.framePointer == null && !state.isMainFn())
+  addBeforeRets(
+    state, 
+    new BinaryOp(Op.addq, bytes, rsp));
 ~~~~
 
 ### Function Parameters ###
 
+Working out the memory address of parameters that have been passed on the stack to the function we're compiling is much like working out the memory address of a variable allocated on the stack. We need to find the memory address of the top of the stack (the frame pointer if the function has dynamic stack allocation, the stack pointer plus the total amount of memory we've reserved for the function otherwise), and count 8 bytes into the previous stack frame each stack parameter. As above, if we need to know how many bytes this function's allocated on the stack we have to delay the calculation using the <tt>Supplier</tt> interface until after we've run the register assignment algorithm. Once we've found the start of the stack frame (regardless of method), we count <tt>(number + 1) * SIZE</tt> bytes upwards. <tt>number</tt> will be 0 for the seventh parameter of the function (the first one passed on the stack), 1 for the eighth, and so on. We need the <tt>+ 1</tt> as the top of the stack frame (where the frame pointer points) is the 8-byte return address, which we need to skip over.
+
 ~~~~
-@Static Classes@ +=
-static final class Parameter implements com.google.common.base.Supplier<Long> {
-  final ParsingState function; final int number;
-  Parameter(ParsingState function, int number) {
-    this.function = function; this.number = number; 
-  }
-  public Long get() {
-    return (number + 1) * SIZE + function.staticStackBytes().value;
-  }
-}
 @Parsing State Members@ +=
 StorableValue parameter(int number) {
-  if (framePointer == null) {
-    return new AtAddress(rsp, new Parameter(this, number));
-  } else {
-    return new AtAddress(framePointer, (number + 1) * SIZE);
+  if (framePointer == null)
+    return new AtAddress(
+      rsp, 
+      new Parameter(new StaticStackBytes(this), number));
+  else
+    return new AtAddress(
+      framePointer, 
+      (number + 1) * SIZE);
+}
+@Static Classes@ +=
+static final class Parameter implements com.google.common.base.Supplier<Long> {
+  final Supplier<Long> stackBytes; final int number;
+  Parameter(Supplier<Long> stackBytes, int number) {
+    this.stackBytes = stackBytes; this.number = number; 
+  }
+  public Long get() {
+    return (number + 1) * SIZE + stackBytes.get();
   }
 }
 ~~~~
 
-We'll keep a track of offsets below the current frame's pointer (later parameters get bigger offsets) - and we'll either subtract these from the frame pointer or subtract these plus static allocation size from the stack pointer depending on whether we're doing statci+dynamic or static-only allocation.
+When we first enter a function the parameter values will either be in the <tt>PARAMETERS</tt> registers or on the stack. We want to move these values into the <tt>Variable</tt>s used in the source code for the parameters. We'll insert <tt>mov</tt> instructions at the start of the function to save a copy of the parameter values passed in registers into their corresponding <tt>Variable</tt>s. However, for parameter values passed on the stack we have two options: we can similarly insert <tt>mov</tt> instructions at the start of the function to load the parameter values into registers from memory, or we can just replace all reads and writes to that parameter <tt>Variable</tt> in the function's code with reads and writes to the memory address where the parameter value was originally stored. Adding instructions at the start means each stack parameter adds another <tt>Variable</tt> to the function, which increases [register pressure](http://en.wikipedia.org/wiki/Register_pressure) as more <tt>Variable</tt>s are competing for space in the limited number of hardware registers. We'll make our compiler generate Assembly code for the latter - so we'll use the <tt>params</tt> field to map <tt>Variable</tt>s we come across in the source code to <tt>AtAddress</tt> <tt>Value</tt>s that point to where the parameter lives on the stack.
 
 ~~~~
 @Parse Function Parameters@ +=
 for(int p = 0, count = numChildren(def, 1); p < count; ++p) {
-  Variable v = new Variable(text(def, 1, p));
+  Variable v = new Variable(text(def, 1, p).substring(1));
   if(p < PARAMETERS.length)
     code.add(move(PARAMETERS[p], v));
   else
     params.put(v, parameter(p - PARAMETERS.length));
-  @Keep Track Of Declared Parameter@
 }
 ~~~~
 
-### Control Flow Structures ###
+### Assignments ###
 
-
-
-
- This method deals with tearing down 
-Stack frames. [Enter](http://www.read.seas.harvard.edu/~kohler/class/04f-aos/ref/i386/ENTER.htm)
-Generate x86 GAS code - you could probably use a factory to create the _Instruction_ objects if you wanted to support more than one architecture. See [this](http://stackoverflow.com/a/2752639/42543) for why _.type_ isn't supported on mac. See [lib-c free](https://blogs.oracle.com/ksplice/entry/hello_from_a_libc_free). https://developer.apple.com/library/mac/#documentation/DeveloperTools/Reference/Assembler/000-Introduction/introduction.html . [Instruction set (pdf)](http://download.intel.com/design/intarch/manuals/24319101.pdf). 
-
-[Useful lecture notes](http://www.classes.cs.uchicago.edu/archive/2011/spring/22620-1/docs/handout-03.pdf)
-
-
-Assignment (to locals and globals)
+We can now cover the three remaining <tt>statement</tt> nodes. Assignments can change the value of a <tt>Variable</tt>, a value stored at a memory address a <tt>Variable</tt> points to or the value stored in memory pointed to by a <tt>Label</tt>. However, an assignment can't change the memory address a <tt>Label</tt> points to. 
 
 ~~~~
 @Parse An Assign Statement@ +=
+@Evaluate The Expression To Assign@
+@Count Number Of Dereferences@
+@Prepare Target@
+@Prepare Source@
+@Generate Mov Instructions@
+~~~~
+
+We'll start by evaluating the right hand side of the assignment statement - this is the value that we have to update the left hand side with.
+
+~~~~
+@Evaluate The Expression To Assign@ +=
 Value expr = getAsValue(get(statement, 1));
+~~~~
+
+Assignment statements can contain arbitary levels of indirection; <tt>@@$a = 0x1;</tt> will store the value <tt>1</tt> at the memory address pointed to by the memory address in memory that variable <tt>a</tt> points to. This statement's AST will be:
+
+<pre>
++--------+
+|Variable|
+|  "a"   |
++--------+
+    ^
+ +--+--+
+ |Deref|
+ +-----+
+    ^      +---------+
+ +--+--+   |Immediate|
+ |Deref|   |   "1"   |
+ +-----+   +---------+
+    ^           ^
+    +----+------+
+      +--+---+
+      |Assign|
+      +------+
+</pre>
+
+We'll start by counting the number of <tt>Deref</tt> nodes on the left hand side of the assignment, as we'll have to translate these to a memory accesses.
+
+~~~~
+@Count Number Of Dereferences@ +=
 int numDerefs = 0;
 while(type(statement, 0) == Deref) {
   ++numDerefs; statement = get(statement, 0);
 }
-StorableValue to;
-if(type(statement, 0) == Global) {
-  Label label = new Label(text(statement, 0));
-  to = new AtAddress(label, 0); // must be at least one Deref
-  @Shortcut For Global Initialisation@
-  if(!program.globals.containsKey(label))
-    program.globals.put(label, new Immediate(0));
+~~~~
+
+In our example, <tt>statement</tt> would now be the <tt>Variable</tt> AST node (originally it pointed to the <tt>Assign</tt> node), and <tt>numDerefs</tt> would be two. We'll generate different code for <tt>Label</tt> and <tt>Variable</tt> assignments:
+
+~~~~
+@Prepare Target@ +=
+StorableValue to = toStorable(getAsValue(get(statement, 0)));
+if(to instanceof Label) {
+  @Store Value In A Label@
 } else {
-  Variable var = new Variable(text(statement, 0));
-  to = numDerefs > 0 ? new AtAddress(var, 0) : var;
-  @Assigned To A Local Variable@
+  @Store Value In A Variable@
 }
-for(; numDerefs > 1; -- numDerefs) {
+~~~~
+
+If we're assigning to a <tt>Label</tt> it means we're storing a value into the memory address the <tt>Label</tt> points at. We'll wrap the <tt>Label</tt> in an <tt>AtAddress</tt> to represent this indirection. We need to declare all the global variables we export in the generated assembly code (we actually generate code to define them in the the <tt>.bss</tt> or <tt>.data</tt> segments - see section three of the article). The language we're compiling doesn't make a distinction between [declaring and defining](http://ee.hawaii.edu/~tep/EE160/Book/chap14/subsection2.1.1.4.html) a variable. We'll assume the first assignment to a global variable we see in the source code is the declaration. The <tt>program.globals</tt> map stores all the <tt>Label</tt>s we've seen so far, and we'll use this to decide if this is the first time we've seen a given <tt>Label</tt>. The initial value (zero in most cases) at the <tt>Label</tt> is stored in the Assembly code we generate.
+
+~~~~
+@Store Value In A Label@ +=
+to = new AtAddress((Label) to, 0);
+@Shortcut For Global Initialisation@
+if(!program.globals.containsKey(to))
+  program.globals.put((Label) to, new Immediate(0));
+~~~~
+
+Note that as we always wrap the <tt>Label</tt> in an <tt>AtAddress</tt> we treat an assignment to a <tt>Label</tt> with no levels of indirection (e.g. <tt>X = 0x1;</tt>) as an assignment with one level of indirection (e.g. <tt>@X = 0x1;</tt>). A spec for the language we're compiling should state that assigning to a label without indirection is undefined behaviour (or is just an error).
+
+Storing an expression in a <tt>Variable</tt> just compiles to a <tt>mov</tt> instruction. However, if we have any direction we'll wrap <tt>to</tt> in an <tt>AtAddress</tt> to minimise the number of intermediate <tt>mov</tt> instructions we'll have to add to get the final memory destination as a <tt>StorableValue</tt> that we can copy the <tt>expr</tt> into.
+
+~~~~
+@Store Value In A Variable@ +=
+if(numDerefs > 0)
+  to = new AtAddress((Variable) to, 0);
+~~~~
+
+If we have to get the memory address we're storing to from a <tt>Variable</tt> or a <tt>Label</tt> we have to be careful to avoid generating <tt>mov</tt> instructions where both operands are memory addresses (as this is illegal in the x86 architecture). If we do have two <tt>AtAddress</tt> operands we'll insert a <tt>mov</tt> instruction to  move one into a register.
+
+~~~~
+@Prepare Source@ +=
+if(to instanceof AtAddress && expr instanceof AtAddress) {
+  Variable loaded = new Variable();
+  code.add(move(expr, loaded));
+  expr = loaded;
+}
+~~~~
+
+x86 instructions don't support more than one level of indirection (e.g. you can have <tt>mov (%rax), %rax</tt> but not <tt>mov ((%rax)), %rax</tt>) we'll insert a <tt>mov</tt> instruction for each level of indirection after the first. These inserted instructions will update the location we're assigning to with the memory address at the location it pointed to, removing a layer of indirection. We can then add a <tt>mov</tt> instruction that copies <tt>expr</tt> to <tt>to</tt> as by this point both operands  have at most one level of indirection.
+
+~~~~
+@Generate Mov Instructions@ +=
+for(; numDerefs > 1; --numDerefs) {
   Variable inter = new Variable();
   code.add(move(to, inter));
   to = new AtAddress(inter, 0);
 }
 code.add(move(expr, to));
+~~~~
+
+We mentioned above we give the variable an initial value zero when we declare it (implicitly the first time we see it). We'll make an exception to this for compile-time constants (which we'll define as the right-hand side of the assignment is an <tt>Immediate</tt>), and we'll embed that constant as initial value at the <tt>Label</tt> in the Assembly code generate. If we do use the right-hand side as the initial value we don't need to generate instructions to copy the immediate to the location of the <tt>Label</tt>, so we'll <tt>break</tt> out of the switch statement we're in.
+
+~~~~
 @Shortcut For Global Initialisation@ +=
-if(numDerefs == 1 
+if(numDerefs <= 1
 && expr instanceof Immediate 
-&& !program.globals.containsKey(label)) {
-    program.globals.put(label, (Immediate)expr); continue;
+&& !program.globals.containsKey(to)) {
+    program.globals.put((Label) to, (Immediate)expr); break;
 } 
 ~~~~
 
+### If Statements ###
 
 
-Functions
-
-What if they're anonymous? Need "_" for C linkage
-
-~~~~
-@Get Function Name@ +=
-myName = hasChildren(def, 0) ? new Label("_" + text(def, 0, 0)) : new Label();
-code.add(new Definition(myName, hasChildren(def, 0) && type(def, 0, 0) == Global));
-~~~~
-
-
-Keeping track of user-specified (not auto-inserted) variables in the code. This is for function calls - how do we tell if the string function "name" is a symbol or a variable for dynamic dispatch? We'll assume symbol unless clearly a var as we don't have imports or other ways to tell what symbols can be dynamically linked
+Jumping about
 
 ~~~~
-@Keep Track Of Declared Parameter@ +=
-declaredVars.add(v);
-@Assigned To A Local Variable@ +=
-declaredVars.add(var);
+@Static Classes@ +=
+private static class Jump extends Instruction {
+  final Label to; final Condition cond;
+  Jump(Label to, Condition cond) { 
+    this.to = to; this.cond = cond; 
+  }
+  public String toString() { @Jump x86 Code@ }
+  @Jump Members@
+}
 ~~~~
-
-_ret_ is the return function - and as it takes no arguments we'll just have one global object to represent it.
-
-
-If statements 
 
 ~~~~
 @Parse An If Statement@ +=
@@ -1288,19 +1383,7 @@ code.add(new Definition(ifFalseLabel, false));
 parseStatements(children(ifFalse));
 ~~~~
 
-Jumping about
-
-~~~~
-@Static Classes@ +=
-private static class Jump extends Instruction {
-  final Label to; final Condition cond;
-  Jump(Label to, Condition cond) { 
-    this.to = to; this.cond = cond; 
-  }
-  public String toString() { @Jump x86 Code@ }
-  @Jump Members@
-}
-~~~~
+### While Statements ###
 
 A while loop is essentially an if block with an unconditional loop
 
@@ -2296,7 +2379,7 @@ Register whereWasI = whereAmI(allocation, controlFlow, v, controlFlow.prevNode[i
 
 ~~~~
 @Find Where I Live On The Stack@ +=
-long stackOffset = state.spillVariable(controlFlow.variables[v]);
+Supplier<Long> stackOffset = state.spillVariable(controlFlow.variables[v]);
 ~~~~
 
 Who knows where the stack pointer is? If it's not in a fixed register, check the GLPK solution:
@@ -2468,14 +2551,24 @@ static <I> void topologicalRemove(
 
 ## (III) Writing the Output ##
 
+You can compile the generated Assembly code with [GNU's "as"](http://tigcc.ticalc.org/doc/gnuasm.html) ([OSX-specific documentation](https://developer.apple.com/library/mac/#documentation/DeveloperTools/Reference/Assembler/000-Introduction/introduction.html)).
+
 The x86 syntax we'll use: [addl](http://stackoverflow.com/questions/1619131/addl-instruction-x86) [all instructions](http://en.wikipedia.org/wiki/X86_instruction_listings)
 
+We won't add the <tt>.type</tt> directive to add debug information about a function's type to the Assembly code as it's [not supported by the OSX version of GNU's assembler](http://stackoverflow.com/a/2752639/42543).
+
 ~~~~
-@Definition x86 Code@ += 
-if(isGlobal)
-  return String.format( ".globl %s\n%s:", label.name, label.name);
-else
-  return String.format("%s:", label.name); 
+@Definition x86 Code@ +=
+StringBuilder ret = new StringBuilder();
+if(isExported)
+  ret.append(".globl ").append(label.name).append('\n');
+return ret
+  .append(".def ").append(label.name).append("; .endef\n")
+  .append(label.name).append(':')
+  .toString();
+~~~~
+
+~~~~
 @BinaryOp x86 Code@ += return String.format( "%s %s, %s", op, arg1, arg2);
 @Push x86 Code@ += return String.format( "pushq %s", value);
 @Pop x86 Code@ += return String.format( "popq %s", value);
@@ -2488,7 +2581,7 @@ else
 @Align x86 Code@ += ".align " + SIZE
 @Text x86 Code@ += ".text"
 @Ret x86 Code@ += "ret"
-@Immediate x86 Code@ += return String.format("$0x%s", Long.toHexString(value));
+@Immediate x86 Code@ += return String.format("$0x%s", Long.toHexString(value.get()));
 @Jump x86 Code@ += return String.format("j%s %s", cond == null ? "mp" : cond, to.name);
 @Move x86 Code@ += 
 if(cond == null)
@@ -2518,6 +2611,12 @@ if(!program.globals.isEmpty()) {
       .append(global.getKey().name).append(": .long ")
       .append(global.getValue().toString().substring(1)).append("\n");
 }
+~~~~
+
+The <tt>text</tt> segment is where the 
+
+~~~~
+@Write The Output@ +=
 writer.append(".text\n");
 for(Instruction i : filter(concat(program.text), noNoOps)) 
   writer.append(i + "\n");
