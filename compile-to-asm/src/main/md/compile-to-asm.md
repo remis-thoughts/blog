@@ -141,7 +141,7 @@ The outline of the Java class the compiler lives in is below. The code is divide
 package com.blogspot.remisthoughts.compiletoasm;
 @Imports@
 public final class Compiler {
-  public static void compile(InputStream srcIn, OutputStream asmOut) throws Exception {
+  public static void compile(InputStream srcIn, Appendable asmOut) throws Exception {
     @Build The AST@ 
     ProgramState program = new ProgramState();
     @First Section@
@@ -163,23 +163,18 @@ private static final long SIZE = 8;
 
 The first pass: turning an AST into pseudo-assembly, with variables, not registers. 
 
-Each function should be written into its own <tt>List</tt> of <tt>Instruction<tt>s, and these will all end up in the [text](http://en.wikipedia.org/wiki/Code_segment) segment of the outputted Assembly code. The segment (and some other constants) [determine the permission](http://ftp.linux.org.uk/pub/linux/alpha/alpha/asm10.html#perm_tbl) of the memory that the code is loaded into at runtime. The <tt>align</tt> instruction will make the assembler [insert dummy instructions](http://stackoverflow.com/a/11277804/42543) so that the first instruction of the first function begins on a 8-byte boundary.
+Each function should be written into its own <tt>List</tt> of <tt>Instruction<tt>s, and these will all end up in the [text](http://en.wikipedia.org/wiki/Code_segment) segment of the outputted Assembly code. The segment (and some other constants) [determine the permission](http://ftp.linux.org.uk/pub/linux/alpha/alpha/asm10.html#perm_tbl) of the memory that the code is loaded into at runtime.
 
 ~~~~
 @First Section@ +=
-program.text.add(Arrays.asList(Compiler.align));
 for(Tree child : children(ast)) {
   parseDefinition(child, program);
 }
-@Static Classes@ +=
-private static final Instruction align = new Instruction() {
-  public String toString() { return @Align x86 Code@; }
-};
 ~~~~
 
 ### The Object Model ###
 
-<tt>align</tt> is an <tt>Instruction</tt>; one of many types that represent the subset of Assembly instructions the compiler will generate. The remaining <tt>Instruction</tt> subclasses are shown in the hierarchy below (via [asciiflow](http://www.asciiflow.com/#)):
+We'll use subclasses of an <tt>Instruction</tt> class to represent the subset of Assembly instructions the compiler will generate. The (flat) inheritance hierarchyis shown below (via [asciiflow](http://www.asciiflow.com/#)):
 
 <pre>
                                  +-----------+
@@ -342,6 +337,9 @@ static final class Label implements StorableValue, Comparable<Label> {
   }
   public int hashCode() { return name.hashCode(); }
   public String toString() { @Label x86 Code@ }
+  public boolean isUpperCase() {
+    return name.equals(name.toUpperCase());
+  }
 }
 ~~~~
 
@@ -499,7 +497,7 @@ The first instruction we need to generate is the Assembly label that marks the s
 myName = hasChildren(def, 0) ? new Label("_" + text(def, 0, 0)) : new Label();
 code.add(new Definition(
   myName, 
-  isMainFn() || myName.name.equals(myName.name.toUpperCase()),
+  isMainFn() || myName.isUpperCase(),
   true));
 ~~~~
 
@@ -1774,9 +1772,9 @@ We need to know all the variables we'll ever need to assign
 @Get Variables Used@ +=
 Set<Variable> allVariables = Sets.newTreeSet();
 for(Instruction i : code) {
-  addAll(allVariables, i.uses(Variable.class));
+  Iterables.addAll(allVariables, i.uses(Variable.class));
 }
-variables = toArray(allVariables, Variable.class);
+variables = Iterables.toArray(allVariables, Variable.class);
 this.framePointer = indexOf(variables, framePointer);
 @Control Flow Graph Members@ +=
 Variable[] variables;
@@ -1827,7 +1825,7 @@ When we start a function we want to make sure the registers we're going to prese
 ~~~~
 @Find Registers Already In Use@ +=
 EnumSet<Register> saved = EnumSet.noneOf(Register.class);
-saved.addAll(Arrays.asList(CALLEE_SAVES));
+addAll(saved, CALLEE_SAVES);
 Collection<Integer> next;
 for (int n = FIRST_NODE; !saved.isEmpty(); n = Iterables.getOnlyElement(next)) {
   for (Register r : saved)
@@ -1846,7 +1844,7 @@ Once we've restored the saved registers (and the return value!), we don't want t
 Collection<Integer> prev;
 for (int i : instructionsBeforeNode.get(LAST_NODE)) {
   EnumSet<Register> restored = EnumSet.noneOf(Register.class);
-  restored.addAll(Arrays.asList(CALLEE_SAVES));
+  addAll(restored, CALLEE_SAVES);
   @Decide Which Registers To Restore@
   for (int n = prevNode[i]; !saved.isEmpty(); n = prevNode[Iterables.getOnlyElement(prev)]) {
     for (Register r : saved)
@@ -2710,10 +2708,9 @@ if(name instanceof Label)
 else
   return String.format( "call *%s", name); // indirect function call - code address in a register
 @Section x86 Code@ += return String.format( ".%s", name()); 
-@Align x86 Code@ += ".align " + SIZE
 @Text x86 Code@ += ".text"
 @Ret x86 Code@ += "ret"
-@Immediate x86 Code@ += return String.format("$0x%s", Long.toHexString(value.get()));
+@Immediate x86 Code@ += return String.format("$0x%X", value.get());
 @Jump x86 Code@ += return String.format("j%s %s", cond == null ? "mp" : cond, to.name);
 @Move x86 Code@ += 
 if(cond == null)
@@ -2727,32 +2724,64 @@ if(at instanceof Label)
 else if(offset.get() == 0)
   return String.format("(%s)", at);
 else
-  return String.format("%s0x%s(%s)", offset.get() < 0 ? "-" : "", Long.toHexString(Math.abs(offset.get())), at);
+  return String.format("%s0x%X(%s)", offset.get() < 0 ? "-" : "", Math.abs(offset.get()), at);
 @Swap x86 Code@ += return String.format("xchg %s, %s", arg1, arg2);
+@Define Long x86 Code@ += 
+if(initialValue == 0)
+  return String.format(".space 0x%X", SIZE);
+else
+  return String.format(".long 0x%X", initialValue);
 ~~~~
 
-We'll always write to UTF, even if our assembly only ever has ASCII characters in it. We won't bother indenting the code.
+The <tt>.data</tt> and <tt>[.bss](http://en.wikipedia.org/wiki/.bss)</tt> segments of the Assembly code we output have read and write, but not execute, permissions. We'll store our exported and unexported variables here (the values that <tt>Label</tt>s in the Assembly code refer to). As space for the values stored in the <tt>.bss</tt> segment isn't allocated in the binary file the assembler creates, when the loader copies the binary file into memory it "inflates" the binary file, allocating zero-initialised memory for each variable in the <tt>.bss</tt> segment. Values in the <tt>.data</tt> segment are stored in the binary file, so the loader just copies these verbatim into memory. This means we'll divide the <tt>Label</tt>s in the <tt>global</tt> map between the <tt>.bss</tt> and <tt>.data</tt> sections depending on whether the initial value of the symbol (the <tt>Immediate</tt> in the map) is zero.
 
 ~~~~
-@Write The Output@ +=
-Writer writer = new OutputStreamWriter(asmOut, Charsets.UTF_8); 
-if(!program.globals.isEmpty()) {
-  writer.append(".data\n");
-  for(Entry<Label, Immediate> global : program.globals.entrySet()) 
-    writer
-      .append(global.getKey().name).append(": .long ")
-      .append(global.getValue().toString().substring(1)).append("\n");
+@Static Classes@ +=
+static final class DefineLong extends Instruction {
+  final long initialValue;
+  DefineLong(Immediate initialValue) {
+    this.initialValue = initialValue.value.get();
+  }
+  public String toString() { @Define Long x86 Code@ }
 }
+@Write The Output@ +=
+List<Instruction> 
+  bss = Lists.newArrayList(), 
+  data = Lists.newArrayList();
+for(Entry<Label, Immediate> global : program.globals.entrySet()) {
+  Definition def = new Definition(
+    global.getKey(), 
+    global.getKey().isUpperCase(), 
+    false);
+  DefineLong value = new DefineLong(global.getValue());
+  if(value.initialValue == 0)
+    addAll(bss, def, value);
+  else
+    addAll(data, def, value);
+}
+@Append Instructions@
 ~~~~
 
 The <tt>text</tt> segment is where the 
+ We won't bother indenting the code.
+
+  The <tt>align</tt> instruction will make the assembler [insert dummy instructions](http://stackoverflow.com/a/11277804/42543) so that the first instruction of the first function begins on a 8-byte boundary.
 
 ~~~~
-@Write The Output@ +=
-writer.append(".text\n");
-for(Instruction i : filter(concat(program.text), noNoOps)) 
-  writer.append(i + "\n");
-writer.close();
+@Other Helpers@ +=
+static void writeSegment(Appendable out, String seg, Iterable<Instruction> is) throws IOException {
+  if(Iterables.isEmpty(is)) return;
+  out.append(seg).append("\n\t.align 16\n");
+  for(Instruction i : Iterables.filter(is, noNoOps)) {
+    if(!(i instanceof Definition))
+      out.append('\t');
+    out.append(i.toString()).append('\n');
+  }
+}
+@Append Instructions@ +=
+writeSegment(asmOut, ".section __DATA, __bss", bss);
+writeSegment(asmOut, ".section __DATA, __data", data);
+writeSegment(asmOut, ".section __TEXT, __text", Iterables.concat(program.text));
 ~~~~
 
 Getting rid of no-ops (most importantly moves)
@@ -2878,6 +2907,9 @@ Some array helpers (we do a lot of linear searching, but not enough to warrant s
 static <T> int indexOf(T[] ts, T t) {
   return Arrays.asList(ts).indexOf(t);
 }
+static <T> void addAll(Collection<T> ts, T... toAdd) {
+  ts.addAll(Arrays.asList(toAdd));
+}
 /** @return true if any changes */
 private static boolean copyFrom(BitSet set, int indexFrom, int indexTo, int num) {
   boolean ret = false;
@@ -2896,7 +2928,7 @@ private static boolean copyFrom(BitSet set, int indexFrom, int indexTo, int num)
 
 ### The Main Function ###
 
-We'll include a trivial main function so you can run the compiler from the command line. It takes a list of source files and writes the compiled Assembly code to the same folder and same file name (except with the file extension <tt>.s</tt>). The compiler will stop processing the source files on the first failure and will always process a source file (and always overwrite the Assembly file), even if it hasn't changed.
+We'll include a trivial main function so you can run the compiler from the command line. It takes a list of source files and writes the compiled Assembly code to the same folder and same file name (except with the file extension <tt>.s</tt>). The compiler will stop processing the source files on the first failure and will always process a source file (and always overwrite the Assembly file), even if it hasn't changed. We'll always write out the Assembly we generate encoded as UTF-8, even it only ever has ASCII characters in it.
 
 ~~~~
 @Other Helpers@ +=
@@ -2906,14 +2938,14 @@ public static void main(String[] args) throws Exception {
     String outFile = Files.getNameWithoutExtension(in.getName()) + ".s";
     File out = new File(in.getParentFile(), outFile);
     InputStream inStream = null;
-    OutputStream outStream = null;
+    PrintStream outStream = null;
     try {
-      Compiler.compile(
-        inStream = new FileInputStream(in),
-        outStream = new FileOutputStream(out));
+      outStream = new PrintStream(out.getAbsolutePath(), Charsets.UTF_8.name());
+      outStream.append(".file \"").append(out.getAbsolutePath()).append("\"\n");
+      Compiler.compile(inStream = new FileInputStream(in), outStream);
     } finally {
-      Closeables.closeQuietly(inStream);
-      Closeables.closeQuietly(outStream);
+      Closeables.close(inStream, true);
+      Closeables.close(outStream, true);
     }
   }
 }

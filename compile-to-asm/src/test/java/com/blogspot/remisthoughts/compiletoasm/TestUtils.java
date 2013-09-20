@@ -9,8 +9,9 @@ import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
-import java.io.OutputStream;
+import java.io.OutputStreamWriter;
 import java.io.PrintStream;
+import java.io.Writer;
 import java.util.List;
 
 import org.antlr.runtime.ANTLRInputStream;
@@ -85,7 +86,7 @@ public class TestUtils {
 
 		// make asm
 		InputStream in = new ByteArrayInputStream(code.getBytes(Charsets.UTF_8));
-		OutputStream out = new FileOutputStream(asmFile);
+		Writer out = new OutputStreamWriter(new FileOutputStream(asmFile), Charsets.UTF_8);
 		try {
 			Compiler.compile(in, out);
 		} catch (Exception e) {

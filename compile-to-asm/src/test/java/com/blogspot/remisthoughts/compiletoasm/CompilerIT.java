@@ -15,6 +15,7 @@ import org.junit.runners.Parameterized;
 import org.junit.runners.Parameterized.Parameters;
 
 import com.google.common.collect.Lists;
+import com.google.common.io.Files;
 import com.google.common.io.Resources;
 
 /**
@@ -33,7 +34,6 @@ public class CompilerIT {
 		return ret;
 	}
 
-	private static File tmp = new File(System.getProperty("java.io.tmpdir"));
 	private final File src;
 
 	public CompilerIT(File src) {
@@ -48,7 +48,7 @@ public class CompilerIT {
 	@Test
 	public void testItCompiles() throws Exception {
 		String exitCode = StringUtils.substringBefore(src.getName(), ".");
-		File asmFile = new File(tmp, exitCode + ".s");
+		File asmFile = new File(src.getParentFile(), Files.getNameWithoutExtension(src.getName()) + ".s");
 
 		Compiler.main(new String[] { src.getAbsolutePath() });
 
