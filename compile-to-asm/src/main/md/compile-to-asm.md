@@ -345,14 +345,15 @@ static final class Label implements StorableValue, Comparable<Label> {
 }
 ~~~~
 
-We'll add an <tt>Instruction</tt> that defines a label; the <tt>isExported</tt> flag is true if this symbol should be marked as exported in the GOT. As labels have to be unique (i.e. only appear once in a file) the equality test doesn't check the <tt>isExported</tt> flag.
+We'll add an <tt>Instruction</tt> that defines a label; the <tt>isExported</tt> flag is true if this symbol should be marked as exported in the GOT. As labels have to be unique (i.e. only appear once in a file) the equality test doesn't check the <tt>isExported</tt> flag. Not all <tt>Label</tt> options represent the start of functions; if- and while-statements use labels to define control flow. We'll use the <tt>isFunction</tt> flag to ensure we only add function-related debug information (in a <tt>[.def](http://tigcc.ticalc.org/doc/gnuasm.html#SEC78)</tt> block before the label) to the <tt>Label</tt>s that denote the start of a function.
 
 ~~~~
 @Static Classes@ +=
 static final class Definition extends Instruction {
-  final Label label; final boolean isExported; 
-  Definition(Label label, boolean isExported) { 
+  final Label label; final boolean isExported; boolean isFunction;
+  Definition(Label label, boolean isExported, boolean isFunction) { 
     this.label = label; this.isExported = isExported; 
+    this.isFunction = isFunction;
   }
   public boolean equals(Object o) { 
     return o instanceof Definition && ((Definition)o).label.equals(label);
@@ -498,7 +499,8 @@ The first instruction we need to generate is the Assembly label that marks the s
 myName = hasChildren(def, 0) ? new Label("_" + text(def, 0, 0)) : new Label();
 code.add(new Definition(
   myName, 
-  hasChildren(def, 0) && text(def, 0, 0).equals(text(def, 0, 0).toUpperCase())));
+  hasChildren(def, 0) && text(def, 0, 0).equals(text(def, 0, 0).toUpperCase()),
+  true));
 ~~~~
 
 What we do for each statement depends on the statement's type, so we'll switch on that:
@@ -655,8 +657,12 @@ return ret;
 Literals expressions are easy to evaluate. We'll strip off the leading "0x" string that appears in the source code (it's just for clarity) as Java's <tt>Long.parseLong</tt> only expects digits from the numeric base in the second argument (base 16 means it only wants digits that are 0-9 and A-E). 
 
 ~~~~
+@Other Helpers@ +=
+static long parseHex(Tree t) {
+  return Long.parseLong(t.getText().substring(2), 16);
+}
 @Get A Literal@ +=
-return new Immediate(Long.parseLong(t.getText().substring(2), 16));
+return new Immediate(parseHex(t));
 ~~~~
 
 The remaining case in <tt>getAsValue</tt> deals with <tt>Call</tt> nodes in the AST. In our source language C-like call syntax is used for several things besides function calls, so we'll need another switch statement to disambiguate:
@@ -1309,8 +1315,7 @@ if(numDerefs <= 1
 
 ### If Statements ###
 
-
-Jumping about
+If-statements (with an optional else-block) are the first <tt>Statement</tt> we'll cover that allows control flow to jump to different locations in a function. We'll use [jump](http://www.unixwiz.net/techtips/x86-jumps.html) instructions to do this. Jump instructions are like the conditional <tt>mov</tt> instructions we met above; as well as unconditional jumps we can also add a suffix to indicate the jump instruction should only be executed if certain flags in the [status register](http://en.wikipedia.org/wiki/Status_register) are set. As we're just jumping to different points in the same function the <tt>Jump</tt> instruction and the <tt>Label</tt> <tt>Definition</tt> we're jumping to will both be in the same <tt>text</tt> segment of the generated Assembly code, so we don't need to worry about [far jumps](http://stackoverflow.com/questions/14812160/near-and-far-jmps).
 
 ~~~~
 @Static Classes@ +=
@@ -1324,17 +1329,34 @@ private static class Jump extends Instruction {
 }
 ~~~~
 
+We'll compile if and if-with-else blocks slightly differently. The two lists of Assembly instructions below show that if we have an else block we need to append an unconditional jump to the end of the code in the if-block so that we skip over the instructions in the else-block. If the <tt>cmp</tt> fails when we have an else-block we'll jump to the start of that (rather than the <tt>end</tt> <tt>Label</tt> added at the end of the statement), and control flow will run straight through to the <tt>end</tt> <tt>Label</tt>.
+
+<pre>
+if >(x, 0) { xxx }
+else { yyy }          if >(x, 0) { ... }
+
+  +--------+             +--------+
+  |cmp x, 0|             |cmp x, 0|
+  +--------+             +--------+
+  |jbe else|             |jbe end |
+  +--------+             +--------+
+  |  xxx   |             |  ...   |
+  +--------+             +--------+
+  |jmp end |             |end:    |
+  +--------+             +--------+
+  |else:   |
+  +--------+
+  |  yyy   |
+  +--------+
+  |end:    |
+  +--------+
+</pre>
+
+We'll put this logic in a separate <tt>parseIf</tt> method as we'll re-use it when parsing while-statements.
+
 ~~~~
-@Parse An If Statement@ +=
-Label endIf = parseIf(
-  get(statement, 0), // if
-  get(statement, 1), // then
-  numChildren(statement) == 3 ? get(statement, 2) : null); // else 
-if(endIf != null)
-  code.add(new Definition(endIf, false));
 @Parsing State Members@ +=
 private Label parseIf(Tree test, Tree ifTrue, Tree ifFalse) {
-  StorableValue trueOrFalse = toStorable(getAsValue(get(test, 0)));
   @Do If Comparison Check@
   Label end = new Label();
   if(ifFalse == null) {
@@ -1346,60 +1368,170 @@ private Label parseIf(Tree test, Tree ifTrue, Tree ifFalse) {
 }
 ~~~~
 
-We can save a few instructions if we have already done a conditional move
+We don't want to generate dead code if we can avoid it, so we'll use the method below to see if we can determine whether the if statement's test expression is a compile-time constant (so the same branch of code will always be executed at runtime).
 
-Note we only need near jumps as we don't mess about with segments: http://stackoverflow.com/questions/14812160/near-and-far-jmps
+~~~~
+@Other Helpers@ +=
+static boolean isConstant(Tree t) {
+  return type(t) == Number;
+}
+static boolean isNeverZero(Tree t) {
+  return isConstant(t) && parseHex(t) != 0;
+}
+~~~~
+
+We'll just generate Assembly code for the if-block or else-block as appropriate (and we'll not generate code for the test) if the test expression is a constant:
+
+~~~~
+@Parse An If Statement@ +=
+Tree 
+  test = get(statement, 0), 
+  ifTrue = get(statement, 1), 
+  ifFalse = numChildren(statement) == 3 ? get(statement, 2) : null;
+if(isConstant(test)) {
+  if(isNeverZero(test))
+    parseStatements(children(ifTrue));
+  else if(ifFalse != null)
+    parseStatements(children(ifFalse));
+} else {
+  Label endIf = parseIf(test, ifTrue, ifFalse); 
+  code.add(new Definition(endIf, false, false));
+}
+~~~~
+
+In both types of if-statement we only execute the jump following the <tt>cmp</tt> if the comparison failed. This means we'll need to use the inverse of the <tt>Condition</tt> we're testing for as the <tt>Jump</tt>'s condition.
+
+~~~~
+@Condition Members@ +=
+Condition inverse() {
+  switch(this) {
+    case b:  return ae;
+    case a:  return be;
+    case e:  return ne;
+    case ne: return e;
+    case be: return a;
+    case ae: return b;
+  }
+  throw new IllegalStateException();
+}
+~~~~
+
+If the "test" expression is already a <tt>Conditional</tt> intrinsic function call we will have generated conditional <tt>mov</tt> instructions when parsing it. We'll re-use the comparison by replacing the two <tt>mov</tt> Assembly instructions that copy an <tt>Immediate</tt> zero or one into the <tt>Variable</tt> the expression evaluates to with a <tt>Jump</tt>. If the "test" expression evaluates to some other <tt>Value</tt> we'll compare it to zero, so we'll execute the if-block if the <tt>Value</tt> is zero (just like C's semantics). We must ensure that the return value of the expression is a <tt>StorableValue</tt> as the x86 <tt>cmp</tt> instruction doesn't allow two <tt>Immediate</tt> operands.
 
 ~~~~
 @Do If Comparison Check@ +=
 Condition jumpCond;
-if(getLast(code) instanceof Move && ((Move)getLast(code)).cond != null) {
-  jumpCond = ((Move)getLast(code)).cond;
-  code.subList(code.size() - 3, code.size()).clear();
+if(getLast(code) instanceof Move && ((Move) getLast(code)).cond != null) {
+  jumpCond = ((Move) getLast(code)).cond;
+  code.subList(code.size() - 2, code.size()).clear();
 } else {
   jumpCond = Condition.e;
+  StorableValue trueOrFalse = toStorable(getAsValue(get(test, 0)));
   code.add(new BinaryOp(Op.cmpq, new Immediate(0), trueOrFalse));
 }
 ~~~~
 
+If we don't have an else-block we'll jump to the <tt>end</tt> <tt>Label</tt> we created above. We can re-use the <tt>parseStatements</tt> function (i.e. we'll call it recursively) to generate <tt>Instruction</tt>s for the contents of the if-block.
+
 ~~~~
 @Parse An If With No Else@ +=
-code.add(new Jump(end, jumpCond));
+code.add(new Jump(end, jumpCond.inverse()));
 parseStatements(children(ifTrue));
 ~~~~
 
-We may not need a final jump from the if-true block as the last instruction could be a _ret_.
+If we have an else-block there's another edge case: if the last instruction of the if-block is a <tt>ret</tt> then we don't need to add the unconditional jump at the end of the if-block as we'll never reach it. Instead we'll generate code like:
+
+<pre>
+if >(x, 0) {
+  xxx; return 0x1;
+} else {
+  yyy;
+}
+
+  +----------+
+  |cmp x, 0  |
+  +----------+
+  |jbe else  |
+  +----------+
+  |  xxx     |
+  +----------+
+  |mov 1, rax|
+  +----------+
+  |ret       |
+  +----------+
+  |else:     |
+  +----------+
+  |  yyy     |
+  +----------+
+</pre>
+
+If we need to generate Assembly code following this pattern we don't need to do anything differently at this stage; the dead code elimination step in section two of the article will remove the unreachable unconditional jump and then the definition of the <tt>Label</tt> that no instruction jumps to.
 
 ~~~~
 @Parse An If With An Else@ +=
 Label ifFalseLabel = new Label();
-code.add(new Jump(ifFalseLabel, jumpCond));
+code.add(new Jump(ifFalseLabel, jumpCond.inverse()));
 parseStatements(children(ifTrue));
-if(getLast(code).isNextInstructionReachable())
-  code.add(new Jump(end, null));
-else
-  end = null;
-code.add(new Definition(ifFalseLabel, false));
+code.add(new Jump(end, null));
+code.add(new Definition(ifFalseLabel, false, false));
 parseStatements(children(ifFalse));
 ~~~~
 
 ### While Statements ###
 
-A while loop is essentially an if block with an unconditional loop
-
-We assume if it is a constant it's a while-true loop.
+The language we're compiling only needs while and assignment <tt>Statement</tt>s to be [turing-complete](http://programmers.stackexchange.com/a/132420). Like if-statements, we'll parse <tt>While</tt> statements in one of two ways. If the test expression is a compile-time constant (an <tt>Immediate</tt> object, or a <tt>Number</tt> node in the AST) the loop will either never be executed (so we shouldn't generate any Assembly instructions) or will always be executed (so we don't need to generate instructions that test the value to check it's not zero each time we go round the loop). If the test isn't a compile-time constant we'll have to evaluate it each time we go round the loop.
 
 ~~~~
 @Parse A While Statement@ +=
-Label l = new Label(); code.add(new Definition(l, false));
-if(get(statement, 0, 0).getType() == Number) {
-  parseStatements(children(get(statement, 1)));
-  code.add(new Jump(l, null)); 
+Label loopTop = new Label();
+if(isConstant(get(statement, 0, 0))) {
+  @Parse An Unconditional Loop@
 } else {
-  Label endWhile = parseIf(get(statement, 0), get(statement, 1), null);
-  code.add(new Jump(l, null)); 
-  code.add(new Definition(endWhile, false));
+  @Parse A Conditional Loop@
 } 
+~~~~
+
+If we've decided an unconditional loop is executed (the test expression evaluates to a non-zero <tt>Immediate</tt>) then we'll put the <tt>loopTop</tt> <tt>Label</tt> before the Assembly instructions we'll generate for the while-statement's body and add an unconditional jump to the <tt>loopTop</tt> <tt>Label</tt> after them:
+
+~~~~
+@Parse An Unconditional Loop@ +=
+if(isNeverZero(get(statement, 0, 0))) {
+  code.add(new Definition(loopTop, false, false));
+  parseStatements(children(get(statement, 1)));
+  code.add(new Jump(loopTop, null));
+}
+~~~~
+
+We'll compile a conditional loop using the same <tt>parseIf</tt> statement that we used to compile if-statements. <tt>parseIf</tt> returns the <tt>Label</tt> that should go at the end of the if-statement, but it doesn't add the <tt>Label</tt>'s <tt>Definition</tt> instruction to the generated Assembly code. When we're generating code for if-statements we just put this <tt>Label</tt> right after the code we generated for the else-block (or the if-block if there isn't an else-block). However, for while-statements we'll put this <tt>Label</tt> outside the loop, so the generated code will look like:
+
+<pre>
+while >(x, 0) {
+  ...
+}
+
+  +--------+
+  |top:    |
+  +--------+
+  |cmp x, 0|
+  +--------+
+  |jbe end |
+  +--------+
+  |  ...   |
+  +--------+
+  |jmp top |
+  +--------+
+  |end:    |
+  +--------+
+</pre>
+
+If the test expression is false (the <tt>cmp</tt> instruction in the diagram above) then control flow will jump outside the loop block; if not the instructions in the loop block will be executed then control flow will jump back to the <tt>Label</tt> just before the test (the <tt>top</tt> label in the diagram above), and the test will be executed again.
+
+~~~~
+@Parse A Conditional Loop@ +=
+code.add(new Definition(loopTop, false, false));
+Label endWhile = parseIf(get(statement, 0), get(statement, 1), null);
+code.add(new Jump(loopTop, null)); 
+code.add(new Definition(endWhile, false, false));
 ~~~~
 
 ## (II) Register Allocation via Linear Programming ##
@@ -1489,7 +1621,7 @@ for(int i = 0; i < code.size(); ++i ) {
     nextNode[i] = prevNode[i+1];
   }
   if(instr.couldJumpTo() != null) {
-    int nextInstr = code.indexOf(new Definition(instr.couldJumpTo(), false));
+    int nextInstr = code.indexOf(new Definition(instr.couldJumpTo(), false, false));
     if(prevNode[nextInstr] != UNASSIGNED) nextNode[i] = prevNode[nextInstr]; // e.g. a loop
     else if(nextNode[i] != UNASSIGNED) prevNode[nextInstr] = nextNode[i];
     else nextNode[i] = prevNode[nextInstr] = highestNode++; 
@@ -1557,7 +1689,7 @@ We make each jump to a unique target, so if we remove a jump, remove a target!
 @Found Dead Instruction@ +=
 Instruction inst = code.get(i); 
 if (inst instanceof Jump)
-  dead.set(code.indexOf(new Definition(((Jump) inst).to, false)));
+  dead.set(code.indexOf(new Definition(((Jump) inst).to, false, false)));
 ~~~~
 
 ~~~~
@@ -2562,8 +2694,9 @@ We won't add the <tt>.type</tt> directive to add debug information about a funct
 StringBuilder ret = new StringBuilder();
 if(isExported)
   ret.append(".globl ").append(label.name).append('\n');
+if(isFunction)
+  ret.append(".def ").append(label.name).append("; .endef\n");
 return ret
-  .append(".def ").append(label.name).append("; .endef\n")
   .append(label.name).append(':')
   .toString();
 ~~~~
