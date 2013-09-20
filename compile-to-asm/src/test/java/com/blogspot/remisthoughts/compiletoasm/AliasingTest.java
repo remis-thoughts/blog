@@ -37,7 +37,7 @@ public class AliasingTest {
 		 * return a;
 		 */
 		List<Instruction> code = Arrays.asList(
-				new Definition(new Label("one_plus_one"), false),
+				new Definition(new Label("one_plus_one"), false, true),
 				move(one, a),
 				move(a, b),
 				new BinaryOp(Op.addq, one, b),
@@ -73,7 +73,7 @@ public class AliasingTest {
 		 * }
 		 */
 		List<Instruction> code = Arrays.asList(
-				new Definition(new Label("one_plus_one"), false),
+				new Definition(new Label("one_plus_one"), false, true),
 				move(p, a), // w:a
 				move(one, atA), // r:a
 				move(atA, b), // r:a, w:b
@@ -107,7 +107,7 @@ public class AliasingTest {
 		 * }
 		 */
 		List<Instruction> code = Arrays.asList(
-				new Definition(new Label("one_plus_one"), false),
+				new Definition(new Label("one_plus_one"), false, true),
 				move(p, a), // w:a
 				move(one, b), // w:b
 				move(b, atA), // r:a+b

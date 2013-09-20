@@ -37,7 +37,7 @@ public class NeedsAssigningTest {
 		 * return a;
 		 */
 		List<Instruction> code = Arrays.asList(
-				new Definition(new Label("one_plus_one"), false),
+				new Definition(new Label("one_plus_one"), false, true),
 				move(Register.rsp, framePointer),
 				move(one, a),
 				move(a, b),

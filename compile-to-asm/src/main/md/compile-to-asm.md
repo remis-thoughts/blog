@@ -247,7 +247,7 @@ static final class Immediate implements Value {
   final Supplier<Long> value;
   Immediate(long value) { this.value = Suppliers.ofInstance(value); }
   Immediate(Supplier<Long> value) { this.value = value; }
-  public boolean equals(Object o) { return o instanceof Immediate && ((Immediate)o).value.equals(value);}
+  public boolean equals(Object o) { return o instanceof Immediate && ((Immediate)o).value.get() == value.get();}
   public String toString() { @Immediate x86 Code@ }
 }
 ~~~~
@@ -345,7 +345,7 @@ static final class Label implements StorableValue, Comparable<Label> {
 }
 ~~~~
 
-We'll add an <tt>Instruction</tt> that defines a label; the <tt>isExported</tt> flag is true if this symbol should be marked as exported in the GOT. As labels have to be unique (i.e. only appear once in a file) the equality test doesn't check the <tt>isExported</tt> flag. Not all <tt>Label</tt> options represent the start of functions; if- and while-statements use labels to define control flow. We'll use the <tt>isFunction</tt> flag to ensure we only add function-related debug information (in a <tt>[.def](http://tigcc.ticalc.org/doc/gnuasm.html#SEC78)</tt> block before the label) to the <tt>Label</tt>s that denote the start of a function.
+We'll add an <tt>Instruction</tt> that defines a label; the <tt>isExported</tt> flag is true if this symbol should be marked as exported in the GOT. As labels have to be unique (i.e. only appear once in a file) the equality test doesn't check the <tt>isExported</tt> flag. Not all <tt>Label</tt> options represent the start of functions; if- and while-statements use labels to define control flow. We'll use the <tt>isFunction</tt> flag to differentiate these two cases so we can embed debugging information in the generated Assembly code (see section three). 
 
 ~~~~
 @Static Classes@ +=
@@ -499,7 +499,7 @@ The first instruction we need to generate is the Assembly label that marks the s
 myName = hasChildren(def, 0) ? new Label("_" + text(def, 0, 0)) : new Label();
 code.add(new Definition(
   myName, 
-  hasChildren(def, 0) && text(def, 0, 0).equals(text(def, 0, 0).toUpperCase()),
+  isMainFn() || myName.name.equals(myName.name.toUpperCase()),
   true));
 ~~~~
 
@@ -648,10 +648,7 @@ return new Label(text(t).substring(1));
 
 ~~~~
 @Get A Label@ +=
-Label ret = new Label("_" + text(t));
-if(!program.globals.containsKey(ret))
-  program.globals.put(ret, new Immediate(0));
-return ret;
+return new Label("_" + text(t));
 ~~~~
 
 Literals expressions are easy to evaluate. We'll strip off the leading "0x" string that appears in the source code (it's just for clarity) as Java's <tt>Long.parseLong</tt> only expects digits from the numeric base in the second argument (base 16 means it only wants digits that are 0-9 and A-E). 
@@ -1115,7 +1112,7 @@ static void addBeforeRets(ParsingState state, Instruction inst) {
 }
 ~~~~
 
-We now have all the information we need to calculate the total number of static bytes. This logic is in a <tt>Supplier</tt> so we can delay evaluation until after the register assignment algorithm, as if that decides to "spill" registers onto the stack it'll allocate 8 bytes per register spilled, which increases the <tt>stackBytes</tt> field and so changes the number of bytes we need to allocate. We'll round the number of bytes we need up to the nearest multiple of 16 so the stack remains 16-byte aligned after the allocation.
+We now have all the information we need to calculate the total number of static bytes. This logic is in a <tt>Supplier</tt> so we can delay evaluation until after the register assignment algorithm, as if that decides to "spill" registers onto the stack it'll allocate 8 bytes per register spilled, which increases the <tt>stackBytes</tt> field and so changes the number of bytes we need to allocate. We'll round the number of bytes we need up to the nearest multiple of 16 so the stack remains 16-byte aligned after the allocation. However, if this function doesn't call any others (<tt>mostStackArgs</tt> is null) then we don't care about alignment so don't need to round the stack pointer. This may save us from having to modify the stack pointer at all - if the function doesn't use any space on the stack but does make function calls we still need to subtract 8 from the stack pointer to maintain alignment. If a function doesn't use any space on the stack and doesn't make function calls we can skip at least two instructions (one for the initial allocation and one for each <tt>ret</tt>).
 
 ~~~~
 @Static Classes@ +=
@@ -1131,6 +1128,8 @@ static final class StaticStackBytes implements com.google.common.base.Supplier<L
       ret += state.mostStackArgs * SIZE;
     if (state.useRedZone)
       ret = Math.max(0, ret - 128);
+    if(state.mostStackArgs == null) 
+      return ret;
     long multipleOf16 = ret + 15 & 0xFFFFFFFFFFFFFFF0L;
     if(state.isMainFn())
       return multipleOf16;
@@ -1263,10 +1262,10 @@ If we're assigning to a <tt>Label</tt> it means we're storing a value into the m
 
 ~~~~
 @Store Value In A Label@ +=
-to = new AtAddress((Label) to, 0);
 @Shortcut For Global Initialisation@
 if(!program.globals.containsKey(to))
   program.globals.put((Label) to, new Immediate(0));
+to = new AtAddress((Label) to, 0);
 ~~~~
 
 Note that as we always wrap the <tt>Label</tt> in an <tt>AtAddress</tt> we treat an assignment to a <tt>Label</tt> with no levels of indirection (e.g. <tt>X = 0x1;</tt>) as an assignment with one level of indirection (e.g. <tt>@X = 0x1;</tt>). A spec for the language we're compiling should state that assigning to a label without indirection is undefined behaviour (or is just an error).
@@ -1420,13 +1419,13 @@ If the "test" expression is already a <tt>Conditional</tt> intrinsic function ca
 
 ~~~~
 @Do If Comparison Check@ +=
+StorableValue trueOrFalse = toStorable(getAsValue(get(test, 0)));
 Condition jumpCond;
 if(getLast(code) instanceof Move && ((Move) getLast(code)).cond != null) {
   jumpCond = ((Move) getLast(code)).cond;
   code.subList(code.size() - 2, code.size()).clear();
 } else {
   jumpCond = Condition.e;
-  StorableValue trueOrFalse = toStorable(getAsValue(get(test, 0)));
   code.add(new BinaryOp(Op.cmpq, new Immediate(0), trueOrFalse));
 }
 ~~~~
@@ -2694,8 +2693,8 @@ We won't add the <tt>.type</tt> directive to add debug information about a funct
 StringBuilder ret = new StringBuilder();
 if(isExported)
   ret.append(".globl ").append(label.name).append('\n');
-if(isFunction)
-  ret.append(".def ").append(label.name).append("; .endef\n");
+if (isFunction)
+  ret.append(".stabs \"").append(label.name.substring(1)).append("\",0x24,0,0,").append(label.name).append('\n');
 return ret
   .append(label.name).append(':')
   .toString();

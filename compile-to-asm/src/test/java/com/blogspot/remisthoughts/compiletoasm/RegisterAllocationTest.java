@@ -63,7 +63,7 @@ public class RegisterAllocationTest {
 		 * return a;
 		 */
 		List<Instruction> code = Arrays.asList(
-				new Definition(new Label("one_plus_one"), false),
+				new Definition(new Label("one_plus_one"), false, true),
 				move(one, a),
 				move(a, b),
 				new BinaryOp(Op.addq, one, b),
@@ -77,6 +77,15 @@ public class RegisterAllocationTest {
 
 	@Test
 	public void testSpillage() throws Exception {
+		/*
+		 * fn _main($a) {
+		 *   @a = +(2, 3);
+		 *   ret = @a;
+		 *   free();
+		 *   return ret;
+		 * }
+		 */
+
 		/*
 		 * _main:
 		 * movq %rbx, save!%rbx
@@ -106,7 +115,7 @@ public class RegisterAllocationTest {
 		AtAddress atA = new AtAddress(a, 0);
 
 		List<Instruction> code = Lists.newArrayList(
-				new Definition(new Label("_main"), false),
+				new Definition(new Label("_main"), false, true),
 				move(Register.rbx, save_rbx),
 				move(Register.rbp, save_rbp),
 				move(Register.r12, save_r12),
@@ -177,7 +186,7 @@ public class RegisterAllocationTest {
 		Variable a = new Variable("a"), b = new Variable("b"), c = new Variable("c"), var0 = new Variable("VAR0"), var1 = new Variable("VAR1"), save_rbx = new Variable("save!%rbx"), save_rbp = new Variable("save!%rbp"), save_r12 = new Variable("save!%r12"), save_r13 = new Variable("save!%r13"), save_r14 = new Variable("save!%r14"), save_r15 = new Variable("save!%r15");
 
 		List<Instruction> code = Lists.newArrayList(
-				new Definition(new Label("_do_stuff"), false),
+				new Definition(new Label("_do_stuff"), false, true),
 				move(Register.rbx, save_rbx),
 				move(Register.rbp, save_rbp),
 				move(Register.r12, save_r12),

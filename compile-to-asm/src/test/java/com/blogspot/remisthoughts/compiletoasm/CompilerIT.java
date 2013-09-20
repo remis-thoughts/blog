@@ -1,14 +1,14 @@
 package com.blogspot.remisthoughts.compiletoasm;
 
+import static com.blogspot.remisthoughts.compiletoasm.TestUtils.compile;
+import static com.blogspot.remisthoughts.compiletoasm.TestUtils.print;
 import static org.junit.Assert.fail;
 
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
-import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
-import java.io.PrintStream;
 import java.util.List;
 
 import org.apache.commons.lang3.StringUtils;
@@ -18,12 +18,9 @@ import org.junit.runner.RunWith;
 import org.junit.runners.Parameterized;
 import org.junit.runners.Parameterized.Parameters;
 
-import com.google.common.base.Charsets;
 import com.google.common.base.Strings;
 import com.google.common.collect.Lists;
-import com.google.common.io.ByteStreams;
 import com.google.common.io.Closeables;
-import com.google.common.io.Files;
 import com.google.common.io.Resources;
 
 /**
@@ -32,8 +29,6 @@ import com.google.common.io.Resources;
  */
 @RunWith(Parameterized.class)
 public class CompilerIT {
-	private static final String GCC_CMD = "gcc -m64 -Wall -o %s %s";
-
 	@Parameters
 	public static List<Object[]> params() {
 		File folder = new File(Resources.getResource("test-code").getFile());
@@ -75,16 +70,7 @@ public class CompilerIT {
 			}
 
 			// compile asm to native binary (assumes gcc availability)
-			File binaryFile = new File(tmp, exitCode);
-			Process gcc = Runtime.getRuntime().exec(String.format(GCC_CMD, binaryFile.getAbsolutePath(), asmFile.getAbsolutePath()));
-			if (gcc.waitFor() != 0) {
-				System.out.println(Files.toString(asmFile, Charsets.UTF_8));
-				print(System.out, gcc.getInputStream());
-				print(System.err, gcc.getErrorStream());
-				fail("gcc must compile " + src.getName() + " successfully");
-			}
-			System.out.println(asmFile.getAbsolutePath());
-			System.out.println(Files.toString(asmFile, Charsets.UTF_8));
+			File binaryFile = compile(asmFile);
 
 			// run the file and check it produces the correct exit code
 			Process bin = Runtime.getRuntime().exec(binaryFile.getAbsolutePath());
@@ -97,9 +83,5 @@ public class CompilerIT {
 		} finally {
 			Closeables.closeQuietly(in);
 		}
-	}
-
-	private static void print(PrintStream where, InputStream what) throws IOException {
-		where.println(new String(ByteStreams.toByteArray(what)));
 	}
 }
