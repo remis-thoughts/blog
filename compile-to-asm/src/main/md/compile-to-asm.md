@@ -2789,6 +2789,8 @@ public boolean isNoOp(Value arg1, StorableValue arg2) { return false; }
 
 ## Appendices ##
 
+The appendices contain a few pieces of miscellaneous boilerplate. We'll start with the compiler's imports; it uses Google's [Guava](https://code.google.com/p/guava-libraries) libraries as helpers, and the [SWIG Java](http://www.swig.org/Doc1.3/Java.html) bindings to the [GNU GLPK](http://glpk-java.sourceforge.net). It also imports the Antlr runtime library, as the lexer and parser Antlr generates return ASTs of Antlr objects.
+
 ~~~~
 @Imports@ += 
 import static com.blogspot.remisthoughts.compiletoasm.UnsignedLexer.*;
@@ -2808,13 +2810,26 @@ import org.antlr.runtime.ANTLRInputStream;
 import org.antlr.runtime.CommonTokenStream;
 import org.antlr.runtime.tree.*;
 import com.google.common.base.*;
+import com.google.common.io.*;
 import com.google.common.primitives.*;
 import com.google.common.collect.*;
 import org.gnu.glpk.*;
 ~~~~
 
-Antlr code to build AST
-[unicode](http://stackoverflow.com/questions/2081862/how-do-i-match-unicode-characters-in-antlr) [charVocabulary not in 3.3](http://antlr.1301665.n2.nabble.com/UTF-8-charVocabulary-in-options-in-3-3-td7578297.html)
+### Antlr ###
+
+The Antlr grammar is stored in a separate <tt>.g</tt> file. The grammar has unicode symbols in for the various intrinsic functions, which [antlr supports](http://stackoverflow.com/questions/2081862/how-do-i-match-unicode-characters-in-antlr), but we're using version 3.3, which [doesn't support charVocabulary](http://antlr.1301665.n2.nabble.com/UTF-8-charVocabulary-in-options-in-3-3-td7578297.html), so the grammar specifies unicode characters using syntax like <tt>'\u1234'</tt>.
+
+~~~~
+@com/blogspot/remisthoughts/compiletoasm/Unsigned.g:*@ +=
+grammar Unsigned;
+@Antlr Options@
+@Make Antlr Throw On Failure@
+@Antlr Tokens@
+@Antlr Parse Rules@
+~~~~
+
+We need a few lines of code to build an AST from an <tt>InputStream</tt> using the lexer & parser Antlr generated. 
 
 ~~~~
 @Antlr Options@ +=
@@ -2832,7 +2847,7 @@ CommonTree ast = new UnsignedParser(
       new ANTLRInputStream(srcIn, Charsets.UTF_8.name())))).eval().tree;
 ~~~~
 
-stackoverflow.com/questions/2445008/how-to-get-antlr-3-2-to-exit-upon-first-error
+The compiler doesn't have useful error messages or provide any diagnostics when a source file is invalid, but we'll at least configure antlr to [throw exceptions on parsing failure](stackoverflow.com/questions/2445008/how-to-get-antlr-3-2-to-exit-upon-first-error). The default behaviour builds an incomplete AST, missing the nodes and tokens that failed to parse.
 
 ~~~~
 @Make Antlr Throw On Failure@ +=
@@ -2854,17 +2869,7 @@ stackoverflow.com/questions/2445008/how-to-get-antlr-3-2-to-exit-upon-first-erro
 }    
 ~~~~
 
-Antlr grammar layout:
-
-~~~~
-@com/blogspot/remisthoughts/compiletoasm/Unsigned.g:*@ +=
-grammar Unsigned;
-@Antlr Options@
-@Make Antlr Throw On Failure@
-@Antlr Tokens@
-@Antlr Parse Rules@
-~~~~
-
+### Other Helpers ###
 
 Some array helpers (we do a lot of linear searching, but not enough to warrant sorting for a binary search or building a hash map).
 
@@ -2889,20 +2894,31 @@ private static boolean copyFrom(BitSet set, int indexFrom, int indexTo, int num)
 }
 ~~~~
 
-http://www.cs.virginia.edu/~evans/cs216/guides/x86.html
+### The Main Function ###
 
-tools (universal gcc needed or you'll get linker errors like :
-ld: warning: ignoring file /opt/local/lib/gcc47/libgcc_ext.10.5.dylib, missing required architecture i386 in file
-ld: warning: ignoring file /opt/local/lib/gcc47/gcc/x86_64-apple-darwin10/4.7.1/libgcc.a, file was built for archive which is not the architecture being linked (i386)
-):
-port install gcc47 +universal
-port select --set gcc mp-gcc47
-port install binutils
+We'll include a trivial main function so you can run the compiler from the command line. It takes a list of source files and writes the compiled Assembly code to the same folder and same file name (except with the file extension <tt>.s</tt>). The compiler will stop processing the source files on the first failure and will always process a source file (and always overwrite the Assembly file), even if it hasn't changed.
 
-examining
-nm -m -U /System/Library/Frameworks/QTKit.framework/QTKit
-gobjdump -f /opt/local/lib/gcc47/libgcc_ext.10.5.dylib
-llvm-objdump-mp-3.1 -disassemble $(which gcc) 
+~~~~
+@Other Helpers@ +=
+public static void main(String[] args) throws Exception {
+  for (String inFile : args) {
+    File in = new File(inFile);
+    String outFile = Files.getNameWithoutExtension(in.getName()) + ".s";
+    File out = new File(in.getParentFile(), outFile);
+    InputStream inStream = null;
+    OutputStream outStream = null;
+    try {
+      Compiler.compile(
+        inStream = new FileInputStream(in),
+        outStream = new FileOutputStream(out));
+    } finally {
+      Closeables.closeQuietly(inStream);
+      Closeables.closeQuietly(outStream);
+    }
+  }
+}
+~~~~
 
-seeing what type a file is 
-file ...   
+### Source Code ###
+
+Finally, all the source code [is available on Github](https://github.com/remis-thoughts/blog/tree/master/compile-to-asm).
