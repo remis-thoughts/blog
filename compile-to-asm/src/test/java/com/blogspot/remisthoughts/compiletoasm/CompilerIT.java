@@ -1,6 +1,7 @@
 package com.blogspot.remisthoughts.compiletoasm;
 
-import static com.blogspot.remisthoughts.compiletoasm.TestUtils.compile;
+import static com.blogspot.remisthoughts.compiletoasm.TestUtils.assemble;
+import static com.blogspot.remisthoughts.compiletoasm.TestUtils.link;
 import static com.blogspot.remisthoughts.compiletoasm.TestUtils.print;
 import static org.junit.Assert.fail;
 
@@ -14,6 +15,7 @@ import org.junit.runner.RunWith;
 import org.junit.runners.Parameterized;
 import org.junit.runners.Parameterized.Parameters;
 
+import com.google.common.base.Charsets;
 import com.google.common.collect.Lists;
 import com.google.common.io.Files;
 import com.google.common.io.Resources;
@@ -29,7 +31,9 @@ public class CompilerIT {
 		File folder = new File(Resources.getResource("test-code").getFile());
 		List<Object[]> ret = Lists.newArrayList();
 		for (File file : folder.listFiles()) {
-			ret.add(new Object[] { file });
+			if (file.getName().endsWith(".uu")) {
+				ret.add(new Object[] { file });
+			}
 		}
 		return ret;
 	}
@@ -50,10 +54,18 @@ public class CompilerIT {
 		String exitCode = StringUtils.substringBefore(src.getName(), ".");
 		File asmFile = new File(src.getParentFile(), Files.getNameWithoutExtension(src.getName()) + ".s");
 
-		Compiler.main(new String[] { src.getAbsolutePath() });
+		try {
+			Compiler.main(new String[] { src.getAbsolutePath() });
+		} catch (Exception e) {
+			fail(src.getName() + ": " + e.getMessage());
+		}
+
+		// useful to see it
+		System.out.println(asmFile.getAbsolutePath());
+		System.out.println(Files.toString(asmFile, Charsets.UTF_8));
 
 		// compile asm to native binary (assumes gcc availability)
-		File binaryFile = compile(asmFile);
+		File binaryFile = link(assemble(asmFile));
 
 		// run the file and check it produces the correct exit code
 		Process bin = Runtime.getRuntime().exec(binaryFile.getAbsolutePath());

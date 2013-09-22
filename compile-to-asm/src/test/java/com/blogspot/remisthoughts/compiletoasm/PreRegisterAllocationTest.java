@@ -24,7 +24,7 @@ public class PreRegisterAllocationTest {
 		ProgramState program = new ProgramState();
 		Compiler.parseDefinition(ast, program);
 		List<Instruction> code = getCode(program);
-		assertEquals(1, Iterables.size(Iterables.filter(code, BinaryOp.class)));
+		assertEquals(2, Iterables.size(Iterables.filter(code, BinaryOp.class)));
 		assertAllAssigned(code);
 	}
 
@@ -34,7 +34,7 @@ public class PreRegisterAllocationTest {
 		ProgramState program = new ProgramState();
 		Compiler.parseDefinition(ast, program);
 		List<Instruction> code = getCode(program);
-		assertEquals(2, Iterables.size(Iterables.filter(code, BinaryOp.class)));
+		assertEquals(3, Iterables.size(Iterables.filter(code, BinaryOp.class)));
 		assertAllAssigned(code);
 	}
 

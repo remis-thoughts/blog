@@ -416,11 +416,10 @@ static final class ParsingState {
   ParsingState(Tree def, ProgramState program) {
     (this.program = program).text.add(code);
     @Get Function Name@
+    @Are We Starting The Main Function@
     @Set Up Stack Allocation@
-    @Decide If We Should Use The Red Zone@
     @Identify Callee Saves Registers@
     @Parse Function Parameters@
-    @Keep Track Of Declared Variables@
   }
   @Parsing State Members@
 }
@@ -485,7 +484,6 @@ static Label parseDefinition(Tree def, ProgramState program) {
     state.addReturn();
   }
   @Do Register Allocation@
-  @Is This The Main Function@
   return state.myName;
 }
 ~~~~
@@ -547,6 +545,7 @@ void addReturn() {
   for(Register r : CALLEE_SAVES)
     code.add(move(new Variable(CALLEE_SAVE_VAR + r), r));
   @Before Returning From Function@
+  @Are We Leaving The Main Function@
   code.add(Compiler.ret);
 }
 @Other Helpers@ +=
@@ -617,7 +616,7 @@ private Value getAsValue(Tree t) {
 Sometimes we'll need to ensure the <tt>Value</tt> is a <tt>StorableValue</tt> as the <tt>BinaryOp</tt> instructions can't have two literals or two memory addresses as operands. If we see this we'll move one of the literals or memory addresses to a new (unique) <tt>Variable</tt> using the code below, and we'll use that <tt>Variable</tt> as one of the original instruction's operands.
 
 ~~~~
-@Parsing State Members@ += 
+@Parsing State Members@ +=
 private StorableValue toStorable(Value v) {
   if (StorableValue.class.isAssignableFrom(v.getClass())) 
     return (StorableValue) v;
@@ -891,7 +890,7 @@ In general, the compiler tests to see if the <tt>framePointer</tt> variable is n
 @Parsing State Members@ +=
 Instruction storeArg(Value arg, int position) {
   if(framePointer == null)
-    return move(arg, new AtAddress(rsp, position * SIZE));
+    return move(toRegister(arg), new AtAddress(rsp, position * SIZE));
   else
     return new Push(arg);
 }
@@ -901,6 +900,20 @@ static final class Push extends Instruction {
   Push(Value value) { this.value = value; }
   public String toString() { @Push x86 Code@ }
   @Push Members@
+}
+~~~~
+
+Now, if we want to generate a <tt>mov</tt> instruction store the <tt>arg</tt> <tt>Value</tt> on the stack we have to be careful to avoid generating a <tt>mov</tt> instruction where both operands are memory addresses (as this is illegal in the x86 architecture). If we do have two <tt>AtAddress</tt> operands we'll insert a <tt>mov</tt> instruction to move one into a register.
+
+~~~~
+@Parsing State Members@ += 
+private Value toRegister(Value v) {
+  if(v instanceof AtAddress) {
+    Variable loaded = new Variable();
+    code.add(move(v, loaded));
+    v = loaded;
+  }
+  return v;
 }
 ~~~~
 
@@ -944,12 +957,10 @@ There are diagrams of the two different stack layouts we can generate above. We'
 @Parsing State Members@ +=
 private Integer mostStackArgs;
 @Function Call Bookkeeping@ +=
-if(storedArgs > 0) {
-  if(mostStackArgs == null)
-    mostStackArgs = storedArgs;
-  else
-    mostStackArgs = Math.max(mostStackArgs, storedArgs);
-}
+if(mostStackArgs == null)
+  mostStackArgs = storedArgs;
+else
+  mostStackArgs = Math.max(mostStackArgs, storedArgs);
 ~~~~
 
 A stack allocation expression is dynamic if we know the size at compile-time, which for this compiler means the argument to the <tt>$</tt> function is an <tt>Immediate</tt> (we said at the beginning this compiler isn't going to attempt to optimise the source code it's given - but [constant propagation](http://en.wikipedia.org/wiki/Constant_folding#Constant_propagation) may help turn dynamic allocations into static ones). Note that a function with dynamic stack allocations can also have static stack allocations, so the compiler will do the static allocation book-keeping for every function.
@@ -1029,12 +1040,15 @@ code.add(move(Register.rsp, ret));
 
 We've said above that if we call another function we need the stack pointer to be 16-byte aligned, and if a function has dynamic allocations we can ensure this in one of two ways; we can align the stack after every dynamic allocation or we can align the stack before each function call. In both cases "aligning the stack" means allocating between one and 15 bytes by using a <tt>and</tt> instruction to rounding the stack pointer down to a multiple of 16. The compiler currently generates Assembly code that  aligns the stack after every dynamic allocation as [on some CPUs](http://lemire.me/blog/archives/2012/05/31/data-alignment-for-speed-myth-or-reality) accessing aligned memory is faster than accessing unaligned memory.
 
+Unfortunately, we can't just <tt>and</tt> the stack pointer with <tt>0xFFFFFFFFFFFFFF0</tt> (i.e. force the last 4 bits to zero) as only the <tt>mov</tt> x86-64 instruction can take 64-bit immediate operands. We could move <tt>0xFFFFFFFFFFFFFF0</tt> into a <tt>Variable</tt> (i.e. put it in a register) and then <tt>and</tt> it with the stack pointer, but the extra register could cause (slow) spills of other variables onto the stack. Instead we'll shift <tt>rsp</tt> right by four bits then left:
+
 ~~~~
 @Align The Stack@ +=
-code.add(alignStack());
-@Other Helpers@ +=
-static Instruction alignStack() {
-  return new BinaryOp(Op.andq, new Immediate(0xFFFFFFFFFFFFFFF0L), rsp);
+alignStack();
+@Parsing State Members@ +=
+void alignStack() {
+  code.add(new BinaryOp(Op.shrq, new Immediate(4), rsp));
+  code.add(new BinaryOp(Op.shlq, new Immediate(4), rsp));
 }
 ~~~~
 
@@ -1060,9 +1074,9 @@ One of the reasons we calculated <tt>mostStackArgs</tt> and set it to null if th
 
 ~~~~
 @Parsing State Members@ +=
-final boolean useRedZone;
-@Decide If We Should Use The Red Zone@ +=
-useRedZone = mostStackArgs == null && framePointer == null;
+boolean useRedZone() {
+  return mostStackArgs == null && framePointer == null;
+}
 ~~~~
 
 Another special case that will affect the number of bytes we have to allocate is the main function. When the main function is called by a new process on OSX the stack pointer in <tt>rsp</tt> is only 8-byte aligned, as this gdb session anecdotally shows:
@@ -1082,13 +1096,14 @@ However, when we return from the main function we should restore the original va
 boolean isMainFn() {
   return myName.name.equals("_main");
 }
-@Is This The Main Function@ +=
-if(state.isMainFn()) {
-  state.code.addAll(1, Arrays.asList(
-    new Push(rsp),
-    alignStack()));
-  addBeforeRets(state, new Pop(rsp));
+@Are We Starting The Main Function@ +=
+if(isMainFn()) {
+  code.add(new Push(rsp));
+  alignStack();
 }
+@Are We Leaving The Main Function@ +=
+if(isMainFn())
+  code.add(new Pop(rsp));
 @Static Classes@ +=
 private static final class Pop extends Instruction {
   final StorableValue value;
@@ -1098,17 +1113,6 @@ private static final class Pop extends Instruction {
 ~~~~
 
 It's worth mentioning that the magic string "main" is imposed by the standard library our generated Assembly code should be linked against. The [standard library isn't necessary](https://blogs.oracle.com/ksplice/entry/hello_from_a_libc_free); the linker actually looks for a <tt>_start</tt> symbol as the entry point to a compiled programme. Libc's implementation of <tt>_start</tt> [initialises the standard library](http://stackoverflow.com/a/7977208/42543) before calling the <tt>_main</tt> function. 
-
-As we needed to restore the original stack pointer no matter how we left the main function we need a way of finding all the <tt>ret</tt> instructions in the Assembly code we've generated for a function so we can insert an <tt>Instruction</tt> before each of them. The method below does a linear search, and inserts into the middle of the <tt>code</tt> array of <tt>Instruction</tt>s, so is inefficient and can copy a lot of memory. An [unrolled linked list](http://en.wikipedia.org/wiki/Unrolled_linked_list) - like [SGI's rope for strings](http://www.sgi.com/tech/stl/Rope.html) - would be a better data structure to store the generated code in as this random insertion would be reduced to O(1) from O(n).
-
-~~~~
-@Other Helpers@ += 
-static void addBeforeRets(ParsingState state, Instruction inst) {
-  for(int i = 0; i < state.code.size(); ++i)
-    if(state.code.get(i) == ret) 
-      state.code.add(i++, inst);
-}
-~~~~
 
 We now have all the information we need to calculate the total number of static bytes. This logic is in a <tt>Supplier</tt> so we can delay evaluation until after the register assignment algorithm, as if that decides to "spill" registers onto the stack it'll allocate 8 bytes per register spilled, which increases the <tt>stackBytes</tt> field and so changes the number of bytes we need to allocate. We'll round the number of bytes we need up to the nearest multiple of 16 so the stack remains 16-byte aligned after the allocation. However, if this function doesn't call any others (<tt>mostStackArgs</tt> is null) then we don't care about alignment so don't need to round the stack pointer. This may save us from having to modify the stack pointer at all - if the function doesn't use any space on the stack but does make function calls we still need to subtract 8 from the stack pointer to maintain alignment. If a function doesn't use any space on the stack and doesn't make function calls we can skip at least two instructions (one for the initial allocation and one for each <tt>ret</tt>).
 
@@ -1124,7 +1128,7 @@ static final class StaticStackBytes implements com.google.common.base.Supplier<L
     if(state.framePointer == null 
     && state.mostStackArgs != null)
       ret += state.mostStackArgs * SIZE;
-    if (state.useRedZone)
+    if (state.useRedZone())
       ret = Math.max(0, ret - 128);
     if(state.mostStackArgs == null) 
       return ret;
@@ -1137,18 +1141,20 @@ static final class StaticStackBytes implements com.google.common.base.Supplier<L
 }
 ~~~~
 
-Now we can add Assembly instructions to subtract this number from <tt>rsp</tt> when entering a function and add it when leaving. However, if the function has dynamic stack allocation we must subtract the number of bytes we need from <tt>rsp</tt> after saving the initial value of <tt>rsp</tt> into the frame pointer variable. As we're ignoring the value of <tt>rsp</tt> when we replace it with the frame pointer on leaving the function we don't have to explicitly free the statically-allocated memory by adding to the stack pointer. We don't need to do this for the main function as we're going to overwrite <tt>rsp</tt> with the value we <tt>pop</tt> off the stack.
+Now we can add Assembly instructions to subtract this number from <tt>rsp</tt> when entering a function and add it when leaving. However, if the function has dynamic stack allocation we must subtract the number of bytes we need from <tt>rsp</tt> after saving the initial value of <tt>rsp</tt> into the frame pointer variable. As we're ignoring the value of <tt>rsp</tt> when we replace it with the frame pointer on leaving the function we don't have to explicitly free the statically-allocated memory by adding to the stack pointer. We still need to do this for the main function even though we're going to overwrite <tt>rsp</tt> with the value we <tt>pop</tt> off the stack. <tt>pop</tt> just reads the top value of the stack, so if we've statically allocated stack variables we don't want to restore one of them to the stack pointer!
 
 ~~~~
-@Allocate Stack Space For Variables@ +=
-Immediate bytes = new Immediate(new StaticStackBytes(state));
-state.code.add(
-  state.framePointer == null ? 1 : 2, 
-  new BinaryOp(Op.subq, bytes, rsp));
-if(state.framePointer == null && !state.isMainFn())
-  addBeforeRets(
-    state, 
-    new BinaryOp(Op.addq, bytes, rsp));
+@After Stack Allocation Setup@ +=
+code.add(new BinaryOp(
+  Op.subq,
+  new Immediate(new StaticStackBytes(this)), 
+  rsp));
+@Before Returning From Function@ +=
+if(framePointer == null)
+  code.add(new BinaryOp(
+    Op.addq,
+    new Immediate(new StaticStackBytes(this)), 
+    rsp));
 ~~~~
 
 ### Function Parameters ###
@@ -1276,15 +1282,12 @@ if(numDerefs > 0)
   to = new AtAddress((Variable) to, 0);
 ~~~~
 
-If we have to get the memory address we're storing to from a <tt>Variable</tt> or a <tt>Label</tt> we have to be careful to avoid generating <tt>mov</tt> instructions where both operands are memory addresses (as this is illegal in the x86 architecture). If we do have two <tt>AtAddress</tt> operands we'll insert a <tt>mov</tt> instruction to  move one into a register.
+Again, if we're storing into a memory address we must ensure <tt>expr</tt> isn't also a memory address, as <tt>mov</tt> instructions can't have two indirect operands.
 
 ~~~~
 @Prepare Source@ +=
-if(to instanceof AtAddress && expr instanceof AtAddress) {
-  Variable loaded = new Variable();
-  code.add(move(expr, loaded));
-  expr = loaded;
-}
+if(to instanceof AtAddress)
+  expr = toRegister(expr);
 ~~~~
 
 x86 instructions don't support more than one level of indirection (e.g. you can have <tt>mov (%rax), %rax</tt> but not <tt>mov ((%rax)), %rax</tt>) we'll insert a <tt>mov</tt> instruction for each level of indirection after the first. These inserted instructions will update the location we're assigning to with the memory address at the location it pointed to, removing a layer of indirection. We can then add a <tt>mov</tt> instruction that copies <tt>expr</tt> to <tt>to</tt> as by this point both operands  have at most one level of indirection.
@@ -1385,8 +1388,8 @@ Tree
   test = get(statement, 0), 
   ifTrue = get(statement, 1), 
   ifFalse = numChildren(statement) == 3 ? get(statement, 2) : null;
-if(isConstant(test)) {
-  if(isNeverZero(test))
+if(isConstant(get(test,0))) {
+  if(isNeverZero(get(test, 0)))
     parseStatements(children(ifTrue));
   else if(ifFalse != null)
     parseStatements(children(ifFalse));
@@ -1555,7 +1558,6 @@ static void copySolutionIntoCode(glp_prob allocation, ControlFlowGraph controlFl
   @Copy Solution Into Code@
   @Calculate Stack Moves Needed@
   @Insert Stack Moves@
-  @Allocate Stack Space For Variables@
 }
 ~~~~
 
@@ -2687,12 +2689,17 @@ The x86 syntax we'll use: [addl](http://stackoverflow.com/questions/1619131/addl
 We won't add the <tt>.type</tt> directive to add debug information about a function's type to the Assembly code as it's [not supported by the OSX version of GNU's assembler](http://stackoverflow.com/a/2752639/42543).
 
 ~~~~
+@Write The Output@ +=
+@Set Source Format@
+@Populate Bss And Data Sections@
+@Append Instructions@
+~~~~
+
+~~~~
 @Definition x86 Code@ +=
 StringBuilder ret = new StringBuilder();
 if(isExported)
   ret.append(".globl ").append(label.name).append('\n');
-if (isFunction)
-  ret.append(".stabs \"").append(label.name.substring(1)).append("\",0x24,0,0,").append(label.name).append('\n');
 return ret
   .append(label.name).append(':')
   .toString();
@@ -2736,6 +2743,11 @@ else
 The <tt>.data</tt> and <tt>[.bss](http://en.wikipedia.org/wiki/.bss)</tt> segments of the Assembly code we output have read and write, but not execute, permissions. We'll store our exported and unexported variables here (the values that <tt>Label</tt>s in the Assembly code refer to). As space for the values stored in the <tt>.bss</tt> segment isn't allocated in the binary file the assembler creates, when the loader copies the binary file into memory it "inflates" the binary file, allocating zero-initialised memory for each variable in the <tt>.bss</tt> segment. Values in the <tt>.data</tt> segment are stored in the binary file, so the loader just copies these verbatim into memory. This means we'll divide the <tt>Label</tt>s in the <tt>global</tt> map between the <tt>.bss</tt> and <tt>.data</tt> sections depending on whether the initial value of the symbol (the <tt>Immediate</tt> in the map) is zero.
 
 ~~~~
+@Set Source Format@ +=
+asmOut.append(".code64\n");
+~~~~
+
+~~~~
 @Static Classes@ +=
 static final class DefineLong extends Instruction {
   final long initialValue;
@@ -2744,7 +2756,7 @@ static final class DefineLong extends Instruction {
   }
   public String toString() { @Define Long x86 Code@ }
 }
-@Write The Output@ +=
+@Populate Bss And Data Sections@ +=
 List<Instruction> 
   bss = Lists.newArrayList(), 
   data = Lists.newArrayList();
@@ -2759,7 +2771,6 @@ for(Entry<Label, Immediate> global : program.globals.entrySet()) {
   else
     addAll(data, def, value);
 }
-@Append Instructions@
 ~~~~
 
 The <tt>text</tt> segment is where the 
@@ -2771,7 +2782,7 @@ The <tt>text</tt> segment is where the
 @Other Helpers@ +=
 static void writeSegment(Appendable out, String seg, Iterable<Instruction> is) throws IOException {
   if(Iterables.isEmpty(is)) return;
-  out.append(seg).append("\n\t.align 16\n");
+  out.append(seg).append("\n\t.p2align 4\n");
   for(Instruction i : Iterables.filter(is, noNoOps)) {
     if(!(i instanceof Definition))
       out.append('\t');
@@ -2779,9 +2790,9 @@ static void writeSegment(Appendable out, String seg, Iterable<Instruction> is) t
   }
 }
 @Append Instructions@ +=
-writeSegment(asmOut, ".section __DATA, __bss", bss);
-writeSegment(asmOut, ".section __DATA, __data", data);
-writeSegment(asmOut, ".section __TEXT, __text", Iterables.concat(program.text));
+writeSegment(asmOut, ".bss", bss);
+writeSegment(asmOut, ".data", data);
+writeSegment(asmOut, ".text", Iterables.concat(program.text));
 ~~~~
 
 Getting rid of no-ops (most importantly moves)
@@ -2825,12 +2836,8 @@ The appendices contain a few pieces of miscellaneous boilerplate. We'll start wi
 import static com.blogspot.remisthoughts.compiletoasm.UnsignedLexer.*;
 import static com.blogspot.remisthoughts.compiletoasm.Compiler.Register.*;
 import static com.blogspot.remisthoughts.compiletoasm.Compiler.WriteType.*;
-import static com.blogspot.remisthoughts.compiletoasm.Compiler.*;
 import static com.google.common.collect.Iterables.*;
-import static com.google.common.collect.Multimaps.*;
-import static com.google.common.base.Predicates.*;
 import static org.gnu.glpk.GLPK.*;
-import static org.gnu.glpk.GLPKConstants.*;
 import java.io.*;
 import java.util.*;
 import java.util.Map.*;
@@ -2840,7 +2847,6 @@ import org.antlr.runtime.CommonTokenStream;
 import org.antlr.runtime.tree.*;
 import com.google.common.base.*;
 import com.google.common.io.*;
-import com.google.common.primitives.*;
 import com.google.common.collect.*;
 import org.gnu.glpk.*;
 ~~~~
@@ -2941,7 +2947,7 @@ public static void main(String[] args) throws Exception {
     PrintStream outStream = null;
     try {
       outStream = new PrintStream(out.getAbsolutePath(), Charsets.UTF_8.name());
-      outStream.append(".file \"").append(out.getAbsolutePath()).append("\"\n");
+      outStream.append(".file \"").append(in.getPath()).append("\"\n");
       Compiler.compile(inStream = new FileInputStream(in), outStream);
     } finally {
       Closeables.close(inStream, true);

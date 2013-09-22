@@ -1,2 +1,2 @@
-a = fn () { return 0x23; };
-return a();
+$a = fn () { return 0x23; };
+return $a();

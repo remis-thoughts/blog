@@ -1,5 +1,5 @@
-fn identity(x) {
-  return x;
+fn identity($x) {
+  return $x;
 };
 
 return identity(0x3);

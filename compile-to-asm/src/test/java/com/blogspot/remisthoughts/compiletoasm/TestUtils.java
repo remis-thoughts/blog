@@ -31,7 +31,6 @@ import com.google.common.collect.Iterables;
 import com.google.common.collect.Lists;
 import com.google.common.io.ByteStreams;
 import com.google.common.io.Closeables;
-import com.google.common.io.Files;
 
 public class TestUtils {
 	public static ParsingState newParsingState() {
@@ -48,19 +47,34 @@ public class TestUtils {
 		}
 	}
 
-	private static final String GCC_CMD = "gcc -m64 -Wall -o %s %s";
+	private static String assemble() {
+		String os = System.getProperty("os.name"), output = "elf64";
+		if (os.contains("Windows")) {
+			output = "win64";
+		} else if (os.contains("Mac OS")) {
+			output = "macho64";
+		}
+		return String.format("yasm -Werror -f %s -m amd64 -p gas -o %%s %%s", output);
+	}
 
-	public static File compile(File asmFile) throws Exception {
-		File binaryFile = new File(asmFile.getParent(), StringUtils.substringBeforeLast(asmFile.getName(), "."));
-		Process gcc = Runtime.getRuntime().exec(String.format(GCC_CMD, binaryFile.getAbsolutePath(), asmFile.getAbsolutePath()));
+	private static void run(String cmd) throws Exception {
+		Process gcc = Runtime.getRuntime().exec(cmd);
 		if (gcc.waitFor() != 0) {
-			System.out.println(Files.toString(asmFile, Charsets.UTF_8));
 			print(System.out, gcc.getInputStream());
 			print(System.err, gcc.getErrorStream());
-			fail("gcc must compile " + asmFile.getName() + " successfully");
+			fail("cmd failed! " + cmd);
 		}
-		System.out.println(asmFile.getAbsolutePath());
-		System.out.println(Files.toString(asmFile, Charsets.UTF_8));
+	}
+
+	public static File assemble(File asmFile) throws Exception {
+		File binaryFile = new File(asmFile.getParent(), StringUtils.substringBeforeLast(asmFile.getName(), ".") + ".o");
+		run(String.format(assemble(), binaryFile.getAbsolutePath(), asmFile.getAbsolutePath()));
+		return binaryFile;
+	}
+
+	public static File link(File objectFile) throws Exception {
+		File binaryFile = new File(objectFile.getParent(), StringUtils.substringBeforeLast(objectFile.getName(), "."));
+		run(String.format("gcc -m64 -o %s %s", binaryFile.getAbsolutePath(), objectFile.getAbsolutePath()));
 		return binaryFile;
 	}
 

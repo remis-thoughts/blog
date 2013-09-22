@@ -1,12 +1,12 @@
-nth = 0x7;
-last = 0x1;
-this = 0x1;
+$nth = 0x7;
+$last = 0x1;
+$this = 0x1;
 
-while >(nth, 0x0) {
-	nth = -(nth, 0x1);
-	next = +(this, last);
-	last = this;
-	this = next;
+while >($nth, 0x0) {
+	$nth = -($nth, 0x1);
+	$next = +($this, $last);
+	$last = $this;
+	$this = $next;
 };
 
-return this;
+return $this;

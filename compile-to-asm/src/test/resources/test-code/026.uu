@@ -1,10 +1,10 @@
 fn check_stack_alignment() {};
 
-a = $(+(+(0x8, 0x8), 0x8));
-@a = +(a, 0x8);
-@@a = +(a, 0x10);
-@@@a = 0x1A;
+$a = $(+(+(0x8, 0x8), 0x8));
+@$a = +($a, 0x8);
+@@$a = +($a, 0x10);
+@@@$a = 0x1A;
 
 check_stack_alignment();
 
-return @(@(@(a)));
+return @(@(@($a)));

@@ -1,9 +1,9 @@
-fn one(a,b,c,d,e,f,g,h,i) {
-    return +(+(+(+(+(+(+(+(a, b), c), d), e), f), g), h), i);
+fn one($a, $b, $c, $d, $e, $f, $g, $h, $i) {
+    return +(+(+(+(+(+(+(+($a, $b), $c), $d), $e), $f), $g), $h), $i);
 };
 
-fn two(a,b,c,d,e,f,g,h,i) {
-    return one(a,b,c,d,e,f,g,h,i);
+fn two($a, $b, $c, $d, $e, $f, $g, $h, $i) {
+    return one($a, $b, $c, $d, $e, $f, $g, $h,$i);
 };
 
 return two(0x0,0x1,0x1,0x0,0x1,0x2,0x1,0x1,0x1);

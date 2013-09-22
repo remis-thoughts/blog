@@ -1,15 +1,15 @@
-fn fibs(nth) {
+fn fibs($nth) {
 	last = 0x1;
 	this = 0x1;
 	
-	while >(nth, 0x0) {
-		nth = -(nth, 0x1);
-		next = +(this, last);
-		last = this;
-		this = next;
+	while >($nth, 0x0) {
+		$nth = -($nth, 0x1);
+		$next = +($this, $last);
+		$last = $this;
+		$this = $next;
 	};
 	
-	return this;
+	return $this;
 };
 
 return -(fibs(0x7), 0x1);

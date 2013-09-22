@@ -1,8 +1,8 @@
-fn eight_args(a, b, c, d, e, f, g, h) {
+fn eight_args($a, $b, $c, $d, $e, $f, $g, $h) {
 	return 0x0;
 };
 
-a = $(8);
-@a = 0x28;
+$a = $(8);
+@$a = 0x28;
 eight_args(0x1, 0x2, 0x3, 0x4, 0x5, 0x6, 0x7, 0x8);
-return @a;
+return @$a;

@@ -1,5 +1,6 @@
 package com.blogspot.remisthoughts.compiletoasm;
 
+import static com.blogspot.remisthoughts.compiletoasm.TestUtils.assemble;
 import static com.blogspot.remisthoughts.compiletoasm.TestUtils.compile;
 import static com.blogspot.remisthoughts.compiletoasm.TestUtils.print;
 import static org.junit.Assert.assertEquals;
@@ -14,42 +15,42 @@ public class SymbolTest {
 
 	@Test
 	public void testExportFunction() throws Exception {
-		File binary = compile(compile("fn HAT() { return 0x1; };"));
+		File binary = assemble(compile("fn HAT() { return 0x1; };"));
 		String in = nm(binary);
 		assertTrue(in.contains(" T _HAT\n"));
 	}
 
 	@Test
 	public void testPrivateFunction() throws Exception {
-		File binary = compile(compile("fn hat() { return 0x1; };"));
+		File binary = assemble(compile("fn hat() { return 0x1; };"));
 		String in = nm(binary);
 		assertTrue(in.contains(" t _hat\n"));
 	}
 
 	@Test
 	public void testExportDataVariable() throws Exception {
-		File binary = compile(compile("@HAT = 0x2;"));
+		File binary = assemble(compile("@HAT = 0x2;"));
 		String in = nm(binary);
 		assertTrue(in.contains(" D _HAT\n"));
 	}
 
 	@Test
 	public void testPrivateDataVariable() throws Exception {
-		File binary = compile(compile("@hat = 0x2;"));
+		File binary = assemble(compile("@hat = 0x2;"));
 		String in = nm(binary);
 		assertTrue(in.contains(" d _hat\n"));
 	}
 
 	@Test
 	public void testExportBssVariable() throws Exception {
-		File binary = compile(compile("@HAT = 0x0;"));
+		File binary = assemble(compile("@HAT = 0x0;"));
 		String in = nm(binary);
 		assertTrue(in.contains(" B _HAT\n"));
 	}
 
 	@Test
 	public void testPrivateBssVariable() throws Exception {
-		File binary = compile(compile("@hat = 0x0;"));
+		File binary = assemble(compile("@hat = 0x0;"));
 		String in = nm(binary);
 		assertTrue(in.contains(" b _hat\n"));
 	}

@@ -1,6 +1,6 @@
-a = 0xF;
+$a = 0xF;
 
 fn b_is() { return 0xC; };
-b = b_is();
+$b = b_is();
 
-return +(a, b);
+return +($a, $b);
