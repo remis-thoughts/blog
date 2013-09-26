@@ -196,7 +196,7 @@ We'll leave <tt>Instruction</tt>'s definition mostly empty for now - we'll intro
 abstract static class Instruction { @Instruction Members@ }
 ~~~~
 
-The "intrinsic" function calls mentioned above will map directly to instances of the <tt>BinaryOp</tt> class. While not all [x86 instructions](http://ref.x86asm.net/coder64.html) take two arguments, all the "intrinsics" this compiler supports take two, and they all modify the second operand. 
+The "intrinsic" function calls mentioned above will map directly to instances of the <tt>BinaryOp</tt> class. While not all [x86 instructions](http://ref.x86asm.net/coder64.html) take two arguments, all the "intrinsics" this compiler supports take two, and they all modify the second operand. We'll add a <tt>q</tt> [suffix](http://en.wikibooks.org/wiki/X86_Assembly/GAS_Syntax#Operation_Suffixes) to all the intrinstic instructions as all our operands are eight bytes ("quads").
 
 ~~~~
 @Static Classes@ +=
@@ -2682,11 +2682,7 @@ static <I> void topologicalRemove(
 
 ## (III) Writing the Output ##
 
-You can compile the generated Assembly code with [GNU's "as"](http://tigcc.ticalc.org/doc/gnuasm.html) ([OSX-specific documentation](https://developer.apple.com/library/mac/#documentation/DeveloperTools/Reference/Assembler/000-Introduction/introduction.html)).
-
-The x86 syntax we'll use: [addl](http://stackoverflow.com/questions/1619131/addl-instruction-x86) [all instructions](http://en.wikipedia.org/wiki/X86_instruction_listings)
-
-We won't add the <tt>.type</tt> directive to add debug information about a function's type to the Assembly code as it's [not supported by the OSX version of GNU's assembler](http://stackoverflow.com/a/2752639/42543).
+We'll now write out all the <tt>Instruction</tt>s we've generated in AT&T syntax. You can compile thw generated Assembly code with [GNU's "as"](http://tigcc.ticalc.org/doc/gnuasm.html) ([OSX-specific documentation](https://developer.apple.com/library/mac/#documentation/DeveloperTools/Reference/Assembler/000-Introduction/introduction.html)) or [yasm](http://yasm.tortall.net).
 
 ~~~~
 @Write The Output@ +=
@@ -2694,6 +2690,8 @@ We won't add the <tt>.type</tt> directive to add debug information about a funct
 @Populate Bss And Data Sections@
 @Append Instructions@
 ~~~~
+
+We'll fill in all the <tt>toString</tt> methods of the <tt>Instruction</tt> subclasses, starting with <tt>Definition</tt>. If the <tt>Label</tt>'s exported we'll insert a <tt>.globl</tt> directive to tell the assembler to flag it in the symbol table it builds up.
 
 ~~~~
 @Definition x86 Code@ +=
@@ -2704,6 +2702,12 @@ return ret
   .append(label.name).append(':')
   .toString();
 ~~~~
+
+Note that this generates the same Assembly code for the symbol definition marking the beginning of a function and an label just used for control flow within a function. Assemblers can embed debug information in the generated binary to help debuggers discriminate between the two use cases (among other things). The [various formats](http://dwarfstd.org/doc/Debugging%20using%20DWARF-2012.pdf) use different methods to embed this information; _stabs_ adds extra symbols to the binary's symbol table while _dwarf_ adds all the debug information to a different section of the executable (usually with section names beginning with <tt>.debug_</tt>). The assembler expects different [directives](http://cs.mtu.edu/~mmkoksal/blog/?x=entry:entry120116-130037) for the different debug formats; COFF uses a variety of directives inside a <tt>.def</tt> block, dwarf uses a [set of directives](http://www.logix.cz/michal/devel/gas-cfi) beginning with <tt>.cfi_</tt> for stack frame tracking and a [complex](http://stackoverflow.com/questions/14422229/basic-os-x-assembly-and-the-mach-o-format) tree describing the assembly code in debug sections of the binary and stabs uses <tt>.stabs</tt> [and other](http://www.chemie.fu-berlin.de/chemnet/use/info/gas/gas_7.html#SEC122) directives.
+
+We won't add any debug info to the Assembly code we generate as assembler support for the various directives is quite patchy. While most assemblers support <tt>.file</tt> and <tt>.line</tt> directives, dwarf debugging information extends these to add a file number argument to <tt>.file</tt> (so one Assembly file can have code from a variety of input files scattered throught) and adds a <tt>.loc</tt> directive instead of <tt>.line</tt>, which can have the file and column numbers in addition to the line number as arguments.
+
+Most other <tt>Instruction</tt>s and <tt>Value</tt>s are straightforward:
 
 ~~~~
 @BinaryOp x86 Code@ += return String.format( "%s %s, %s", op, arg1, arg2);
@@ -2724,6 +2728,12 @@ if(cond == null)
   return String.format("movq %s, %s", from, to);
 else
   return String.format("cmov%s %s, %s", cond, from, to);
+@Swap x86 Code@ += return String.format("xchg %s, %s", arg1, arg2);
+~~~~
+
+<tt>Label</tt>s provide the only interesting cases as we want to generate [position independent code](http://en.wikipedia.org/wiki/Position-independent_code). x86-64 processors [implement this](http://eli.thegreenplace.net/2011/11/11/position-independent-code-pic-in-shared-libraries-on-x64) by defining the memory addresses that labels point to as relative offsets to the instruction pointer. This relative address actually points into the [Global Offset Table](http://bottomupcs.sourceforge.net/csbu/x3824.htm); when the binary is loaded into memory at runtime the loader puts the actual memory address that the label points to in this GOT entry. This means if we want to load a value from a label we have to do two memory loads; one to get the real location from the GOT and the second to get the value from the real location.
+
+~~~~
 @Label x86 Code@ += return String.format("%s@GOTPCREL(%%rip)", name);
 @At Address x86 Code@ +=
 if(at instanceof Label)
@@ -2732,20 +2742,16 @@ else if(offset.get() == 0)
   return String.format("(%s)", at);
 else
   return String.format("%s0x%X(%s)", offset.get() < 0 ? "-" : "", Math.abs(offset.get()), at);
-@Swap x86 Code@ += return String.format("xchg %s, %s", arg1, arg2);
-@Define Long x86 Code@ += 
-if(initialValue == 0)
-  return String.format(".space 0x%X", SIZE);
-else
-  return String.format(".long 0x%X", initialValue);
 ~~~~
 
-The <tt>.data</tt> and <tt>[.bss](http://en.wikipedia.org/wiki/.bss)</tt> segments of the Assembly code we output have read and write, but not execute, permissions. We'll store our exported and unexported variables here (the values that <tt>Label</tt>s in the Assembly code refer to). As space for the values stored in the <tt>.bss</tt> segment isn't allocated in the binary file the assembler creates, when the loader copies the binary file into memory it "inflates" the binary file, allocating zero-initialised memory for each variable in the <tt>.bss</tt> segment. Values in the <tt>.data</tt> segment are stored in the binary file, so the loader just copies these verbatim into memory. This means we'll divide the <tt>Label</tt>s in the <tt>global</tt> map between the <tt>.bss</tt> and <tt>.data</tt> sections depending on whether the initial value of the symbol (the <tt>Immediate</tt> in the map) is zero.
+We'll also tell the assembler that we're only generating 64-bit assembly code:
 
 ~~~~
 @Set Source Format@ +=
 asmOut.append(".code64\n");
 ~~~~
+
+### Data Sections ###
 
 ~~~~
 @Static Classes@ +=
@@ -2756,6 +2762,11 @@ static final class DefineLong extends Instruction {
   }
   public String toString() { @Define Long x86 Code@ }
 }
+~~~~
+
+The <tt>.data</tt> and <tt>[.bss](http://en.wikipedia.org/wiki/.bss)</tt> segments of the Assembly code we output have read and write, but not execute, permissions. We'll store our exported and unexported variables here (the values that <tt>Label</tt>s in the Assembly code refer to). As space for the values stored in the <tt>.bss</tt> segment isn't allocated in the binary file the assembler creates, when the loader copies the binary file into memory it "inflates" the binary file, allocating zero-initialised memory for each variable in the <tt>.bss</tt> segment. Values in the <tt>.data</tt> segment are stored in the binary file, so the loader just copies these verbatim into memory. This means we'll divide the <tt>Label</tt>s in the <tt>global</tt> map between the <tt>.bss</tt> and <tt>.data</tt> sections depending on whether the initial value of the symbol (the <tt>Immediate</tt> in the map) is zero.
+
+~~~~
 @Populate Bss And Data Sections@ +=
 List<Instruction> 
   bss = Lists.newArrayList(), 
@@ -2773,27 +2784,15 @@ for(Entry<Label, Immediate> global : program.globals.entrySet()) {
 }
 ~~~~
 
-The <tt>text</tt> segment is where the 
- We won't bother indenting the code.
-
-  The <tt>align</tt> instruction will make the assembler [insert dummy instructions](http://stackoverflow.com/a/11277804/42543) so that the first instruction of the first function begins on a 8-byte boundary.
-
 ~~~~
-@Other Helpers@ +=
-static void writeSegment(Appendable out, String seg, Iterable<Instruction> is) throws IOException {
-  if(Iterables.isEmpty(is)) return;
-  out.append(seg).append("\n\t.p2align 4\n");
-  for(Instruction i : Iterables.filter(is, noNoOps)) {
-    if(!(i instanceof Definition))
-      out.append('\t');
-    out.append(i.toString()).append('\n');
-  }
-}
-@Append Instructions@ +=
-writeSegment(asmOut, ".bss", bss);
-writeSegment(asmOut, ".data", data);
-writeSegment(asmOut, ".text", Iterables.concat(program.text));
+@Define Long x86 Code@ += 
+if(initialValue == 0)
+  return String.format(".space 0x%X", SIZE);
+else
+  return String.format(".long 0x%X", initialValue);
 ~~~~
+
+### No-Ops ###
 
 Getting rid of no-ops (most importantly moves)
 
@@ -2825,6 +2824,30 @@ public boolean isNoOp(Value arg1, StorableValue arg2) { return arg1.equals(new I
 @No Identity@ +=
 public boolean isNoOp(Value arg1, StorableValue arg2) { return false; }
 @CMPQ@ += @No Identity@
+~~~~
+
+### The Text Segment ####
+
+The <tt>text</tt> segment is where the 
+ We won't bother indenting the code.
+
+  The <tt>align</tt> instruction will make the assembler [insert dummy instructions](http://stackoverflow.com/a/11277804/42543) so that the first instruction of the first function begins on a 8-byte boundary.
+
+~~~~
+@Other Helpers@ +=
+static void writeSegment(Appendable out, String seg, Iterable<Instruction> is) throws IOException {
+  if(Iterables.isEmpty(is)) return;
+  out.append(seg).append("\n\t.p2align 4\n");
+  for(Instruction i : Iterables.filter(is, noNoOps)) {
+    if(!(i instanceof Definition))
+      out.append('\t');
+    out.append(i.toString()).append('\n');
+  }
+}
+@Append Instructions@ +=
+writeSegment(asmOut, ".bss", bss);
+writeSegment(asmOut, ".data", data);
+writeSegment(asmOut, ".text", Iterables.concat(program.text));
 ~~~~
 
 ## Appendices ##
@@ -2947,7 +2970,7 @@ public static void main(String[] args) throws Exception {
     PrintStream outStream = null;
     try {
       outStream = new PrintStream(out.getAbsolutePath(), Charsets.UTF_8.name());
-      outStream.append(".file \"").append(in.getPath()).append("\"\n");
+      outStream.append(".file 1 \"").append(in.getPath()).append("\"\n");
       Compiler.compile(inStream = new FileInputStream(in), outStream);
     } finally {
       Closeables.close(inStream, true);
