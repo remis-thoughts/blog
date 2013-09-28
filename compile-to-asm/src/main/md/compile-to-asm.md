@@ -2,7 +2,7 @@
 
 ## Introduction ##
 
-This is a [Literate](http://en.wikipedia.org/wiki/Literate_programming) Java implementation of a compiler that uses the integer programming from [this paper](http://grothoff.org/christian/lcpc2006.pdf) to generate [x86-64](http://download.intel.com/design/intarch/manuals/24319101.pdf) Assembly code ([AT&T](http://en.wikibooks.org/wiki/X86_Assembly/GAS_Syntax) format) from a toy imperative language. As this article only focuses on code generation, I'll use [antlr](http://www.antlr.org) to generate the lexer & parser from the grammar and will make no attempt to optimise the code being compiled or produce helpful error messages! 
+This is a [Literate](http://en.wikipedia.org/wiki/Literate_programming) Java implementation of a compiler that uses the integer programming from [this paper](http://grothoff.org/christian/lcpc2006.pdf) to generate [x86-64](http://download.intel.com/design/intarch/manuals/24319101.pdf) Assembly code ([AT&T](http://en.wikibooks.org/wiki/X86_Assembly/GAS_Syntax) format) from a toy imperative language. As this article only focuses on code generation, I'll use [antlr](http://www.antlr.org) to generate the lexer & parser from the grammar and will make no attempt to [optimise](https://news.ycombinator.com/item?id=6273085) the code being compiled or produce helpful error messages! 
 
 ### The language ###
 
@@ -2682,7 +2682,7 @@ static <I> void topologicalRemove(
 
 ## (III) Writing the Output ##
 
-We'll now write out all the <tt>Instruction</tt>s we've generated in AT&T syntax. You can compile thw generated Assembly code with [GNU's "as"](http://tigcc.ticalc.org/doc/gnuasm.html) ([OSX-specific documentation](https://developer.apple.com/library/mac/#documentation/DeveloperTools/Reference/Assembler/000-Introduction/introduction.html)) or [yasm](http://yasm.tortall.net).
+We'll now write out all the <tt>Instruction</tt>s we've generated in AT&T syntax. You can compile thw generated Assembly code with [GNU's "as"](http://tigcc.ticalc.org/doc/gnuasm.html) ([OSX-specific documentation](https://developer.apple.com/library/mac/#documentation/DeveloperTools/Reference/Assembler/000-Introduction/introduction.html)), [yasm](http://yasm.tortall.net) or LLVM's assembler, ["llvm-mc"](???).
 
 ~~~~
 @Write The Output@ +=
@@ -2718,8 +2718,6 @@ if(name instanceof Label)
   return String.format( "call %s", ((Label)name).name); // call a label
 else
   return String.format( "call *%s", name); // indirect function call - code address in a register
-@Section x86 Code@ += return String.format( ".%s", name()); 
-@Text x86 Code@ += ".text"
 @Ret x86 Code@ += "ret"
 @Immediate x86 Code@ += return String.format("$0x%X", value.get());
 @Jump x86 Code@ += return String.format("j%s %s", cond == null ? "mp" : cond, to.name);
@@ -2753,6 +2751,8 @@ asmOut.append(".code64\n");
 
 ### Data Sections ###
 
+We'll represent the memory locations that the exported and un-exported <tt>Label</tt>s point to as another subclass of <tt>Instruction</tt>. The initial value - the value we'll embed in the binary file - is the <tt>Immediate</tt> from the <tt>globals</tt> field of the <tt>ProgramState</tt>.
+
 ~~~~
 @Static Classes@ +=
 static final class DefineLong extends Instruction {
@@ -2764,7 +2764,7 @@ static final class DefineLong extends Instruction {
 }
 ~~~~
 
-The <tt>.data</tt> and <tt>[.bss](http://en.wikipedia.org/wiki/.bss)</tt> segments of the Assembly code we output have read and write, but not execute, permissions. We'll store our exported and unexported variables here (the values that <tt>Label</tt>s in the Assembly code refer to). As space for the values stored in the <tt>.bss</tt> segment isn't allocated in the binary file the assembler creates, when the loader copies the binary file into memory it "inflates" the binary file, allocating zero-initialised memory for each variable in the <tt>.bss</tt> segment. Values in the <tt>.data</tt> segment are stored in the binary file, so the loader just copies these verbatim into memory. This means we'll divide the <tt>Label</tt>s in the <tt>global</tt> map between the <tt>.bss</tt> and <tt>.data</tt> sections depending on whether the initial value of the symbol (the <tt>Immediate</tt> in the map) is zero.
+The <tt>.data</tt> and <tt>[.bss](http://en.wikipedia.org/wiki/.bss)</tt> segments of the Assembly code we output have read and write, but not execute, permissions. We'll store our exported and unexported variables here, although we'll make no attempt to group the variables in each segment either by whether or not they're exported or by the patterns of read and write accesses to them. As space for the values stored in the <tt>.bss</tt> segment isn't allocated in the binary file the assembler creates, when the loader copies the binary file into memory it "inflates" the binary file, allocating zero-initialised memory for each variable in the <tt>.bss</tt> segment. Values in the <tt>.data</tt> segment are stored in the binary file, so the loader just copies these verbatim into memory. This means we'll divide the <tt>Label</tt>s in the <tt>global</tt> map between the <tt>.bss</tt> and <tt>.data</tt> sections depending on whether the initial value of the symbol (the <tt>Immediate</tt> in the map) is zero.
 
 ~~~~
 @Populate Bss And Data Sections@ +=
@@ -2784,6 +2784,8 @@ for(Entry<Label, Immediate> global : program.globals.entrySet()) {
 }
 ~~~~
 
+If we're putting a <tt>DefineLong</tt> in the <tt>.bss</tt> section we only need to use a <tt>.space</tt> directive, as the inital value will always be zero. We could have put <tt>.long 0x0</tt>, but different directives emphasise the different semantics of the <tt>.data</tt> and <tt>.bss</tt> segments.
+
 ~~~~
 @Define Long x86 Code@ += 
 if(initialValue == 0)
@@ -2794,7 +2796,7 @@ else
 
 ### No-Ops ###
 
-Getting rid of no-ops (most importantly moves)
+When we ran the register allocation algorithm in the second part of this algorithm we tried to make the source and destination operands of the function's <tt>mov</tt> instructions the same. We also always inserted <tt>add</tt> and <tt>sub</tt> instructions at the start and end of each the function, even if we didn't need to allocate any space on the stack. The source code could also contain functions that have no effect, such as <tt>a = +(a, 0);</tt>. We don't want to write any of these <tt>Instruction</tt>s to the final Assembly output, but instead of deleting them from the <tt>code</tt> <tt>List</tt>s in the <tt>ParsingState</tt> objects we'll add a <tt>isNoOp</tt> method to the <tt>Instruction</tt> class so we can identify them. When we're writing out the code we can just skip over any instruction where <tt>isNoOp</tt> returns true.
 
 ~~~~~
 @Instruction Members@ += 
@@ -2803,14 +2805,24 @@ boolean isNoOp() { return false; }
 static final Predicate<Instruction> noNoOps = new Predicate<Instruction>() {
   public boolean apply(Instruction i) { return !i.isNoOp(); }
 };
-@BinaryOp Members@ +=
-boolean isNoOp() { return op.isNoOp(arg1, arg2); } 
-@Op Members@ +=
-public abstract boolean isNoOp(Value arg1, StorableValue arg2);
+~~~~
+
+The implementations in the <tt>Instruction</tt> subclasses are pretty straight-forward; <tt>mov</tt>s and <tt>xchg</tt> instructions are no-ops if both operands are the same, but a <tt>BinaryOp</tt> <tt>Instruction</tt>'s behaviour depends on what its <tt>Op</tt> is.
+
+~~~~
 @Move Members@ +=  
 public boolean isNoOp() { return from.equals(to); }
 @Swap Members@ +=
 public boolean isNoOp() { return arg1.equals(arg2); }
+@BinaryOp Members@ +=
+boolean isNoOp() { return op.isNoOp(arg1, arg2); } 
+@Op Members@ +=
+public abstract boolean isNoOp(Value arg1, StorableValue arg2);
+~~~~
+
+Since the x86 instructions that a <tt>BinaryOp</tt> represents all modify their second operand, only the first operand can be an <tt>Immediate</tt>. If an operand is not an <tt>Immediate</tt> we can't tell at compile-time whether that <tt>Instruction</tt> will have any effect on its second operand, so all of the <tt>isNoOp</tt> checks only return true if the first operand is an <tt>Immediate</tt>. Most of the <tt>Op</tt>s are no-ops if the first operand is zero, for example <tt>a + 0 == a</tt> and <tt>a</tt> shifted left or right by zero bits is still <tt>a</tt>. 
+
+~~~~
 @Zero Is Identity@ +=
 public boolean isNoOp(Value arg1, StorableValue arg2) { return arg1.equals(new Immediate(0)); }
 @ADDQ@ += @Zero Is Identity@
@@ -2818,20 +2830,26 @@ public boolean isNoOp(Value arg1, StorableValue arg2) { return arg1.equals(new I
 @ORQ@ += @Zero Is Identity@
 @SHRQ@ += @Zero Is Identity@
 @SHLQ@ += @Zero Is Identity@
-@All Bits Set Is Identity@ +=
-public boolean isNoOp(Value arg1, StorableValue arg2) { return arg1.equals(new Immediate(0xFFFFFFFFFFFFFFFFL)); }
-@ANDQ@ += @All Bits Set Is Identity@
+~~~~
+
+The last two <tt>Op</tt>s are more interesting. Mathematically speaking, any 64-bit value <tt>and</tt>ed with <tt>0xFFFFFFFFFFFFFFFFL</tt> (i.e. 64 1s) will not change, however in x86-64 Assembly code [only](???) <tt>mov</tt> instructions can have 64-bit immediate operands. <tt>and</tt> instructions can have at most 32-bit operands, so although this compiler will output a <tt>andq 0xFFFFFFFFFFFFFFFF, a</tt> instruction when compiling <tt>a = &(a, 0xFFFFFFFFFFFFFFFFL)</tt> the assembler will only output an <tt>andq 0xFFFFFFFF, a</tt> instruction into the binary it generates (and should generate a warning or an error).
+
+Similiarly, we can't decide at this point if a <tt>cmp</tt> instruction is a no-op at compile-time as the second operand has to be a <tt>StorableValue</tt>, so can't be an <tt>Immediate</tt>. While statements in the source code like <tt>a = ?(0x1, 0x1);</tt> can clearly be compiled as <tt>a = 1;</tt> we'll consider this an optimisation performed by the compiler (it's a form of constant propagation), and we've declared above that this compiler won't do any optimisation of the source code.
+
+~~~~
 @No Identity@ +=
 public boolean isNoOp(Value arg1, StorableValue arg2) { return false; }
+@ANDQ@ += @No Identity@
 @CMPQ@ += @No Identity@
 ~~~~
 
-### The Text Segment ####
+### Writing The Segments ####
 
-The <tt>text</tt> segment is where the 
- We won't bother indenting the code.
+We'll only write out a section if it has at least one <tt>Instruction</tt>, so for example if we don't have any zero-initialised <tt>Label</tt>s we won't write out a <tt>.bss</tt> segment. We'll also align each segment as [on some processors](???) that will make accessing the first memory address (either executable code in the <tt>.text</tt> segment or data in the <tt>.bss</tt> or <tt>.data</tt> segments). As all <tt>Value</tt>s in the the compiled language are 64-bits every value stored in the <tt>.data</tt> or <tt>.bss</tt> segments will be 8- or 16-byte aligned. The <tt>.p2align</tt> directive (which is slightly [more portable](???) than the <tt>.align</tt> directive as it as consistent behaviour across all architectures - not that it matters as we're only compiling for x86-64) will make the assembler [insert dummy instructions](http://stackoverflow.com/a/11277804/42543) so that the first <tt>Instruction</tt> of the segment begins on a 16-byte boundary, as the <tt>4</tt> means "ensure the right-most four bits are zero".
 
-  The <tt>align</tt> instruction will make the assembler [insert dummy instructions](http://stackoverflow.com/a/11277804/42543) so that the first instruction of the first function begins on a 8-byte boundary.
+It's safe to the no-op filtering after the <tt>isEmpty</tt> check as only <tt>Instruction</tt>s in the <tt>.text</tt> segment can be no-ops, and if the <tt>.text</tt> segment has at least one function it'll have at least one <tt>Definition</tt> <tt>Instruction</tt>, which can never be a no-op. 
+
+We'll do some minor formatting of the generated Assembly code; we'll indent everything with a tab unless it's a <tt>Label<tt> <tt>Definition</tt>, the <tt>.code64</tt> directive we printed as the first line of the output or any of the alignment or segment name directives this method prints.
 
 ~~~~
 @Other Helpers@ +=
@@ -2844,6 +2862,11 @@ static void writeSegment(Appendable out, String seg, Iterable<Instruction> is) t
     out.append(i.toString()).append('\n');
   }
 }
+~~~~
+
+We can now use this method to write out all three segments. The <tt>.text</tt> segment is the only segment we're writing to which has execute permissions by default, so we'll put all the Assembly code we've generated for the functions there. The <tt>List</tt>s of <tt>Instruction</tt>s in the <tt>ProgramState</tt> are concatenated without re-ordering, so the functions will appear in the <tt>.text</tt> segment in the same order that they appear in the source code (with nested functions appearing before the functions they are declared in). It may be more efficient to put the code for functions that call each other next to each other, so when the code for the caller is pulled into the instruction cache any code for the called function on the same cache line will be pulled in for free, saving a memory load when we make the call.
+
+~~~~
 @Append Instructions@ +=
 writeSegment(asmOut, ".bss", bss);
 writeSegment(asmOut, ".data", data);
