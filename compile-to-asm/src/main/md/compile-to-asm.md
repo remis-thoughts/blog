@@ -1536,16 +1536,20 @@ code.add(new Definition(endWhile, false, false));
 
 ## (II) Register Allocation via Linear Programming ##
 
-We'll do this function-by-function
-http://www.xypron.de/projects/linopt/apidocs/index.html [the paper](http://grothoff.org/christian/lcpc2006.pdf)
-Note: insert stack moves first so frame pointer variable is resolved later.
+We now need to change the <tt>Variable</tt>s our <tt>Instruction</tt>s generate into <tt>Register</tt>s. Our choice of registers will affect the performance of the code we generate, as there's only a finite number of registers we can use, and all the <tt>Variable</tt>s we don't have room to store in these <tt>Register</tt>s will have to be stored on the stack, and we'll have to use expensive memory accesses whenever we need to read from or write to them. We can phrase the problem of register assignment as a [linear programming](???) problem as [this paper](http://grothoff.org/christian/lcpc2006.pdf) describes, which will give us an assignment of <tt>Variable</tt>s to <tt>Register</tt>s with the fewest spills to memory. We'll run this register allocation function-by-function, as the locations of <tt>Variable</tt>s passed between functions is fixed by the ABI, so we are only free to decide their location within a single function.
+
+We can use 15 of the x86-64 architecture's registers as general purpose registers to store <tt>Variable</tt>s in:
 
 ~~~~
-@Do Register Allocation@ +=
-ControlFlowGraph controlFlow = new ControlFlowGraph(state.code, state.framePointer);
-if(controlFlow.variables.length > 0) {
-  @Solve@
-}
+@Other Helpers@ +=
+static final Register[] ASSIGNABLE = { 
+  rax, rbx, rcx, rdx, rbp, rsi, rdi, r8, r9, r10, r11, r12, r13, r14, r15, THESTACK 
+};
+~~~~
+
+We'll use the Java [SWIG bindings](http://www.xypron.de/projects/linopt/apidocs/index.html) for the [GLPK](???) to actually solve the linear programming problem. A linear programming problem basically asks for a value for each of a set of variables to minimise (or maximise) a particular function (the "objective function"), subject to a series of constraints on the values of these variables. For our problem of variable assignment, most of the variables are going to be of the form "is variable _x_ in register _y_ at this point?". We need a clear yes-or-no answer, so we need to constrain the values that the linear programming variable can to *integers* between 0 and 1 (inclusive), which we'll interpret as a yes or no accordingly. The requirement that the value is an integer means our problem is actually an [integer programming](http://en.wikipedia.org/wiki/Integer_programming) problem.
+
+~~~~
 @Other Helpers@ +=
 static glp_prob getLPproblem(ControlFlowGraph controlFlow) {
   glp_prob allocation = glp_create_prob();
@@ -1554,31 +1558,155 @@ static glp_prob getLPproblem(ControlFlowGraph controlFlow) {
   @Finalise Problem@
   return allocation;
 }
-static void copySolutionIntoCode(glp_prob allocation, ControlFlowGraph controlFlow, ParsingState state) {
-  @Copy Solution Into Code@
-  @Calculate Stack Moves Needed@
-  @Insert Stack Moves@
-}
 ~~~~
 
-We'll only assign to the x86's general purpose registers:
+### The Node Graph ###
 
-Each instruction has a node before it and a node after it, but instructions may share nodes with each other due to branching. 
-
-The control flow graph has to take into account conditional and unconditional jumps, so _Instructions_ need to provide information about where control flow goes next. 
+However, we need a lot more information about how data in our <tt>Variable</tt>s flows through the <tt>Instruction</tt>s of our function, which we'll store in an instance of <tt>ControlFlowGraph</tt>. The <tt>Instruction</tt>s we've generated are usually executed sequentially, however the various <tt>Jump</tt> <tt>Instruction</tt>s can (if they have <tt>Condition</tt>s) or will (if they don't) make the next instruction the CPU executes be the one at the <tt>Label</tt> that the <tt>Jump</tt> points to. We'll make each <tt>Instruction</tt> expose this information using two methods; <tt>isNextInstructionReachable</tt> will return true if the CPU could execute the <tt>Instruction</tt> directly after this one - so only unconditional <tt>Jump</tt> and <tt>ret</tt> <tt>Instruction</tt>s will return false.
 
 ~~~~
 @Instruction Members@ +=
 boolean isNextInstructionReachable() { return true; }
-Label couldJumpTo() { return null; }
 @Ret Members@ +=
 boolean isNextInstructionReachable() { return false; }
 @Jump Members@ += 
 boolean isNextInstructionReachable() { return cond != null; }
+~~~~
+
+The other method is <tt>couldJumpTo</tt>, which returns the <tt>Label</tt> marking the <tt>Instruction</tt> that the CPU could execute next, if the CPU doesn't just execute the <tt>Instruction</tt> following the current one. This will be null for most <tt>Instruction</tt>s (i.e. control flow won't jump to a different <tt>Instruction</tt>).
+
+~~~~
+@Instruction Members@ +=
+Label couldJumpTo() { return null; }
+@Jump Members@ += 
 Label couldJumpTo() { return to; }
 ~~~~
 
-We need two separate bits of information from this graph; how the nodes relate to each other and how the instructions fit in between the nodes. 
+
+We'll use these two method to building up a [directed graph](http://en.wikipedia.org/wiki/Directed_graph). The nodes in this graph will sit between <tt>Instruction</tt>s, so every <tt>Instruction</tt> will have at exactly one node before them and at least one node after them. Each <tt>Instruction</tt> adds a link to the graph between the node before and after it, and we'll add another link for every <tt>Instruction</tt> that returns a <tt>Label</tt> from <tt>couldJumpTo</tt>. This link will be between the node before this <tt>Instruction</tt> and the node before the <tt>Definition</tt> <tt>Instruction</tt> that defines the <tt>Label</tt> being jumped to. The example below shows part of a directed graph, where the numbers 1-5 are nodes.
+
+<pre>
+             ...
+              |
++------------>1
+|             |
+|           +--+
+|           |a:|
+|           +--+
+|             |
+|             2
+|             |
+|           +----------+
+|           |add 0x1, b|
+|           +----------+
+|             |
+|             3
+|             |
+|           +----------+
+|           |cmp 0x3, b|
+|           +----------+
+|             |
+|             4
+|             |
+|           +-----+
++-----------|jne a|
+            +-----+
+              |
+              5
+              |
+            +-----------+
+            |mov b, %rax|
+            +-----------+
+              |
+             ...
+</pre>
+
+We'll use Java <tt>int</tt>s as nodes, and we'll ensure that the nodes after each <tt>ret</tt> are the same <tt>LAST_NODE</tt> node. This makes traversing the directed graph backwards is as easy as traversing it forwards, as there's a single point of entry (a single starting node) either way. We'll also use the <tt>FIRST_NODE</tt> constant as the node before the first <tt>Instruction</tt> (the <tt>Definition</tt> for the function name). As we have one <tt>ControlFlowGraph</tt> instance per function we can store the node before each <tt>Instruction</tt> in an <tt>int[]</tt> arrays, where the index in the array is the index of the <tt>Instruction</tt> in the <tt>code</tt> <tt>List</tt> of the current function's <tt>ParsingState</tt>. As we can have more than one node after an <tt>Instruction</tt> we'll store those nodes in a <tt>Multimap</tt>, where the key is the same index of the <tt>Instruction</tt> in the code <tt>List</tt>. We'll keep track of the total number of nodes in the too as we'll use that later to iterate over all the nodes in the graph.
+
+~~~~
+@Control Flow Graph Members@ +=
+private static final int FIRST_NODE = 0, LAST_NODE = 1, UNASSIGNED = -1;
+int numNodes;
+int[] prevNode;
+Multimap<Integer, Integer> nextNodes = TreeMultimap.create(); 
+~~~~
+
+Note that although nodes can have more than one node before them or after them we only 
+
+We'll traverse through the function's <tt>Instruction</tt>s filling in the <tt>prevNode</tt> arrays and the <tt>nextNodes</tt> map, creating new nodes if needed or adding links to older nodes. We want to know if we've assigned a previous node to an <tt>Instruction</tt>, so we'll fill all the indices in the array with a dummy node, <tt>UNASSIGNED</tt>. However, we'll leave the zero'th <tt>prevNode</tt> as the default value of zero (i.e. <tt>FIRST_NODE</tt>) as the first <tt>Instruction</tt> in the code <tt>List</tt> is always the function's <tt>Definition</tt>. The <tt>highestNode</tt> is the next node we'll allocate if we need one; it's never part of the directed graph.
+
+~~~~
+@Initialize The Node Lists@ +=
+int highestNode = LAST_NODE + 1;
+prevNode = new int[code.size()]; Arrays.fill(prevNode, 1, code.size(), UNASSIGNED);
+~~~~
+
+Now we can iterate through the function's <tt>List</tt> of <tt>Instruction</tt>s, where at least one of three properties will hold: 
+
+~~~~
+@Fit Instructions Between Nodes@ +=
+@Initialize The Node Lists@
+for(int i = 0; i < code.size(); ++i ) {
+  Instruction instr = code.get(i);
+  if(instr.isNextInstructionReachable()) {
+    @Choose Next Node@
+  }
+  if(instr.couldJumpTo() != null) {
+    @Jump To Node@
+  }
+  if(nextNodes.get(i).isEmpty()) {
+    @Choose Last Node@
+  }
+}
+this.numNodes = highestNode;
+~~~~
+
+The first property, is that control flow could reach the next <tt>Instruction</tt>. If this is the case, and the next <tt>Instruction</tt> has already been assigned a <tt>prevNode</tt>, then that <tt>prevNode</tt> must be one of our <tt>nextNodes</tt>. Otherwise, we'll create a new node by taking the current value of the <tt>highestNode</tt> counter (as it's an unallocated node), and incrementing it to point to a new unallocated node. As the 'special' nodes, <tt>FIRST_NODE</tt>, <tt>LAST_NODE</tt> and <tt>UNASSIGNED</tt> are all less than <tt>highestNode</tt>'s initial value we know we won't use them as unallocated nodes (as long the <tt>++</tt> operation doesn't overflow and we try to allocate more than <tt>2 ** 32 - 3</tt> nodes).
+
+~~~~
+@Choose Next Node@
+if(prevNode[i+1] == UNASSIGNED) 
+  prevNode[i+1] = highestNode++; 
+nextNodes.put(i, prevNode[i+1]);
+~~~~
+
+The second property holds if control flow can jump to another <tt>Label</tt>. We'll find the <tt>Instruction</tt> where that <tt>Label</tt> is defined, and if we know what node comes directly before it we'll add that to our next nodes. As above, if we don't know the node before the <tt>Instruction</tt> we're jumping to (e.g. if we're jumping forward) we'll allocate a new node using the <tt>highestNode</tt> counter.
+
+~~~~
+@Jump To Node@ +=
+int nextInstr = code.indexOf(new Definition(instr.couldJumpTo(), false, false));
+if(prevNode[nextInstr] == UNASSIGNED)
+  prevNode[nextInstr] = highestNode++;
+nextNode.put(i, prevNode[nextInstr]);
+~~~~
+
+If control flow can't reach an <tt>Instruction</tt> after the current one, and the current instruction doesn't jump to another node then the last property must hold and the <tt>Instruction</tt> must be a <tt>ret</tt>. We'll indicate that this <tt>Instruction</tt> is one exit from the function by making the next node the <tt>LAST_NODE</tt> marker.
+
+~~~~
+@Choose Last Node@ +=
+nextNodes.put(i, LAST_NODE);
+~~~~
+
+We now have a O(1) lookup for the node before an <tt>Instruction</tt> and an O(lg n) lookup for the nodes after an <tt>Instruction</tt> (where n is the number of <tt>Instruction</tt>s in the function). However, getting the <tt>Instruction</tt>s after a node is O(n) as it require a scan of the <tt>prevNode</tt> array, and calculating the <tt>Instruction</tt>s before a node is O(n) as it requires a scan of the <tt>nextNodes</tt> map.
+
+~~~~
+@Control Flow Graph Members@ +=
+Iterable<Integer> nodesBefore(int n) {
+  
+}
+Iterable<Integer> nodesAfter(int n) {
+  
+}
+Iterable<Integer> instructionsBefore(int n) {
+  
+}
+Iterable<Integer> instructionsAfter(int n) {
+  
+}
+~~~~
+
+
+### Dead Code Elimination ###
 
 ~~~~
 @Other Helpers@ +=
@@ -1600,65 +1728,25 @@ static final class ControlFlowGraph {
     @Generate GLPK Mappings@
   }
 }
-~~~~
+~~~~ 
 
-Firstly: how nodes relate to the graph. This will create new nodes (i.e. increment _highestNode_) as needed. It's important we check both branches, as even though we'll only set our next node once (even if we branch) we want to make sure every node has a previous node set.
+s or 
+
+Note: insert stack moves first so frame pointer variable is resolved later.
 
 ~~~~
-@Control Flow Graph Members@ +=
-private static final int FIRST_NODE = 0, LAST_NODE = 1, UNASSIGNED = -1;
-int numNodes;
-int[] prevNode, nextNode;
-@Fit Instructions Between Nodes@ +=
-int highestNode = LAST_NODE + 1;
-prevNode = new int[code.size()]; Arrays.fill(prevNode, 1, code.size(), UNASSIGNED);
-nextNode = new int[code.size()]; Arrays.fill(nextNode, UNASSIGNED);
-for(int i = 0; i < code.size(); ++i ) {
-  Instruction instr = code.get(i);
-  if(instr.isNextInstructionReachable()) {
-    if(prevNode[i+1] == UNASSIGNED) prevNode[i+1] = highestNode++; 
-    nextNode[i] = prevNode[i+1];
-  }
-  if(instr.couldJumpTo() != null) {
-    int nextInstr = code.indexOf(new Definition(instr.couldJumpTo(), false, false));
-    if(prevNode[nextInstr] != UNASSIGNED) nextNode[i] = prevNode[nextInstr]; // e.g. a loop
-    else if(nextNode[i] != UNASSIGNED) prevNode[nextInstr] = nextNode[i];
-    else nextNode[i] = prevNode[nextInstr] = highestNode++; 
-  }
-  if(nextNode[i] == UNASSIGNED) nextNode[i] = LAST_NODE; // control terminates, e.g. a ret
+@Do Register Allocation@ +=
+ControlFlowGraph controlFlow = new ControlFlowGraph(state.code, state.framePointer);
+if(controlFlow.variables.length > 0) {
+  @Solve@
 }
-this.numNodes = highestNode;
-~~~~
-
-Now we know where nodes fit into the graph we can build up a map of which instructions directly follow each node. We'll use this after we've decided what variables we need to spill or load from the stack as we'll need to know where to insert the instructions to do this.
-
-~~~~
-@Control Flow Graph Members@ +=
-Multimap<Integer, Integer> 
-  instructionsFollowingNode, 
-  instructionsBeforeNode; 
-@Map Nodes To Instructions@ +=
-instructionsFollowingNode = TreeMultimap.create(); 
-instructionsBeforeNode = TreeMultimap.create();
-for(int i = 0; i < code.size(); ++i ) {
-  instructionsFollowingNode.put(prevNode[i], i);
-  instructionsBeforeNode.put(nextNode[i], i);
+static void copySolutionIntoCode(glp_prob allocation, ControlFlowGraph controlFlow, ParsingState state) {
+  @Copy Solution Into Code@
+  @Calculate Stack Moves Needed@
+  @Insert Stack Moves@
 }
 ~~~~
 
-...and a map of nodes to nodes
-
-~~~~
-@Control Flow Graph Members@ +=
-Multimap<Integer, Integer> nextNodes, prevNodes;
-@Join Nodes Together@ +=
-nextNodes = TreeMultimap.create();
-prevNodes = TreeMultimap.create();
-for(int i = 0; i < code.size(); ++i) {
-  nextNodes.put(prevNode[i], nextNode[i]);
-  prevNodes.put(nextNode[i], prevNode[i]);
-}
-~~~~
 
 Dead code is all code only reachable from an UNASSIGNED node (and no other path)
 
@@ -1925,13 +2013,6 @@ Collections.sort(columns);
 ~~~~
 
 The first (and most important) set of unknowns are the _VarInRegAtInstr_ columns: which register each variable is in at each node in the control flow graph, assuming it's live. 
-
-~~~~
-@Other Helpers@ +=
-  static final Register[] ASSIGNABLE = { 
-    rax, rbx, rcx, rdx, rbp, rsi, rdi, r8, r9, r10, r11, r12, r13, r14, r15, THESTACK 
-  };
-~~~~
 
 ~~~~
 @Other Helpers@ +=

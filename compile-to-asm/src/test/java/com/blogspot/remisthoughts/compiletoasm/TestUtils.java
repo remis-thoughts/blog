@@ -47,23 +47,18 @@ public class TestUtils {
 		}
 	}
 
-	private static String assemble() {
-		String os = System.getProperty("os.name"), output = "elf64";
-		if (os.contains("Windows")) {
-			output = "win64";
-		} else if (os.contains("Mac OS")) {
-			output = "macho64";
-		}
-		return String.format("yasm -Werror -f %s -m amd64 -p gas -o %%s %%s", output);
+	private static String assemble() throws Exception {
+		return "llvm-mc -assemble -arch x86-64 -n -filetype obj -o %s %s";
 	}
 
-	private static void run(String cmd) throws Exception {
+	private static String run(String cmd) throws Exception {
 		Process gcc = Runtime.getRuntime().exec(cmd);
+		String ret = print(System.out, gcc.getInputStream());
 		if (gcc.waitFor() != 0) {
-			print(System.out, gcc.getInputStream());
 			print(System.err, gcc.getErrorStream());
 			fail("cmd failed! " + cmd);
 		}
+		return ret;
 	}
 
 	public static File assemble(File asmFile) throws Exception {
