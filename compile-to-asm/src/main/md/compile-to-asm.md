@@ -1583,36 +1583,28 @@ Label couldJumpTo() { return to; }
 ~~~~
 
 
-We'll use these two method to building up a [directed graph](http://en.wikipedia.org/wiki/Directed_graph). The nodes in this graph will sit between <tt>Instruction</tt>s, so every <tt>Instruction</tt> will have at exactly one node before them and at least one node after them. Each <tt>Instruction</tt> adds a link to the graph between the node before and after it, and we'll add another link for every <tt>Instruction</tt> that returns a <tt>Label</tt> from <tt>couldJumpTo</tt>. This link will be between the node before this <tt>Instruction</tt> and the node before the <tt>Definition</tt> <tt>Instruction</tt> that defines the <tt>Label</tt> being jumped to. The example below shows part of a directed graph, where the numbers 1-5 are nodes.
+We'll use these two method to building up a [directed graph](http://en.wikipedia.org/wiki/Directed_graph). The <tt>Instruction</tt>s are the nodes in this graph, and they hold the state just before they are executed. The links between the <tt>Instruction</tt>s are created based on the what <tt>couldJumpTo</tt> and <tt>isNextInstructionReachable</tt> return:
 
 <pre>
              ...
               |
-+------------>1
++-------------+
 |             |
 |           +--+
 |           |a:|
 |           +--+
 |             |
-|             2
-|             |
 |           +----------+
 |           |add 0x1, b|
 |           +----------+
-|             |
-|             3
 |             |
 |           +----------+
 |           |cmp 0x3, b|
 |           +----------+
 |             |
-|             4
-|             |
 |           +-----+
 +-----------|jne a|
             +-----+
-              |
-              5
               |
             +-----------+
             |mov b, %rax|
@@ -1621,31 +1613,19 @@ We'll use these two method to building up a [directed graph](http://en.wikipedia
              ...
 </pre>
 
-We'll use Java <tt>int</tt>s as nodes, and we'll ensure that the nodes after each <tt>ret</tt> are the same <tt>LAST_NODE</tt> node. This makes traversing the directed graph backwards is as easy as traversing it forwards, as there's a single point of entry (a single starting node) either way. We'll also use the <tt>FIRST_NODE</tt> constant as the node before the first <tt>Instruction</tt> (the <tt>Definition</tt> for the function name). As we have one <tt>ControlFlowGraph</tt> instance per function we can store the node before each <tt>Instruction</tt> in an <tt>int[]</tt> arrays, where the index in the array is the index of the <tt>Instruction</tt> in the <tt>code</tt> <tt>List</tt> of the current function's <tt>ParsingState</tt>. As we can have more than one node after an <tt>Instruction</tt> we'll store those nodes in a <tt>Multimap</tt>, where the key is the same index of the <tt>Instruction</tt> in the code <tt>List</tt>. We'll keep track of the total number of nodes in the too as we'll use that later to iterate over all the nodes in the graph.
+We'll use two <tt>Multimaps</tt> to store indices into the <tt>code</tt> <tt>List</tt>, as each <tt>Instruction</tt> can have more than one predecessor (e.g. a <tt>Definition</tt> that control flow jumps to) or successor (e.g. a conditional <tt>Jump</tt>). We'll use <tt>code.size()</tt> to represent the node in the graph that comes after all <tt>ret</tt> <tt>Instruction</tt>s. This makes traversing the directed graph backwards is as easy as traversing it forwards, as there's a single point of entry (a single starting node) either way. As the nodes represent the state before their <tt>Instruction</tt>. This means the graph node <tt>0</tt> is the node before the first <tt>Instruction</tt> (the <tt>Definition</tt> for the function name).
 
 ~~~~
 @Control Flow Graph Members@ +=
-private static final int FIRST_NODE = 0, LAST_NODE = 1, UNASSIGNED = -1;
-int numNodes;
-int[] prevNode;
-Multimap<Integer, Integer> nextNodes = TreeMultimap.create(); 
+Multimap<Integer, Integer> 
+  next = TreeMultimap.create(),
+  previous = TreeMultimap.create(); 
 ~~~~
 
-Note that although nodes can have more than one node before them or after them we only 
-
-We'll traverse through the function's <tt>Instruction</tt>s filling in the <tt>prevNode</tt> arrays and the <tt>nextNodes</tt> map, creating new nodes if needed or adding links to older nodes. We want to know if we've assigned a previous node to an <tt>Instruction</tt>, so we'll fill all the indices in the array with a dummy node, <tt>UNASSIGNED</tt>. However, we'll leave the zero'th <tt>prevNode</tt> as the default value of zero (i.e. <tt>FIRST_NODE</tt>) as the first <tt>Instruction</tt> in the code <tt>List</tt> is always the function's <tt>Definition</tt>. The <tt>highestNode</tt> is the next node we'll allocate if we need one; it's never part of the directed graph.
-
-~~~~
-@Initialize The Node Lists@ +=
-int highestNode = LAST_NODE + 1;
-prevNode = new int[code.size()]; Arrays.fill(prevNode, 1, code.size(), UNASSIGNED);
-~~~~
-
-Now we can iterate through the function's <tt>List</tt> of <tt>Instruction</tt>s, where at least one of three properties will hold: 
+Now we can iterate through the function's <tt>List</tt> of <tt>Instruction</tt>s, where at each <tt>Instruction</tt> at least one of three properties will hold: 
 
 ~~~~
 @Fit Instructions Between Nodes@ +=
-@Initialize The Node Lists@
 for(int i = 0; i < code.size(); ++i ) {
   Instruction instr = code.get(i);
   if(instr.isNextInstructionReachable()) {
@@ -1654,59 +1634,42 @@ for(int i = 0; i < code.size(); ++i ) {
   if(instr.couldJumpTo() != null) {
     @Jump To Node@
   }
-  if(nextNodes.get(i).isEmpty()) {
+  if(next.get(i).isEmpty()) {
     @Choose Last Node@
   }
 }
-this.numNodes = highestNode;
 ~~~~
 
-The first property, is that control flow could reach the next <tt>Instruction</tt>. If this is the case, and the next <tt>Instruction</tt> has already been assigned a <tt>prevNode</tt>, then that <tt>prevNode</tt> must be one of our <tt>nextNodes</tt>. Otherwise, we'll create a new node by taking the current value of the <tt>highestNode</tt> counter (as it's an unallocated node), and incrementing it to point to a new unallocated node. As the 'special' nodes, <tt>FIRST_NODE</tt>, <tt>LAST_NODE</tt> and <tt>UNASSIGNED</tt> are all less than <tt>highestNode</tt>'s initial value we know we won't use them as unallocated nodes (as long the <tt>++</tt> operation doesn't overflow and we try to allocate more than <tt>2 ** 32 - 3</tt> nodes).
+The first property, is that control flow could reach the next <tt>Instruction</tt>. If this is the case, we can easily chain the two <tt>Instruction</tt>s together as we know the graph node - the index of the <tt>code</tt> <tt>List</tt> - for the next <tt>Instruction</tt> is just one greater than this <tt>Instruction</tt>'s index.
 
 ~~~~
-@Choose Next Node@
-if(prevNode[i+1] == UNASSIGNED) 
-  prevNode[i+1] = highestNode++; 
-nextNodes.put(i, prevNode[i+1]);
+@Choose Next Node@ +=
+previous.put(i+1, i);
+next.put(i, i+1);
 ~~~~
 
-The second property holds if control flow can jump to another <tt>Label</tt>. We'll find the <tt>Instruction</tt> where that <tt>Label</tt> is defined, and if we know what node comes directly before it we'll add that to our next nodes. As above, if we don't know the node before the <tt>Instruction</tt> we're jumping to (e.g. if we're jumping forward) we'll allocate a new node using the <tt>highestNode</tt> counter.
+The second property holds if control flow can jump to another <tt>Label</tt>. We'll find the <tt>Instruction</tt> where that <tt>Label</tt> is defined using a rather inefficient linear search of the <tt>code</tt> <tt>List</tt>, and we'll chain the graph nodes together as before:
 
 ~~~~
 @Jump To Node@ +=
-int nextInstr = code.indexOf(new Definition(instr.couldJumpTo(), false, false));
-if(prevNode[nextInstr] == UNASSIGNED)
-  prevNode[nextInstr] = highestNode++;
-nextNode.put(i, prevNode[nextInstr]);
+int jumpTo = code.indexOf(new Definition(instr.couldJumpTo(), false, false));
+previous.put(jumpTo, i);
+next.put(i, jumpTo);
 ~~~~
 
-If control flow can't reach an <tt>Instruction</tt> after the current one, and the current instruction doesn't jump to another node then the last property must hold and the <tt>Instruction</tt> must be a <tt>ret</tt>. We'll indicate that this <tt>Instruction</tt> is one exit from the function by making the next node the <tt>LAST_NODE</tt> marker.
+If control flow can't reach an <tt>Instruction</tt> after the current one, and the current instruction doesn't jump to another node then the last property must hold and the <tt>Instruction</tt> must be a <tt>ret</tt>. We'll indicate that this <tt>Instruction</tt> is one exit from the function by chaining it to the <tt>code.size()</tt> graph node (which can't ever be used as the graph node of another <tt>Instruction</tt> as no <tt>Instruction</tt>s in the <tt>code</tt> <tt>List</tt> have this for an index).
 
 ~~~~
 @Choose Last Node@ +=
-nextNodes.put(i, LAST_NODE);
+previous.put(code.size(), i);
+next.put(i, code.size());
 ~~~~
 
-We now have a O(1) lookup for the node before an <tt>Instruction</tt> and an O(lg n) lookup for the nodes after an <tt>Instruction</tt> (where n is the number of <tt>Instruction</tt>s in the function). However, getting the <tt>Instruction</tt>s after a node is O(n) as it require a scan of the <tt>prevNode</tt> array, and calculating the <tt>Instruction</tt>s before a node is O(n) as it requires a scan of the <tt>nextNodes</tt> map.
+We now have a O(lg n) lookups (as we're using a binary-tree based <tt>Multimap</tt> implementation) for the nodes before and after an <tt>Instruction</tt>.
 
-~~~~
-@Control Flow Graph Members@ +=
-Iterable<Integer> nodesBefore(int n) {
-  
-}
-Iterable<Integer> nodesAfter(int n) {
-  
-}
-Iterable<Integer> instructionsBefore(int n) {
-  
-}
-Iterable<Integer> instructionsAfter(int n) {
-  
-}
-~~~~
+### Overview ###
 
-
-### Dead Code Elimination ###
+We'll spend the new part of this section mapping out how control and data flows through this function's <tt>code</tt>. We'll use this information to strip out any 'dead' (unreachable) code, and iterate until all code is reachable. At runtime we may not actually execute every <tt>Instruction</tt> if control flow is driven by the function's parameters.
 
 ~~~~
 @Other Helpers@ +=
@@ -1730,9 +1693,7 @@ static final class ControlFlowGraph {
 }
 ~~~~ 
 
-s or 
-
-Note: insert stack moves first so frame pointer variable is resolved later.
+We cna then build a Integer Programming problem out of the <tt>ControlFlowGraph</tt>, and give it to GLPK to solve.
 
 ~~~~
 @Do Register Allocation@ +=
@@ -1740,6 +1701,12 @@ ControlFlowGraph controlFlow = new ControlFlowGraph(state.code, state.framePoint
 if(controlFlow.variables.length > 0) {
   @Solve@
 }
+~~~~
+
+We'll finish by using the solution of the Integer Programming problem to replace the <tt>Variable</tt> left in our <tt>code</tt> <tt>List</tt> with <tt>Register</tt>s.
+
+~~~~
+@Other Helpers@ +=
 static void copySolutionIntoCode(glp_prob allocation, ControlFlowGraph controlFlow, ParsingState state) {
   @Copy Solution Into Code@
   @Calculate Stack Moves Needed@
@@ -1747,43 +1714,68 @@ static void copySolutionIntoCode(glp_prob allocation, ControlFlowGraph controlFl
 }
 ~~~~
 
+### Dead Code Elimination ###
 
-Dead code is all code only reachable from an UNASSIGNED node (and no other path)
+We'll use a queue-based algorithm for deciding which nodes are dead. We'll seed the queue with nodes we know are dead, the we'll repeatedly examine the head of the queue, adding new <tt>Instruction</tt>s to the queue of nodes to examine until we've processed all that we can. If we've flagged any <tt>code</tt> indices as dead in the <tt>BitSet</tt> we'll remove the corresponding <tt>Instruction</tt>s from the <tt>code</tt> <tt>List</tt>.
 
 ~~~~
 @Strip Out Dead Code@ +=
-BitSet dead = new BitSet(code.size());
-Queue<Integer> maybeDead = Queues.newArrayDeque(instructionsFollowingNode.get(UNASSIGNED));
+BitSet 
+  dead = new BitSet(code.size()), 
+  unneeded = new BitSet(code.size());
+Queue<Integer> maybeDead = Queues.newArrayDeque();
+@Seed Dead Instructions@
 while (!maybeDead.isEmpty()) {
   int i = maybeDead.poll();
-  if (dead.get(i))
-    continue;
-  boolean isDead = true;
-  for (int p : instructionsBeforeNode.get(prevNode[i]))
-    isDead &= dead.get(p);
-  if (isDead) {
-    dead.set(i);
-    maybeDead.addAll(instructionsFollowingNode.get(nextNode[i]));
-    @Found Dead Instruction@
-  }
+  @Are Next Instructions Dead@
 }
 @Remove Dead Code@
 ~~~~
 
-We make each jump to a unique target, so if we remove a jump, remove a target!
+Clearly if an <tt>Instruction</tt>'s index doesn't appear as a value in the <tt>next</tt> <tt>Multimap</tt> (and so in the keys of the <tt>previous</tt> <tt>Multimap</tt>) then control flow can't get to it. We'll do a linear scan of all the <tt>Instruction</tt>s (except the one at index <tt>0</tt>; as it's the entry point to the function it must have no predecessors), adding them to the <tt>Queue</tt> of graph nodes to examine if they don't appear as keys of the <tt>previous</tt> <tt>Multimap</tt>.
+
+~~~~
+@Seed Dead Instructions@ +=
+for(int i = 1; i < code.size(); ++i) {
+  if(!previous.keySet().contains(i))
+    maybeDead.add(i);
+~~~~
+
+We can skip any <tt>Instruction</tt>s we've already flagged as dead, and we can flag any <tt>Instruction</tt> that is only reachable from dead <tt>Instruction</tt>s. If we've found a dead <tt>Instruction</tt> we'll add all its sucessors to the <tt>Queue</tt> of <tt>Instruction</tt>s to process (so we many end up processing a non-dead <tt>Instruction</tt> several times). However, since we're skipping already dead <tt>Instruction</tt>s, and as we only add successors of dead <tt>Instruction</tt>s the algorithm is guaranteed to terminate in <tt>O(code.size())</tt> iterations, even if the function itself doesn't.
+
+~~~~
+@Are Next Instructions Dead@ +=
+if (dead.get(i))
+  continue;
+boolean isDead = true;
+for (int p : previous.get(i))
+  isDead &= dead.get(p);
+if (isDead) {
+  dead.set(i);
+  maybeDead.addAll(next.get(i));
+  @Found Dead Instruction@
+}
+~~~~
+
+In the first section of the article we created a new unique <tt>Label</tt> for each <tt>Jump</tt> <tt>Instruction</tt>, so if we remove the <tt>Jump</tt>, we can safely remove the <tt>Definition</tt> of its target too. However, we don't want to flag it as dead as we could then incorrectly mark its successors as dead, so we'll use the separate <tt>unneeded</tt> <tt>BitSet</tt> to flag it.
 
 ~~~~
 @Found Dead Instruction@ +=
 Instruction inst = code.get(i); 
 if (inst instanceof Jump)
-  dead.set(code.indexOf(new Definition(((Jump) inst).to, false, false)));
+  unneeded.set(code.indexOf(new Definition(((Jump) inst).to, false, false)));
 ~~~~
+
+We'll iterate over the dead <tt>Instruction</tt>s we've identified in the <tt>BitSet</tt> and remove them from the <tt>code</tt> <tt>List</tt>. We'll iterate over the <tt>BitSet</tt> in reverse so we don't modify the indices of <tt>Instruction</tt>s we haven't processed yet. It's also safe to merge the <tt>unneeded</tt> <tt>BitSet</tt> into the <tt>dead</tt> one as we've finished iterating over the <tt>code</tt>.
 
 ~~~~
 @Remove Dead Code@ +=
-for (int i = dead.nextSetBit(0), drift = 0; i >= 0; i = dead.nextSetBit(i + 1))
-  code.remove(i - drift++);
+dead.or(unneeded);
+for (int i = dead.previousSetBit(code.size()); i >= 0; i = dead.previousSetBit(i - 1))
+  code.remove(i);
 ~~~~
+
+### Variable Accesses ###
 
 Which variables are used in any of the instructions following this node? We can't call a variable dead if at least one code path reads it, but we can call it dead if every code path writes to it (and doesn't read from it in the same instruction).
 
