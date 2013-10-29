@@ -1683,6 +1683,8 @@ static final class ControlFlowGraph {
       @Map Nodes To Instructions@
       @Strip Out Dead Code@
     } while(!instructionsFollowingNode.get(UNASSIGNED).isEmpty());
+    @Store Code@
+    @Store Frame Pointer@
     @Variables Used At Next Instruction@
     @Identify Function Calls@
     @Calculate Liveness@
@@ -1775,118 +1777,150 @@ for (int i = dead.previousSetBit(code.size()); i >= 0; i = dead.previousSetBit(i
   code.remove(i);
 ~~~~
 
-### Variable Accesses ###
+### Variable Reads and Writes ###
 
-Which variables are used in any of the instructions following this node? We can't call a variable dead if at least one code path reads it, but we can call it dead if every code path writes to it (and doesn't read from it in the same instruction).
-
-~~~~
-@Control Flow Graph Members@ +=
-BitSet varsReadNext = new BitSet(), varsWrittenNext = new BitSet();
-@Variables Used At Next Instruction@ +=
-for(int i = 0; i < code.size(); ++i )
-  for(Variable variable : code.get(i).readsFrom(Variable.class))
-    varsReadNext.set(prevNode[i] * variables.length + indexOf(variables, variable));
-for(Entry<Integer, Collection<Integer>> next : instructionsFollowingNode.asMap().entrySet()) { // not empty
-  Set<Variable> varsSet = Sets.newHashSet(variables); 
-  for(int i : next.getValue())
-    varsSet.retainAll(code.get(i).writesTo(Variable.class, WILL_ERASE));
-  for(Variable variable : varsSet)
-    varsWrittenNext.set(next.getKey() * variables.length + indexOf(variables, variable));
-}
-~~~~
-
-If one of the instructions following a node is a function call, we should only put live variables into registers that'll be preserved across function calls.
-
-~~~~
-@Control Flow Graph Members@ +=
-BitSet nodesBeforeFnCalls = new BitSet();
-@Identify Function Calls@ += 
-for(int i = 0; i < code.size(); ++i )
-  if(code.get(i) instanceof Call)
-    nodesBeforeFnCalls.set(prevNode[i]);
-~~~~
-
-Data dependencies - will let us calculate liveness. Can write to is a subset (but not a strict subset) of will write to
+We'll now start to draw together the information we need to calculate when variables are "live"; when a previous <tt>Instruction</tt> has written to them and a future <tt>Instruction</tt> reads from them we have to ensure we don't erase the variable's value in the current <tt>Instruction</tt>. If a variable is written to twice without an intervening read then we'll consider the variable "dead" between the two writes. Now, some of the <tt>Instruction</tt>s we introduced above are conditional, and so may not always write to a variable. If a variable is written to twice (without an intervening read), and the second write is conditional, then the variable is "live" between the two writes as in some cases the variable will still have the value written to it by the first write after the second. We'll use an enum to distinguish whether an <tt>Instruction</tt> <tt>WILL_ERASE</tt> the value of a variable, or is condition and only <tt>CAN_ERASE</tt> the variable's value:
 
 ~~~~
 @Other Helpers@ +=
-enum WriteType { WILL_ERASE, CAN_ERASE, MOVES };
-@Instruction Members@ +=
-<VAL> Set<VAL> readsFrom(Class<VAL> c) { return none(c); }
-<VAL> Set<VAL> writesTo(Class<VAL> c, WriteType t) { return none(c); }
-<VAL> Set<VAL> uses(Class<VAL> c) { return Sets.union(readsFrom(c), writesTo(c, CAN_ERASE)); }
+enum WriteType { WILL_ERASE, CAN_ERASE };
+~~~~
+
+We'll expose which <tt>Variable</tt>s and <tt>Register</tt>s an <tt>Instruction</tt> affects by adding <tt>readsFrom</tt> and <tt>writesTo</tt> members. We'll also add a <tt>uses</tt> method as a shorthand for 'all the variables we'll ever touch'.
+
+~~~~
+@Other Helpers@ +=
+static Set<Value> none = Collections.emptySet();
+@Instruction Members@ += 
+Set<Value> readsFrom() { return none; }
+Set<Value> writesTo(WriteType t) { return none; }
+Set<Value> uses() { return Sets.union(readsFrom(), writesTo(CAN_ERASE)); }
+~~~~
+
+Now, if an <tt>Instruction</tt>'s operand is indirect (which we represent as an instance of <tt>AtAddress</tt>) then we need to pull the <tt>Variable</tt> or <tt>Register</tt> that stores the memory address out of the <tt>AtAddress</tt> instance. We'll do this by getting a static helper address to downcast and extract the <tt>to</tt> field of <tt>AtAddress</tt> if appropriate, but a more object-oriented solution would add a <tt>Value unwrap()</tt> method to the <tt>Value</tt> interface, and identity implementations for all subclasses apart from <tt>AtAddress</tt>.
+
+~~~~
+@Other Helpers@ +=
+static Value unwrap(Value v) {
+  return v instanceof AtAddress ? ((AtAddress)v).to : v;
+}
+~~~~
+
+Most implementations of <tt>readsFrom</tt> are straightforward:
+
+~~~~
 @BinaryOp Members@ +=
-<VAL> Set<VAL> readsFrom(Class<VAL> c) { return setOf(c, arg1, arg2); }
-<VAL> Set<VAL> writesTo(Class<VAL> c, WriteType t) { 
-  return arg2 instanceof AtAddress ? none(c) : setOf(c, arg2); 
+Set<Value> readsFrom() { return ImmutableSet.of(unwrap(arg1), unwrap(arg2)); }
+@Push Members@ +=
+Set<Value> readsFrom() { return ImmutableSet.of(unwrap(value)); }
+~~~~
+
+Writes are more interesting; if the target operand is indirect (an <tt>AtAddress</tt>) then it isn't written to - the memory location which the operand contains is. The <tt>Move</tt> <tt>Instruction</tt>'s <tt>writesTo</tt> implementation will return an empty set if the <tt>Instruction</tt> is conditional (i.e. the <tt>cond</tt> has one of the <tt>Condition</tt> enum values) and the caller asks for all the <tt>Value</tt>s the <tt>Instruction</tt> will definitely erase.
+
+~~~~
+@BinaryOp Members@ +=
+Set<Value> writesTo(WriteType t) { 
+  return arg2 instanceof AtAddress ? none : ImmutableSet.<Value>of(arg2); 
 }
 @Move Members@ +=
-<VAL> Set<VAL> readsFrom(Class<VAL> c) {
-  return to instanceof AtAddress ? setOf(c, from, to) : setOf(c, from); 
-}
-<VAL> Set<VAL> writesTo(Class<VAL> c, WriteType t) {
+Set<Value> writesTo(WriteType t) {
   return to instanceof AtAddress || (t == WILL_ERASE && cond != null) 
-    ? none(c) : setOf(c, to); 
+    ? none : ImmutableSet.<Value>of(to); 
 }
-@Push Members@ +=
-<VAL> Set<VAL> readsFrom(Class<VAL> c) { return setOf(c, value); }
 ~~~~
 
+Finally, a <tt>Move</tt> <tt>Instruction</tt> usually only reads from the source operand, but if the destination operand is indirect the <tt>Instruction</tt> will read the memory address to write the source value to from <tt>Variable</tt> or <tt>Register</tt> in the target operand.
+
 ~~~~
-@Other Helpers@ +=
-private static <VAL> Set<VAL> none(Class<VAL> c) { return Collections.emptySet(); }
-private static <VAL> Set<VAL> setOf(Class<VAL> c, Object... objs) {
-  List<Object> wrapped = Arrays.asList(objs);
-  return ImmutableSet.copyOf(concat(
-    filter(transform(wrapped, unwrap), c), 
-    filter(wrapped, c)));
+@Move Members@ +=
+Set<Value> readsFrom() {
+  return to instanceof AtAddress 
+    ? ImmutableSet.of(unwrap(from), unwrap(to)) 
+    : ImmutableSet.of(unwrap(from)); 
 }
-private static Function<Object, Object> unwrap = new Function<Object, Object>() {
-  public Object apply(Object v) { 
-    return v instanceof AtAddress ? ((AtAddress)v).at : v;
-  }
-};
 ~~~~
 
-We need to know all the variables we'll ever need to assign
+### Liveness ###
+
+We'll use <tt>BitSet</tt>s to store liveness information as we just need a per-variable-per-instruction flag. This means we need a way to map <tt>Variable</tt>s to a distinct integer between <tt>0</tt> and one less than the number of distinct <tt>Variable</tt>s the function uses.
 
 ~~~~
 @Get Variables Used@ +=
 Set<Variable> allVariables = Sets.newTreeSet();
-for(Instruction i : code) {
-  Iterables.addAll(allVariables, i.uses(Variable.class));
-}
+for(Instruction i : code)
+  for(Variable v : Iterables.filter(i.uses(), Variable.class))
+    allVariables.add(v);
 variables = Iterables.toArray(allVariables, Variable.class);
-this.framePointer = indexOf(variables, framePointer);
 @Control Flow Graph Members@ +=
 Variable[] variables;
-int framePointer;
 ~~~~
 
-Liveness...as a BitSet. A variable is not live at the node before the instruction where it's created and is not live at the node after the instruction where it's last read.
+We'll use a <tt>Variable</tt>'s index into the <tt>variables</tt> array, <tt>v</tt> and an <tt>Instruction</tt>'s into the <tt>code</tt> array, <tt>i</tt> to determine which index in the liveness <tt>BitSet</tt> to use. We'll use <tt>i * variables.length + v</tt> rather than <tt>v * code.size() + i</tt> as we're likely to process liveness instruction-by-instruction, so it's better for cache locality to have all the <tt>Variable</tt>'s liveness flags for a given <tt>Instruction</tt> together.
 
 ~~~~
 @Control Flow Graph Members@ +=
 final BitSet isLive;
-boolean isLiveAt(int variable, int node) {
-  return isLive.get(node * variables.length + variable);
-}
-@Calculate Liveness@ +=
-isLive = (BitSet) varsReadNext.clone(); 
-Queue<Integer> unprocessed = Queues.newArrayDeque(Arrays.asList(ControlFlowGraph.LAST_NODE));
-BitSet nodesSeen = new BitSet();
-for(Integer node = unprocessed.poll(); node != null; node = unprocessed.poll()) {
-  boolean changed = false;
-  for(int n : nextNodes.get(node))
-      changed |= copyFrom(isLive, n, node, variables.length);
-  for(int index = node * variables.length; index < (node+1) * variables.length; ++index)
-    if(varsWrittenNext.get(index) && !varsReadNext.get(index))
-      isLive.clear(index);
-  if(!nodesSeen.get(node) || changed)
-    for(int n : prevNodes.get(node)) unprocessed.offer(n);
-  nodesSeen.set(node);
+boolean isLiveAt(int v, int i) {
+  return isLive.get(i * variables.length + v);
 }
 ~~~~
+
+We'll also store the frame pointer (if the function has one):
+
+~~~~
+@Control Flow Graph Members@ +=
+final Variable framePointer;
+@Store Frame Pointer@ +=
+this.framePointer = framePointer;
+~~~~
+
+Much like the algorithm to remove dead code, we'll keep iterating over the code array until we reach a steady state - so the helpers below all return a <tt>boolean</tt> indicating whether they've changed anything in the <tt>BitSet</tt>s they're given. The <tt>copyFrom</tt> helper copies the set bits in the <tt>num</tt> bits after <tt>indexFrom</tt> to the <tt>num</tt> bits after <tt>indexTo</tt>. We'll use this method to propagate liveness information from one <tt>Instruction</tt> to another, as variables that are live and aren't touched by the current <tt>Instruction</tt> stay live, and the variables that are dead similarly stay dead. 
+
+~~~~
+@Other Helpers@ +=
+static boolean setAndGet(BitSet set, int index) {
+  boolean ret = set.get(index); set.set(index); return ret;
+}
+static boolean copyFrom(BitSet set, int indexFrom, int indexTo, int num) {
+  boolean ret = false;
+  for(
+    int index = set.nextSetBit(indexFrom);
+    index >= 0 && index < indexFrom + num;
+    index = set.nextSetBit(index + 1)
+  ) 
+    ret |= setAndGet(set, index + indexTo - indexFrom);
+  return ret;
+}
+~~~~
+
+We'll process the <tt>Instruction</tt>s in reverse. If the current <tt>Instruction</tt> reads a <tt>Variable</tt> then we set the liveness flag; if the current <tt>Instruction</tt> writes to (and doesn't read) a <tt>Variable</tt> then we clear the liveness flag, otherwise we set the liveness flag if it is set in any of the <tt>Instruction</tt>s following the one we're considering. Processing the control flow graph in reverse helps avoid two problems: (1) any <tt>Variable</tt> that is written to but never reads is never marked as live (if we were processing the <tt>Instruction</tt>s in the normal order, if we saw a write we wouldn't be able to tell if that <tt>Variable</tt> gets written to later) and (2) the two-writes-without-an-intervening-read problem discussed above is handled correctly - the first write we process (the second in the normal order) kills the <tt>Variable</tt>, so it correctly remains dead between that write and the next (the first in the normal order).
+
+We'll also keep track of which <tt>Instruction</tt>s we've processed in the <tt>seen</tt> <tt>BitSet</tt>, as we want to process each <tt>Instruction</tt> at least once. If we just relied on the <tt>changed</tt> flag the algorithm would terminate prematurely if no <tt>Variable</tt>s were live for two consecutive <tt>Instruction</tt>s. We don't need to update the changed flag when the current <tt>Instruction</tt> reads a <tt>Variable</tt> as we'll only do this the first time we process that <tt>Instruction</tt>, and in this case the <tt>Instruction</tt> won't be <tt>seen</tt> so we'll always process all its predecessors. The changed flag is mainly for loops in the code; if a <tt>Variable</tt> is live at any <tt>Instruction</tt> in the loop body and isn't killed in the loop body or the loop test then it'll be live for every <tt>Instruction</tt> in the loop body - even those after it.
+
+~~~~
+@Calculate Liveness@ +=
+Queue<Integer> unprocessed = Queues.newArrayDeque();
+unprocessed.add(code.size());
+BitSet seen = new BitSet(code.size());
+for(Integer i = unprocessed.poll(); i != null; i = unprocessed.poll()) {
+  boolean changed = false;
+  for(int nextI : next.get(i))
+      changed |= copyFrom(isLive, nextI * variables.length, i * variables.length, variables.length);
+  for(int v = 0; v < variables.length; ++v) {
+    boolean isWritten = code.get(i).writesTo(WILL_ERASE).contains(variables[v]);
+    boolean isRead = code.get(i).readsFrom().contains(variables[v]);
+    if(isWritten && !isRead)
+      isLive.clear(index);
+    else if(isRead)
+      isLive.set(i * variables.length + v)
+  }
+  if(!seen.get(i) || changed)
+    unprocessed.addAll(previous.get(i));
+  seen.set(i);
+}
+~~~~
+
+### Registers In Use ###
 
 We know some instructions pre-specify _Registers_ that they'll write to - and we don't want to put anything there that has to be live afterwards! We'll assume any register mentioned is written to, not read from!
 
@@ -1954,9 +1988,9 @@ We can use liveness information to decide what variables we need to assign to re
 @Control Flow Graph Members@ +=
 boolean needsAssigning(int variable, int node, Register r) {
   boolean isLive = isLiveAt(variable, node) || isVarUsedNext(variable, node);
-  boolean thisRegPreserved = !nodesBeforeFnCalls.get(node) || calleeSavesRegisterIndices.get(r.ordinal());
+  boolean thisRegPreserved = !(code.get(node) instanceof Call) || calleeSavesRegisterIndices.get(r.ordinal());
   boolean ifUsedNotOnStack = !(isVarUsedNext(node, variable) && r == THESTACK);
-  boolean framePointerNotOnStack = variable != framePointer || r != THESTACK;
+  boolean framePointerNotOnStack = !variables[variable].equals(framePointer) || r != THESTACK;
   boolean registerNotInUse = !registerInUse(node, r) || isVarUsedNext(variable, node);
   return isLive && thisRegPreserved && ifUsedNotOnStack && framePointerNotOnStack && registerNotInUse;
 }
@@ -2693,10 +2727,6 @@ We can break deadlocks using the XCHG instruction to swap two registers or a mem
 static final class Swap extends Instruction {
   final StorableValue arg1; final StorableValue arg2; 
   Swap(StorableValue arg1, StorableValue arg2) { this.arg1 = arg1; this.arg2 = arg2; }
-  <VAL> Set<VAL> readsFrom(Class<VAL> c) { return setOf(c, arg1, arg2); }
-  <VAL> Set<VAL> writesTo(Class<VAL> c, WriteType t) { 
-    return t == MOVES ? setOf(c, arg1, arg2) : none(c); 
-  }
   public String toString() { @Swap x86 Code@ }
   @Swap Members@
 }
@@ -3034,20 +3064,6 @@ static <T> int indexOf(T[] ts, T t) {
 }
 static <T> void addAll(Collection<T> ts, T... toAdd) {
   ts.addAll(Arrays.asList(toAdd));
-}
-/** @return true if any changes */
-private static boolean copyFrom(BitSet set, int indexFrom, int indexTo, int num) {
-  boolean ret = false;
-  for(
-    int index = set.nextSetBit(indexFrom * num);
-    index >= 0 && index < (indexFrom + 1) * num;
-    index = set.nextSetBit(index + 1)) 
-  {
-    int v = index - indexFrom * num;
-    ret |= !set.get(indexTo * num + v);
-    set.set(indexTo * num + v);
-  }
-  return ret;
 }
 ~~~~
 
