@@ -1922,86 +1922,96 @@ for(Integer i = unprocessed.poll(); i != null; i = unprocessed.poll()) {
 
 ### Registers In Use ###
 
-We know some instructions pre-specify _Registers_ that they'll write to - and we don't want to put anything there that has to be live afterwards! We'll assume any register mentioned is written to, not read from!
+We know some instructions pre-specify <tt>Register</tt>s that they'll write to (e.g. the return value is put in <tt>rax</tt>, and the values in the <tt>CALLEE_SAVES</tt> <tt>Register</tt>s), and we don't want to overwrite these values by assigning another <tt>Variable</tt>s to those <tt>Register</tt>s. We'll build up a set of what <tt>Register</tt>s we shouldn't use at each <tt>Instruction</tt>.
 
 ~~~~
 @Control Flow Graph Members@ +=
 final BitSet registersInUse = new BitSet();
-boolean registerInUse(int n, Register r) {
-  return registersInUse.get(n * Register.values().length + r.ordinal());
+boolean registerInUse(int i, Register r) {
+  return registersInUse.get(i * Register.values().length + r.ordinal());
 }
-@Find Registers Already In Use@ +=
-for(int i = 0; i < code.size(); ++i)
-  for(Register r : code.get(i).uses(Register.class))
-    registersInUse.set(prevNode[i] * Register.values().length + r.ordinal());
 ~~~~
 
-When we start a function we want to make sure the registers we're going to preserve aren't allocated before we copy them into variables.  
+We'll deal with the <tt>CALLEE_SAVES</tt> <tt>Register</tt>s at the start of the function first. We shouldn't overwrite a <tt>CALLEE_SAVES</tt> <tt>Register</tt> between the start of the function (<tt>Instruction</tt> index <tt>0</tt> in our control flow graph) and the <tt>Instruction</tt> where we move the preserved value from the <tt>CALLEE_SAVES</tt> <tt>Register</tt> into a <tt>Variable</tt>. Now, since we add the <tt>Instruction</tt>s to preserve the <tt>CALLEE_SAVES</tt> <tt>Register</tt>s as the very start of the function (before we start processing the code of the function's body) we know there can't be any <tt>Jump</tt> <tt>Instruction</tt>s between the start of the function and the <tt>Instruction</tt> that saves that last <tt>CALLEE_SAVES</tt> <tt>Register</tt>. This means the <tt>next</tt> <tt>Multimap</tt> will only contain one <tt>Instruction</tt> for each of the <tt>Instruction</tt>s we'll iterate over, which simplifies our algorithm:
 
 ~~~~
 @Find Registers Already In Use@ +=
-EnumSet<Register> saved = EnumSet.noneOf(Register.class);
-addAll(saved, CALLEE_SAVES);
-Collection<Integer> next;
-for (int n = FIRST_NODE; !saved.isEmpty(); n = Iterables.getOnlyElement(next)) {
+Set<Register> saved = Sets.newEnumSet(Arrays.asList(CALLEE_SAVES), Register.class);
+for (int i = 0; !saved.isEmpty(); i = Iterables.getOnlyElement(next.get(i))) {
   for (Register r : saved)
-    registersInUse.set(n * Register.values().length + r.ordinal());
-  for(int i : instructionsFollowingNode.get(n))
-    saved.removeAll(code.get(i).uses(Register.class));
-  if((next = nextNodes.get(n)).isEmpty())
-    break;
+    registersInUse.set(i * Register.values().length + r.ordinal());
+  saved.removeAll(code.get(i).uses());
 }
 ~~~~
 
-Once we've restored the saved registers (and the return value!), we don't want to assign anything to them. Note that we know control flow is linear between the ret and the return statement.
+We'll use a similar procedure to identify the <tt>Register</tt>s we need to preserve in the <tt>Instruction</tt>s leading up to a <tt>ret</tt>. This time, as well as avoiding placing <tt>Variable</tt>s in the <tt>CALLEE_SAVES</tt> <tt>Register</tt>s after we've restored their original values, we must also avoid overwriting the function's return value after we <tt>mov</tt> it into <tt>rax</tt>. Also, while a function only has one entry point it can return from many places, so we'll run this algorithm once for each <tt>ret</tt> <tt>Instruction</tt> (the node before each <tt>ret</tt> <tt>Instruction</tt> is the predecessor of the dummy <tt>code.size()</tt> node). Note that this time we move through the control flow graph backwards, using the <tt>previous</tt> <tt>Multimap</tt> in the for-loop instead of the <tt>next</tt> one, but as we can still guarantee there's no <tt>Jump</tt> <tt>Instruction</tt>s as we're only going to iterate over the <tt>Instruction</tt>s we added in <tt>addReturn()</tt>.
 
 ~~~~
 @Find Registers Already In Use@ +=
-Collection<Integer> prev;
-for (int i : instructionsBeforeNode.get(LAST_NODE)) {
-  EnumSet<Register> restored = EnumSet.noneOf(Register.class);
-  addAll(restored, CALLEE_SAVES);
-  @Decide Which Registers To Restore@
-  for (int n = prevNode[i]; !saved.isEmpty(); n = prevNode[Iterables.getOnlyElement(prev)]) {
+for (int ret : previous.get(code.size())) {
+  Set<Register> saved = Sets.newEnumSet(Arrays.asList(CALLEE_SAVES), Register.class);
+  saved.add(rax);
+  for (int i = ret; !saved.isEmpty(); i = Iterables.getOnlyElement(previous.get(i))) {
     for (Register r : saved)
       registersInUse.set(n * Register.values().length + r.ordinal());
-    for (int j : instructionsBeforeNode.get(n))
-      saved.removeAll(code.get(j).uses(Register.class));
-    if((prev = instructionsBeforeNode.get(n)).isEmpty())
-      break;
+    saved.removeAll(code.get(j).uses());
   }
 }
 ~~~~
 
-...we want to stop the return value from being flattened too.
+Since none of these iterations processed the dummy <tt>code.size()</tt> node, we'll set all the <tt>CALLEE_SAVES</tt> <tt>Register</tt>s and <tt>rax</tt> in use at it now:
 
 ~~~~
-@Decide Which Registers To Restore@ +=
-restored.add(rax);
+@Find Registers Already In Use@ +=
+for (Register r : CALLEE_SAVES)
+  registersInUse.set(code.size() * Register.values().length + r.ordinal());
+registersInUse.set(code.size() * Register.values().length + rax.ordinal());
+~~~~
+
+There's one edge case when processing the <tt>Instruction</tt>s at the end of the function - if the function doesn't have an explicit <tt>return</tt> statement at the end of the function we'll still insert a <tt>ret</tt> <tt>Instruction</tt>, but won't move anything into <tt>rax</tt>. This means that when the algorithm iterates backwards from the <tt>code.size()</tt> node it doesn't stop, as no <tt>Instruction</tt> removes <tt>rax</tt> from the <tt>saved</tt> <tt>Set</tt>. We'll rectify this by added a no-op <tt>mov</tt> <tt>Instruction</tt> that writes to <tt>rax</tt> if the function doesn't have an explicit <tt>return</tt>, as this <tt>Instruction</tt> will return <tt>rax</tt> in its <tt>uses()</tt> method. However, as it's clearly a no-op we can easily filter it out when writing out the final Assembly code.
+
+~~~~
 @No Return Statement Given@ +=
 state.code.add(move(rax, rax));
 ~~~~
 
-We can use liveness information to decide what variables we need to assign to registers at each node. At function calls we should ensure that any live variables are stored in registers that'll be preserved. The assembly instructions inserted before the function call itself will ensure that the parameters will stay in the correct registers. Also, if a variable is going to be used in an instruction following a node that variable can't be assigned to the stack!
+### What Needs Assigning ###
+
+The register assignment problem is basically "should we assign <tt>Variable</tt> v to <tt>Register</tt> r at <tt>Instruction</tt> i". We'll pose this problem as an Integer Programming problem to find the most efficient solution below, but at this point we can quickly eliminate some impossible (v, r, i) combinations. This is why we've been building up detailed control-flow information; the more solutions we rule out at this stage the smaller our Integer Programming problem will be, so the faster we can solve it. We'll also use this opportunity to eliminate some (v, r, i) combinations that are forbidden by the x86-64 ABI.
 
 ~~~~
 @Control Flow Graph Members@ +=
-boolean needsAssigning(int variable, int node, Register r) {
-  boolean isLive = isLiveAt(variable, node) || isVarUsedNext(variable, node);
-  boolean thisRegPreserved = !(code.get(node) instanceof Call) || calleeSavesRegisterIndices.get(r.ordinal());
-  boolean ifUsedNotOnStack = !(isVarUsedNext(node, variable) && r == THESTACK);
-  boolean framePointerNotOnStack = !variables[variable].equals(framePointer) || r != THESTACK;
-  boolean registerNotInUse = !registerInUse(node, r) || isVarUsedNext(variable, node);
-  return isLive && thisRegPreserved && ifUsedNotOnStack && framePointerNotOnStack && registerNotInUse;
-}
-@Other Helpers@ += 
-private static final BitSet calleeSavesRegisterIndices = new BitSet();
-static {
-  for(Register r : CALLEE_SAVES)
-    calleeSavesRegisterIndices.set(r.ordinal());
-  calleeSavesRegisterIndices.set(Register.THESTACK.ordinal()); // the stack's saved too!
+boolean needsAssigning(int v, int i, Register r) {
+  boolean isUsed = code.get(i).uses().contains(variables[v]);
+  @Is This Combination Impossible@
+  return true;
 }
 ~~~~
+
+We'll start by using the <tt>Variable</tt> liveness information we calculated - if a <tt>Variable</tt> isn't live we definitely don't need to put it in a <tt>Register</tt>. However, our definition of liveness means a <tt>Variable</tt> is only "live" at a control flow node if a value has been written to it and hasn't yet been read. As our control flow graph nodes are before their corresponding <tt>Instruction</tt> in the <tt>code</tt> <tt>List</tt> a <tt>Variable</tt> that is written to at <tt>Instruction</tt> <tt>i</tt> won't be "live" at <tt>Instruction</tt> <tt>i</tt>. However, it'll still need to be assigned a <tt>Register</tt>, so the <tt>Instruction</tt> has somewhere to put its new value. Therefore we can only forbid (v, r, i) combinations where the <tt>Variable</tt> is both "dead" and not used by the current <tt>Instruction</tt>:
+
+~~~~
+@Is This Combination Impossible@ +=
+if(!isLiveAt(v, i) && !isUsed)
+  return false;
+~~~~
+
+
+  boolean thisRegPreserved = 
+    !(code.get(i) instanceof Call) || 
+    r == Register.THESTACK || 
+    indexOf(CALLEE_SAVES, r) >= 0;
+  boolean ifUsedNotOnStack = 
+    !isUsed ||
+    r != THESTACK;
+  boolean framePointerNotOnStack = 
+    !variables[v].equals(framePointer) || 
+    r != THESTACK;
+  boolean registerNotInUse = 
+    !registerInUse(node, r) || 
+    isVarUsedNext(variable, node);
+
+### The LP Problem ###
 
 Now we can start setting up the problem. Note that some constraints refer to just the assignable registers, and others refer to our dummy register indicating the stack:
 
