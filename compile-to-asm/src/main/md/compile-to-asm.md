@@ -1959,14 +1959,7 @@ for (int ret : previous.get(code.size())) {
 }
 ~~~~
 
-Since none of these iterations processed the dummy <tt>code.size()</tt> node, we'll set all the <tt>CALLEE_SAVES</tt> <tt>Register</tt>s and <tt>rax</tt> in use at it now:
-
-~~~~
-@Find Registers Already In Use@ +=
-for (Register r : CALLEE_SAVES)
-  registersInUse.set(code.size() * Register.values().length + r.ordinal());
-registersInUse.set(code.size() * Register.values().length + rax.ordinal());
-~~~~
+None of these iterations processed the dummy <tt>code.size()</tt> node, but we don't care what's assigned to it as control flow will never reach it (it's a dummy), and so will never overwrite the values we need to preserve.
 
 There's one edge case when processing the <tt>Instruction</tt>s at the end of the function - if the function doesn't have an explicit <tt>return</tt> statement at the end of the function we'll still insert a <tt>ret</tt> <tt>Instruction</tt>, but won't move anything into <tt>rax</tt>. This means that when the algorithm iterates backwards from the <tt>code.size()</tt> node it doesn't stop, as no <tt>Instruction</tt> removes <tt>rax</tt> from the <tt>saved</tt> <tt>Set</tt>. We'll rectify this by added a no-op <tt>mov</tt> <tt>Instruction</tt> that writes to <tt>rax</tt> if the function doesn't have an explicit <tt>return</tt>, as this <tt>Instruction</tt> will return <tt>rax</tt> in its <tt>uses()</tt> method. However, as it's clearly a no-op we can easily filter it out when writing out the final Assembly code.
 
@@ -1996,20 +1989,39 @@ if(!isLiveAt(v, i) && !isUsed)
   return false;
 ~~~~
 
+We've gone to some trouble to preserve the values in the <tt>CALLEE_SAVES</tt> <tt>Register</tt>s, so we'll take advantage of this contract when calling other functions. However, we know that values in other <tt>Register</tt>s could be overwritten, so we'll ensure that none of the <tt>Variable</tt>s we care about are stored in a <tt>Register</tt> that isn't saved.
 
-  boolean thisRegPreserved = 
-    !(code.get(i) instanceof Call) || 
-    r == Register.THESTACK || 
-    indexOf(CALLEE_SAVES, r) >= 0;
-  boolean ifUsedNotOnStack = 
-    !isUsed ||
-    r != THESTACK;
-  boolean framePointerNotOnStack = 
-    !variables[v].equals(framePointer) || 
-    r != THESTACK;
-  boolean registerNotInUse = 
-    !registerInUse(node, r) || 
-    isVarUsedNext(variable, node);
+~~~~
+@Is This Combination Impossible@ +=
+if(code.get(i) instanceof Call 
+&& r != Register.THESTACK 
+&& indexOf(CALLEE_SAVES, r) < 0)
+  return false;
+~~~~
+
+If a <tt>Variable</tt> is used by the <tt>Instruction</tt> we're considering (i.e. the <tt>isUsed</tt> flag we calculated at the start of this function is true), then we can't assign this <tt>Variable</tt> to the stack. If the <tt>Instruction</tt> is a <tt>BinaryOp</tt> and the other operand is indirect, then if we assigned the other operand to the stack then we'd have two indirect operands, which is forbidden by the x86 instruction set. However, if both operands are direct then we could assign one of the to the stack - but this would complicate our linear programming problem as we'd have to penalise assignments (as we'd prefer solutions where the <tt>Variable</tt>s that are used are assigned to <tt>Register</tt>s). We'll therefore take the simple approach, and just forbid these technically valid edge cases:
+
+~~~~
+@Is This Combination Impossible@ +=
+if(isUsed && r == Register.THESTACK)
+  return false;
+~~~~
+
+The <tt>registersInUse</tt> <tt>BitSet</tt> we built up earlier contains a <tt>Register</tt>s we can't write to at a given <tt>Instruction</tt>. We'll use that information now to prevent the linear programming problem from assigning <tt>Variable</tt>s to those <tt>Register</tt>s. The only exception is if this <tt>Instruction</tt> is the one that saves or restores a <tt>Variable</tt> to this fixed <tt>Register</tt> (e.g. <tt>mov save!r14, r14</tt>). In this case it's actually preferable to assign the <tt>Variable</tt> to that <tt>Register</tt> as that makes this <tt>Instruction</tt> a no-op!
+
+~~~~
+@Is This Combination Impossible@ +=
+if(registerInUse(i, r) && !(isUsed && code.get(i).uses().contains(r))
+  return false;
+~~~~
+
+The final case is for the frame pointer. As we need this to resolve the memory addresses of stack-allocated values (including the <tt>Instruction</tt>s we'll add to spill <tt>Variable</tt>s to the stack) we'll keep it in a <tt>Register</tt> at all times, even across calls to other functions. Note that if this function doesn't dynamically allocate memory on the stack <tt>framePointer</tt> will be null so we'll never return false.
+
+~~~~
+@Is This Combination Impossible@ +=
+if(variables[v].equals(framePointer) && r == Register.THESTACK)
+  return false;
+~~~~
 
 ### The LP Problem ###
 
