@@ -2025,32 +2025,45 @@ if(variables[v].equals(framePointer) && r == Register.THESTACK)
 
 ### The LP Problem ###
 
-Now we can start setting up the problem. Note that some constraints refer to just the assignable registers, and others refer to our dummy register indicating the stack:
+Now we can start setting up the Integer Programming problem described in [the paper](http://grothoff.org/christian/lcpc2006.pdf) we're following. While we won't go into the details here, the definition of a problem centres around maximising an "objective" function subject to a series of constraints on the dependent variables in that function. These constraints are usually defined in a matrix, where each row is a different constraint, each column is a dependent variable and each cell of the matrix is the coefficient of the corresponding variable in the constraint. Each of these constraint functions must evaluate to less than or equal to a constant; the constants for each constraint are stored in a (mathematical) vector.
+
+
+We'll decide on the "best" register assignment by codifying a fitness, or "objective", function for assignment. Good assignments that spill fewer variables to the stack and add fewer instructions to move variables between registers will have a lower score, and bad assignments that do expensive memory reads and writes will have a higher score. We'll define the "best" assignment as the one that produces the lowest value for the object function. As this is a Linear Programming problem the objective function must be a linear combination of the dependent variables (the columns we'll go on to define), so we'll let each column (dependent variable) decide its coefficient in the objective function:
+
+~~~~
+@Set Up Objective@ +=
+glp_set_obj_name(allocation, "register assignment");
+glp_set_obj_dir(allocation, GLP_MIN);
+for(int c = 0; c < controlFlow.columns.size(); ++c)
+  controlFlow.columns.get(c).addToObjective(allocation, c, controlFlow);
+~~~~
+
+We'll start by building up the matrix of coefficients to the constraint equations. We'll use <tt>CellKey</tt> (the <tt>RowKey</tt> and <tt>ColumnKey</tt>) subclasses to represent the logical rows and columns in this matrix. In general, each row and column will be associated with a particular (v, r, i) combination, and we'll make our classes have a well-defined order (using the <tt>Comparable</tt> interface) so we can sort the rows and columns to give us O(lg n) lookup time for an given (v, r, i) combination.
 
 ~~~~
 @Other Helpers@ +=
 static abstract class CellKey implements Comparable<CellKey> {
-  final int v; final Register r; final int n;
-  CellKey(int v, Register r, int n) { 
-    this.v = v; this.n = n; this.r = r;
+  final int v; final int i; final Register r;
+  CellKey(int v, int i, Register r) { 
+    this.v = v; this.r = r; this.i = i; 
   }
   public int compareTo(CellKey o) {
     return ComparisonChain.start().
       compare(getClass().getName(), o.getClass().getName()).
       compare(v, o.v).
       compare(r, o.r).
-      compare(n, o.n).result();
+      compare(i, o.i).result();
   }
 }
 private static final int NONE = -1;
 ~~~~
 
-First: columns. They make up part of the objective function
+We'll start by defining the columns of the constraint matrix. The (Java SWIG bindings of the) GLPK library we're using represents a problem with an instance of <tt>glp_prob</tt>. Each column in the constraint matrix is a dependent variable, and each dependent variable appears once in the objective function with a linear coefficient (which may be zero). We'll keep the logic to determine this constant in the dependent variable's <tt>ColumnKey</tt> so we only have to maintain one <tt>List</tt> of dependent variables (the <tt>columns</tt> variable). Note that as we're going to sort the columns we don't know yet what index in <tt>columns</tt> each <tt>ColumnKey</tt> will end up in, so we'll have to pass that index in when we eventually call <tt>addToObjective</tt> so we can set the right column in <tt>glp_prob</tt>'s objective function.
 
 ~~~~
 @Other Helpers@ +=
 static abstract class ColumnKey extends CellKey {
-  ColumnKey(int v, Register r, int n) { super(v, r, n); }
+  ColumnKey(int v, int i, Register r) { super(v, i, r); }
   abstract void addToObjective(glp_prob allocation, int columnIndex, ControlFlowGraph cfg);
 }
 @Control Flow Graph Members@ +=
@@ -2060,12 +2073,12 @@ final List<ColumnKey> columns = Lists.newArrayList();
 Collections.sort(columns);
 ~~~~
 
-The first (and most important) set of unknowns are the _VarInRegAtInstr_ columns: which register each variable is in at each node in the control flow graph, assuming it's live. 
+The first (and most important) set of dependent variables are the <tt>VarInRegAtInstr</tt> columns; these represent the variable <tt>v</tt> being in <tt>Register</tt> <tt>r</tt> at <tt>Instruction</tt> <tt>i</tt>, and so store the solution of the register assignment problem. We're phrasing this as an Integer programming problem, so the <tt>VarInRegAtInstr</tt> variables can only take integer values, and we'll add extra constaints to ensure the value is either zero or one. We can then intepret the zero or one values as a binary yes-or-no output. We'll use the <tt>needsAssigning</tt> method we defined earlier so we only have dependent variables for valid combinations - the fewer dependent variables our Integer Programming problem has the faster it will be to solve it. We'll define the <tt>addToObjective</tt>'s <tt>coefficient</tt> later as this is the main way we'll modify the problem to encode more domain knowledge. We want the optimal solution (the solution that minimises the objective function) to generate the most efficient solution, so we want to penalise register assignments that require expensive operations (like writing to the stack).
 
 ~~~~
 @Other Helpers@ +=
 static final class VarInRegAtInstr extends ColumnKey {
-  VarInRegAtInstr(int v, Register r, int n) { super(v, r, n); }
+  VarInRegAtInstr(int v, int i, Register r) { super(v, i, r); }
   void addToObjective(glp_prob allocation, int columnIndex, ControlFlowGraph cfg) {
     double coefficient = 0d;
     @Determine VarInRegAtInstr Coefficient@
@@ -2074,20 +2087,34 @@ static final class VarInRegAtInstr extends ColumnKey {
 }
 @Add Column Keys@ +=
 for (int v = 0; v < variables.length; ++v)
-  for(int n = 0; n < numNodes; ++n)
+  for(int i = 0; i < numNodes; ++n)
     for (Register r : ASSIGNABLE)
-      if(needsAssigning(v, n, r))
-        columns.add(new VarInRegAtInstr(v, r, n));
+      if(needsAssigning(v, i, r))
+        columns.add(new VarInRegAtInstr(v, i, r));
 ~~~~
 
-The next set of unknowns are used to work out the cost of a given assignment. We'll use constraints to ensure that the _NEW_VAR_IN_REG_FLAG_ columns have a one for node _n_, register _r_ and variable _v_ if register _r_ had a different variable in before node _n_ and now has variable _v_ in, and in all other circumstances _NEW_VAR_IN_REG_FLAG_ is zero. This makes the variable an indicator of whether we've loaded a variable into a register from the stack, so it'll be an important part of the objective function (as we want to minimise stack usage).
+How should we decide what value to add to the objective function if a particular (v, i, r) combination is chosen? While we know what assignments we want to penalise or reward, the amount they add to the objective function (and so their relative importance) is not quite so clear. We'll pick values rather arbitarily for now; we should tweak these values after we've seen examples of the assignments they produce.
 
-The cost of register access, _mu_ in (the paper)[http://grothoff.org/christian/lcpc2006.pdf], can be a function of the register and the instruction. This gives us the option of discouraging moves in frequently-used instructions (such as those in the body of a loop). Note that we don't check for liveness here as we don't even think about preserving a non-live variable.
+The first behaviour we want to penalise is spills to the stack. This isn't as simple as increasing the objective function each time a variable is assigned to the <tt>THESTACK</tt> dummy register. For example, what if a variable was live but not used at instructions 3, 4 and 5, and had to be spilled at instructions 3 and 5 due to memory pressure. We wouldn't want to reward an assignment that moved the variable back to a register for instruction 4, only to spill it again for instruction 5. We'd prefer an assignment that spilled it once at instruction 3 and kept it on the stack for instructions 4 and 5. We need a way to penalise moves between the stack and registers, and looking at and assignment to the stack for a single instruction doesn't give us a good enough way to do this.
+
+However, we know that if a variable is used (read or written) by an instruction that variable must be assigned to a register (i.e. can't be on the stack). Therefore, if the variable is on the stack for an instruction that needs it we'll have to insert a expensive <tt>mov</tt> instruction to load it from the stack - so we can penalise this behaviour:
+
+~~~~
+@Other Helpers@ +=
+private static final double COST_OF_SPILL = 100.0;
+@Determine VarInRegAtInstr Coefficient@ +=
+if(r == Register.THESTACK && code.get(i).uses().contains(variables[v]))
+  coefficient += COST_OF_SPILL;
+~~~~
+
+The next set of unknowns are used to work out the cost of a given assignment. We'll use constraints to ensure that the <tt>NEW_VAR_IN_REG_FLAG</tt> dependent variables have a one for any <tt>(v, r, i)</tt> combination if register <tt>r</tt> had a different variable in before instruction <tt>i</tt> and contains variable <tt>v</tt>, and in all other circumstances the constraints should force the <tt>NEW_VAR_IN_REG_FLAG</tt> flag to zero. This dependent variable will be an important part of the objective function as we want to penalise assignments for each <tt>NEW_VAR_IN_REG_FLAG</tt> they have set - especially if the register <rr>r</tt> is the dummy <tt>THESTACK</tt> register as this represents an expensive transfer to the stack.
+
+The cost of register access, <tt>mu</tt> in [the paper](http://grothoff.org/christian/lcpc2006.pdf), can be a function of the register and the instruction. This gives us the option of discouraging moves in frequently-used instructions (such as those in the body of a loop). However, for the minute we'll only give a flat penalty of <tt>+1.0</tt> to the function objective we're trying to minimise.
 
 ~~~~    
 @Other Helpers@ +=
 static final class NewVarInRegFlag extends ColumnKey {
-  NewVarInRegFlag(int v, Register r, int n) { super(v, r, n); }
+  NewVarInRegFlag(int v, int i, Register r) { super(v, i, r); }
   void addToObjective(glp_prob allocation, int columnIndex, ControlFlowGraph cfg) {
     glp_set_obj_coef(allocation, columnIndex + 1, COST_OF_REG_ACCESS);
   }
@@ -2095,56 +2122,12 @@ static final class NewVarInRegFlag extends ColumnKey {
 private static final double COST_OF_REG_ACCESS = 1.0;
 @Add Column Keys@ +=
 for (int v = 0; v < variables.length; ++v)
-  for(int n = 0; n < numNodes; ++n)
+  for(int i = 0; i < code.size(); ++i) {
     for (Register r : ASSIGNABLE)
-      if(needsAssigning(v, n, r))
-        columns.add(new NewVarInRegFlag( v, r, n));
+      if(needsAssigning(v, i, r))
+        columns.add(new NewVarInRegFlag( v, i, r));
 ~~~~
 
-
-Let's tell GLPK how many columns we'll need in total
-
-~~~~
-@Determine Rows And Columns@ +=
-glp_add_cols(allocation, controlFlow.columns.size());
-glp_add_rows(allocation, controlFlow.rows.size());
-for(int c = 0; c < controlFlow.columns.size(); ++c)
-  glp_set_col_kind(allocation, c + 1, GLP_BV);
-~~~~
-
-~~~~
-@Other Helpers@ +=
-private static double spillCost(int variable, int node, ControlFlowGraph controlFlow) {
-  double ret = 0.0;
-  if(controlFlow.isVarUsedNext(variable, node)) ret += COST_OF_SPILL;
-  if(controlFlow.isVarUsedPrev(variable, node)) ret += COST_OF_SPILL;
-  return ret;
-}
-private static final double COST_OF_SPILL = 100.0;
-@Control Flow Graph Members@ +=
-boolean isVarUsedNext(int variable, int node) {
-  return varsReadNext.get(node * variables.length + variable) 
-      || varsWrittenNext.get(node * variables.length + variable);
-}
-boolean isVarUsedPrev(int variable, int node) {
-  for(int n : nextNodes.get(node))
-    if(isVarUsedNext(variable, n))
-      return true;
-  return false;
-}
-@Determine VarInRegAtInstr Coefficient@ +=
-if(r == Register.THESTACK) coefficient += spillCost(v, n, cfg);
-~~~~
-
-The objective: minimise spillage at each node. 
-
-~~~~
-@Set Up Objective@ +=
-glp_set_obj_name(allocation, "spillage");
-glp_set_obj_dir(allocation, GLP_MIN);
-for(int c = 0; c < controlFlow.columns.size(); ++c)
-  controlFlow.columns.get(c).addToObjective(allocation, c, controlFlow);
-~~~~
 
 ~~~~
 @Control Flow Graph Members@ +=
@@ -2249,6 +2232,16 @@ static final class Constraint {
     this.row = row; this.column = column; this.value = value;
   } 
 }
+~~~~
+
+Let's tell GLPK how many columns we'll need in total
+
+~~~~
+@Determine Rows And Columns@ +=
+glp_add_cols(allocation, controlFlow.columns.size());
+glp_add_rows(allocation, controlFlow.rows.size());
+for(int c = 0; c < controlFlow.columns.size(); ++c)
+  glp_set_col_kind(allocation, c + 1, GLP_BV);
 ~~~~
 
 Crazy 1-indexing - leaves blank 0-spaces everywhere
