@@ -280,20 +280,17 @@ The remaining <tt>Value</tt> types look like this:
               +---------+ +-----+ +--------+ +--------+
 </pre>
 
-<tt>Variable</tt> is the only class here that won't appear in the final output; the second section of this article explains how we replace all the <tt>Variable</tt> instances with <tt>Register</tt> or <tt>AtAddress</tt> instances. It'd be useful if we could generate anonymous yet unique <tt>Variable</tt>s; the zero-arg constructor uses a atomic global counter to achieve this. 
+<tt>Variable</tt> is the only class here that won't appear in the final output; the second section of this article explains how we replace all the <tt>Variable</tt> instances with <tt>Register</tt> or <tt>AtAddress</tt> instances. We'll make a <tt>Variable</tt> a typedef of an int.
 
 ~~~~
 @Static Classes@ +=
 static final class Variable implements StorableValue, Comparable<Variable> {
-  final String name;
-  Variable(String name) { this.name = name; }
-  Variable() { this("VAR" + uniqueness.getAndIncrement()); };
-  public boolean equals(Object o) { return o instanceof Variable && ((Variable)o).name.equals(name); }
-  public int hashCode() { return name.hashCode(); }
-  public int compareTo(Variable o) { return name.compareTo(o.name); }
-  public String toString() { return name; }
+  final int id;
+  Variable(id) { this.id = id; }
+  public boolean equals(Object o) { return o instanceof Variable && ((Variable)o).id == id; }
+  public int hashCode() { return id; }
+  public int compareTo(Variable o) { return Ints.compare(id, o.id); }
 }
-static final AtomicInteger uniqueness = new AtomicInteger();
 ~~~~
 
 <tt>AtAddress</tt> [decorates](http://en.wikipedia.org/wiki/Decorator_pattern) a register (or <tt>Variable</tt>), using it to specify what memory address to look up. [Base plus offset](http://en.wikipedia.org/wiki/Addressing_mode#Base_plus_offset.2C_and_variations) addressing is a generalisation of register indirect addressing; the description includes an literal value to add to the memory address in the register before dereferencing it. For example, <tt>mov 0x4(%rax), %rbx</tt> where register <tt>rax</tt> contains 0x7fff5fbff9b8 means take the memory address in register <tt>rax</tt> (0x7fff5fbff9b8), add four to it (0x7fff5fbff9bc), then read 8 bytes from memory starting at that address. These 8 bytes will be in [little endian](http://en.wikipedia.org/wiki/Endianness) format on an x86-64 processor, so reverse the sequence of bytes then combine them to get a 64-bit integer, and store that integer in register <tt>rbx</tt>.
@@ -410,7 +407,6 @@ static final class ProgramState {
 }
 static final class ParsingState {
   List<Instruction> code = Lists.newArrayList();
-  Map<Variable, StorableValue> params = Maps.newTreeMap(); 
   ProgramState program;
   Label myName;
   ParsingState(Tree def, ProgramState program) {
@@ -499,6 +495,24 @@ code.add(new Definition(
   true));
 ~~~~
 
+We'll assign a unique number to each <tt>Variable</tt>. This way we can keep track of how many distinct <tt>Variable</tt>s we've got, and it'll be useful later for generating array indices for a <tt>Variable</tt>. We'll turn the <tt>ParsingState</tt> into a factory, and use the convention that passing <tt>null</tt> as the parameter returns a new unique <tt>Variable</tt>.
+
+If the AST node is a <tt>Variable</tt> it could be a reference to a local variable defined in this function or a reference to one of the parameters (as they are AST nodes of type <tt>Variable</tt> too). We've seen that one of the <tt>ParsingState</tt>'s fields is a <tt>Map</tt> of <tt>Variable</tt> names to <tt>Value</tt>s that access those parameters (but not how that map's built up yet). We'll look up our new <tt>Variable</tt> in this map to see if it's actually a reference to one of the function parameter - and if so we'll return the <tt>StorableValue</tt> that accesses it instead.
+
+~~~~
+@Parsing State Members@ +=
+Map<String, Variable> variables = Maps.newTreemap();
+int numVariables = 0;
+Variable variable(String name) {
+  if(name == null) return new Variable(numVariables++);
+  if(params.containsKey(name)) return params.get(name);
+  Variable ret = variables.get(name);
+  if(ret == null)
+    variables.put(name, ret = new Variable(numVariables++));
+  return ret;
+}
+~~~~
+
 What we do for each statement depends on the statement's type, so we'll switch on that:
 
 ~~~~
@@ -539,11 +553,11 @@ We'll move the values in the registers we have to save into <tt>Variable</tt>s. 
 ~~~~
 @Identify Callee Saves Registers@ +=
 for(Register r : CALLEE_SAVES)
-  code.add(move(r, new Variable(CALLEE_SAVE_VAR + r)));
+  code.add(move(r, variable(CALLEE_SAVE_VAR + r)));
 @Parsing State Members@ +=
 void addReturn() {
   for(Register r : CALLEE_SAVES)
-    code.add(move(new Variable(CALLEE_SAVE_VAR + r), r));
+    code.add(move(variable(CALLEE_SAVE_VAR + r), r));
   @Before Returning From Function@
   @Are We Leaving The Main Function@
   code.add(Compiler.ret);
@@ -620,18 +634,17 @@ Sometimes we'll need to ensure the <tt>Value</tt> is a <tt>StorableValue</tt> as
 private StorableValue toStorable(Value v) {
   if (StorableValue.class.isAssignableFrom(v.getClass())) 
     return (StorableValue) v;
-  Variable var = new Variable();
+  Variable var = variable(null);
   code.add(move(v, var));
   return var;
 }
 ~~~~
 
-If the AST node is a <tt>Variable</tt> it could be a reference to a local variable defined in this function or a reference to one of the parameters (as they are AST nodes of type <tt>Variable</tt> too). We've seen that one of the <tt>ParsingState</tt>'s fields is a <tt>Map</tt> of <tt>Variable</tt> names to <tt>Value</tt>s that access those parameters (but not how that map's built up yet). We'll look up our new <tt>Variable</tt> in this map to see if it's actually a reference to one of the function parameter - and if so we'll return the <tt>StorableValue</tt> that accesses it instead.
+We've done all the work of deciding whether a string in the source code refers to a <tt>Variable</tt> or a parameter in the <tt>variable(..)</tt> function above, so we can just re-use that logic here:
 
 ~~~~
 @Get A Variable@ +=
-Variable v = new Variable(text(t).substring(1));
-return params.containsKey(v) ? params.get(v) : v;
+return variable(text(t).substring(1));
 ~~~~
 
 If the expression is a reference to a symbol defined elsewhere, we'll just extract the symbol name from the AST node's text by stripping off the leading "#". We'll leave this label our generated Assembly code, and when it's assembled the assembler will add it to the GOT as an undefined symbol. When the assembled code is linked the (static or dynamic) linker will look for a definition of this symbol elsewhere, and will fail if it can't find a shared library, executable or one of the other files it's linking that exports the symbol.
@@ -685,7 +698,7 @@ I said above that "intrinsics", or UTF-8 symbols in the source code corresponded
 @Parse An Intrinsic Call@ +=
 Value arg1 = getAsValue(get(t, 1, 0));
 Value arg2 = toStorable(getAsValue(get(t, 1, 1)));
-Variable ret = new Variable();
+Variable ret = variable(null);
 code.add(move(arg1, ret));
 code.add(new BinaryOp(Op.parse(text(t, 0)), arg2, ret));
 return ret;
@@ -699,7 +712,7 @@ Condition cond = Condition.parse(text(t, 0));
 Value arg1 = getAsValue(get(t, 1, 1));
 StorableValue arg2 = toStorable(getAsValue(get(t, 1, 0)));
 code.add(new BinaryOp(Op.cmpq, arg1, arg2));
-Variable ret = new Variable();
+Variable ret = variable(null);
 code.add(move(new Immediate(0), ret));
 code.add(new Move(new Immediate(1), ret, cond));
 return ret;
@@ -713,7 +726,7 @@ Value val = getAsValue(get(t, 1, 0));
 if(val instanceof StorableValue && !(val instanceof AtAddress))
   return new AtAddress((StorableValue)val, 0);
 else {
-  Variable ret = new Variable();
+  Variable ret = variable(null);
   code.add(move(val, ret));
   return new AtAddress(ret, 0);
 } 
@@ -728,7 +741,7 @@ However, both x86-64 conventions agree that 64-bit integers are returned in the 
 ~~~~
 @Parse A Function Call@ +=
 call(t);
-Variable var = new Variable();
+Variable var = variable(null);
 code.add(move(Register.rax, var));
 return var;
 ~~~~
@@ -805,7 +818,7 @@ static boolean hasDynamicAllocation(Tree t) {
 }
 @Set Up Stack Allocation@ +=
 if(hasDynamicAllocation(get(def, 2))) {
-  framePointer = new Variable();
+  framePointer = variable(null);
   code.add(move(rsp, framePointer));
 } else
   framePointer = null;
@@ -909,7 +922,7 @@ Now, if we want to generate a <tt>mov</tt> instruction store the <tt>arg</tt> <t
 @Parsing State Members@ += 
 private Value toRegister(Value v) {
   if(v instanceof AtAddress) {
-    Variable loaded = new Variable();
+    Variable loaded = variable(null);
     code.add(move(v, loaded));
     v = loaded;
   }
@@ -943,7 +956,7 @@ The x86 <tt>mov</tt> instruction doesn't allow both operands to be indirect (i.e
 ~~~~
 @Move Values From Memory@ +=
 if(arg instanceof AtAddress && framePointer != null) {
-  Variable tmp = new Variable(); 
+  Variable tmp = variable(null); 
   code.add(move(arg, tmp));
   arg = tmp;
 }
@@ -967,7 +980,7 @@ A stack allocation expression is dynamic if we know the size at compile-time, wh
 
 ~~~~
 @Parse A Stack Allocation@ +=
-Variable ret = new Variable();
+Variable ret = variable(null);
 Value size = getAsValue(get(t, 1, 0));
 if(size instanceof Immediate) {
   @Statically Allocate On Stack@
@@ -1188,11 +1201,13 @@ static final class Parameter implements com.google.common.base.Supplier<Long> {
 When we first enter a function the parameter values will either be in the <tt>PARAMETERS</tt> registers or on the stack. We want to move these values into the <tt>Variable</tt>s used in the source code for the parameters. We'll insert <tt>mov</tt> instructions at the start of the function to save a copy of the parameter values passed in registers into their corresponding <tt>Variable</tt>s. However, for parameter values passed on the stack we have two options: we can similarly insert <tt>mov</tt> instructions at the start of the function to load the parameter values into registers from memory, or we can just replace all reads and writes to that parameter <tt>Variable</tt> in the function's code with reads and writes to the memory address where the parameter value was originally stored. Adding instructions at the start means each stack parameter adds another <tt>Variable</tt> to the function, which increases [register pressure](http://en.wikipedia.org/wiki/Register_pressure) as more <tt>Variable</tt>s are competing for space in the limited number of hardware registers. We'll make our compiler generate Assembly code for the latter - so we'll use the <tt>params</tt> field to map <tt>Variable</tt>s we come across in the source code to <tt>AtAddress</tt> <tt>Value</tt>s that point to where the parameter lives on the stack.
 
 ~~~~
+@Parsing State Members@ +=
+private Map<String, StorableValue> params = Maps.newTreemap();
 @Parse Function Parameters@ +=
 for(int p = 0, count = numChildren(def, 1); p < count; ++p) {
-  Variable v = new Variable(text(def, 1, p).substring(1));
+  String v = text(def, 1, p).substring(1);
   if(p < PARAMETERS.length)
-    code.add(move(PARAMETERS[p], v));
+    code.add(move(PARAMETERS[p], variable(v)));
   else
     params.put(v, parameter(p - PARAMETERS.length));
 }
@@ -1295,7 +1310,7 @@ x86 instructions don't support more than one level of indirection (e.g. you can 
 ~~~~
 @Generate Mov Instructions@ +=
 for(; numDerefs > 1; --numDerefs) {
-  Variable inter = new Variable();
+  Variable inter = variable(null);
   code.add(move(to, inter));
   to = new AtAddress(inter, 0);
 }
@@ -1677,7 +1692,6 @@ static final class ControlFlowGraph {
   @Control Flow Graph Members@
   ControlFlowGraph(List<Instruction> code, StorableValue framePointer) {
     do {
-      @Get Variables Used@
       @Fit Instructions Between Nodes@
       @Join Nodes Together@
       @Map Nodes To Instructions@
@@ -1689,7 +1703,6 @@ static final class ControlFlowGraph {
     @Identify Function Calls@
     @Calculate Liveness@
     @Find Registers Already In Use@
-    @Mark Aliased Variables@
     @Generate GLPK Mappings@
   }
 }
@@ -1700,9 +1713,7 @@ We cna then build a Integer Programming problem out of the <tt>ControlFlowGraph<
 ~~~~
 @Do Register Allocation@ +=
 ControlFlowGraph controlFlow = new ControlFlowGraph(state.code, state.framePointer);
-if(controlFlow.variables.length > 0) {
-  @Solve@
-}
+if(controlFlow.numVariables > 0) { @Solve@ }
 ~~~~
 
 We'll finish by using the solution of the Integer Programming problem to replace the <tt>Variable</tt> left in our <tt>code</tt> <tt>List</tt> with <tt>Register</tt>s.
@@ -1844,24 +1855,13 @@ Set<Value> readsFrom() {
 
 We'll use <tt>BitSet</tt>s to store liveness information as we just need a per-variable-per-instruction flag. This means we need a way to map <tt>Variable</tt>s to a distinct integer between <tt>0</tt> and one less than the number of distinct <tt>Variable</tt>s the function uses.
 
-~~~~
-@Get Variables Used@ +=
-Set<Variable> allVariables = Sets.newTreeSet();
-for(Instruction i : code)
-  for(Variable v : Iterables.filter(i.uses(), Variable.class))
-    allVariables.add(v);
-variables = Iterables.toArray(allVariables, Variable.class);
-@Control Flow Graph Members@ +=
-Variable[] variables;
-~~~~
-
-We'll use a <tt>Variable</tt>'s index into the <tt>variables</tt> array, <tt>v</tt> and an <tt>Instruction</tt>'s into the <tt>code</tt> array, <tt>i</tt> to determine which index in the liveness <tt>BitSet</tt> to use. We'll use <tt>i * variables.length + v</tt> rather than <tt>v * code.size() + i</tt> as we're likely to process liveness instruction-by-instruction, so it's better for cache locality to have all the <tt>Variable</tt>'s liveness flags for a given <tt>Instruction</tt> together.
+We'll use a <tt>Variable</tt>'s index into the <tt>variables</tt> array, <tt>v</tt> and an <tt>Instruction</tt>'s into the <tt>code</tt> array, <tt>i</tt> to determine which index in the liveness <tt>BitSet</tt> to use. We'll use <tt>i * numVariables + v</tt> rather than <tt>v * code.size() + i</tt> as we're likely to process liveness instruction-by-instruction, so it's better for cache locality to have all the <tt>Variable</tt>'s liveness flags for a given <tt>Instruction</tt> together.
 
 ~~~~
 @Control Flow Graph Members@ +=
 final BitSet isLive;
-boolean isLiveAt(int v, int i) {
-  return isLive.get(i * variables.length + v);
+boolean isLiveAt(Variable v, int i) {
+  return isLive.get(i * numVariables + v.id);
 }
 ~~~~
 
@@ -1905,14 +1905,14 @@ BitSet seen = new BitSet(code.size());
 for(Integer i = unprocessed.poll(); i != null; i = unprocessed.poll()) {
   boolean changed = false;
   for(int nextI : next.get(i))
-      changed |= copyFrom(isLive, nextI * variables.length, i * variables.length, variables.length);
-  for(int v = 0; v < variables.length; ++v) {
-    boolean isWritten = code.get(i).writesTo(WILL_ERASE).contains(variables[v]);
-    boolean isRead = code.get(i).readsFrom().contains(variables[v]);
+      changed |= copyFrom(isLive, nextI * numVariables, i * numVariables, numVariables);
+  for(int v = 0; v < numVariables; ++v) {
+    boolean isWritten = code.get(i).writesTo(WILL_ERASE).contains(v);
+    boolean isRead = code.get(i).readsFrom().contains(v);
     if(isWritten && !isRead)
       isLive.clear(index);
     else if(isRead)
-      isLive.set(i * variables.length + v)
+      isLive.set(i * numVariables + v)
   }
   if(!seen.get(i) || changed)
     unprocessed.addAll(previous.get(i));
@@ -1974,8 +1974,8 @@ The register assignment problem is basically "should we assign <tt>Variable</tt>
 
 ~~~~
 @Control Flow Graph Members@ +=
-boolean needsAssigning(int v, int i, Register r) {
-  boolean isUsed = code.get(i).uses().contains(variables[v]);
+boolean needsAssigning(Variable v, int i, Register r) {
+  boolean isUsed = code.get(i).uses().contains(v);
   @Is This Combination Impossible@
   return true;
 }
@@ -2019,7 +2019,7 @@ The final case is for the frame pointer. As we need this to resolve the memory a
 
 ~~~~
 @Is This Combination Impossible@ +=
-if(variables[v].equals(framePointer) && r == Register.THESTACK)
+if(v.equals(framePointer) && r == Register.THESTACK)
   return false;
 ~~~~
 
@@ -2034,63 +2034,41 @@ We'll decide on the "best" register assignment by codifying a fitness, or "objec
 @Set Up Objective@ +=
 glp_set_obj_name(allocation, "register assignment");
 glp_set_obj_dir(allocation, GLP_MIN);
-for(int c = 0; c < controlFlow.columns.size(); ++c)
-  controlFlow.columns.get(c).addToObjective(allocation, c, controlFlow);
 ~~~~
 
-We'll start by building up the matrix of coefficients to the constraint equations. We'll use <tt>CellKey</tt> (the <tt>RowKey</tt> and <tt>ColumnKey</tt>) subclasses to represent the logical rows and columns in this matrix. In general, each row and column will be associated with a particular (v, r, i) combination, and we'll make our classes have a well-defined order (using the <tt>Comparable</tt> interface) so we can sort the rows and columns to give us O(lg n) lookup time for an given (v, r, i) combination.
+We'll start by building up the matrix of coefficients to the constraint equations. We'll use <tt>CellKey</tt> subclasses to represent the logical columns in this matrix, and each column will add a fixed number of rows. In general, each row and column will be associated with a particular (v, r, i) combination, and we'll make our classes have a well-defined order (using the <tt>Comparable</tt> interface) so we can sort the rows and columns to give us O(lg n) lookup time for an given (v, r, i) combination.
 
-~~~~
-@Other Helpers@ +=
-static abstract class CellKey implements Comparable<CellKey> {
-  final int v; final int i; final Register r;
-  CellKey(int v, int i, Register r) { 
-    this.v = v; this.r = r; this.i = i; 
-  }
-  public int compareTo(CellKey o) {
-    return ComparisonChain.start().
-      compare(getClass().getName(), o.getClass().getName()).
-      compare(v, o.v).
-      compare(r, o.r).
-      compare(i, o.i).result();
-  }
-}
-private static final int NONE = -1;
-~~~~
 
 We'll start by defining the columns of the constraint matrix. The (Java SWIG bindings of the) GLPK library we're using represents a problem with an instance of <tt>glp_prob</tt>. Each column in the constraint matrix is a dependent variable, and each dependent variable appears once in the objective function with a linear coefficient (which may be zero). We'll keep the logic to determine this constant in the dependent variable's <tt>ColumnKey</tt> so we only have to maintain one <tt>List</tt> of dependent variables (the <tt>columns</tt> variable). Note that as we're going to sort the columns we don't know yet what index in <tt>columns</tt> each <tt>ColumnKey</tt> will end up in, so we'll have to pass that index in when we eventually call <tt>addToObjective</tt> so we can set the right column in <tt>glp_prob</tt>'s objective function.
 
 ~~~~
-@Other Helpers@ +=
-static abstract class ColumnKey extends CellKey {
-  ColumnKey(int v, int i, Register r) { super(v, i, r); }
-  abstract void addToObjective(glp_prob allocation, int columnIndex, ControlFlowGraph cfg);
-}
-@Control Flow Graph Members@ +=
-final List<ColumnKey> columns = Lists.newArrayList();
 @Generate GLPK Mappings@ +=
-@Add Column Keys@
-Collections.sort(columns);
+for(int i = 0; i < code.size(); ++i)
+  for (int v = 0; v < numVariables; ++v)
+    for(int i = 0; i < numNodes; ++n)
+      for (Register r : ASSIGNABLE)
+        if(needsAssigning(v, i, r)) {
+          @For Each Combination@
+        }
+~~~~
+
+~~~~
+@Other Helpers@ +=
+static int addColumn(glp_prob problem) {
+  int col = glp_add_cols(problem, 1);
+  glp_set_col_kind(problem, col, GLP_BV);
+  return col;
+}
 ~~~~
 
 The first (and most important) set of dependent variables are the <tt>VarInRegAtInstr</tt> columns; these represent the variable <tt>v</tt> being in <tt>Register</tt> <tt>r</tt> at <tt>Instruction</tt> <tt>i</tt>, and so store the solution of the register assignment problem. We're phrasing this as an Integer programming problem, so the <tt>VarInRegAtInstr</tt> variables can only take integer values, and we'll add extra constaints to ensure the value is either zero or one. We can then intepret the zero or one values as a binary yes-or-no output. We'll use the <tt>needsAssigning</tt> method we defined earlier so we only have dependent variables for valid combinations - the fewer dependent variables our Integer Programming problem has the faster it will be to solve it. We'll define the <tt>addToObjective</tt>'s <tt>coefficient</tt> later as this is the main way we'll modify the problem to encode more domain knowledge. We want the optimal solution (the solution that minimises the objective function) to generate the most efficient solution, so we want to penalise register assignments that require expensive operations (like writing to the stack).
 
 ~~~~
-@Other Helpers@ +=
-static final class VarInRegAtInstr extends ColumnKey {
-  VarInRegAtInstr(int v, int i, Register r) { super(v, i, r); }
-  void addToObjective(glp_prob allocation, int columnIndex, ControlFlowGraph cfg) {
-    double coefficient = 0d;
-    @Determine VarInRegAtInstr Coefficient@
-    glp_set_obj_coef(allocation, columnIndex + 1, coefficient);
-  }
-}
-@Add Column Keys@ +=
-for (int v = 0; v < variables.length; ++v)
-  for(int i = 0; i < numNodes; ++n)
-    for (Register r : ASSIGNABLE)
-      if(needsAssigning(v, i, r))
-        columns.add(new VarInRegAtInstr(v, i, r));
+@For Each Combination@ +=
+int varInRegAtInstr = addColumn(allocation);
+double coefficient = 0d;
+@Determine VarInRegAtInstr Coefficient@
+glp_set_obj_coef(allocation, varInRegAtInstr, coefficient);
 ~~~~
 
 How should we decide what value to add to the objective function if a particular (v, i, r) combination is chosen? While we know what assignments we want to penalise or reward, the amount they add to the objective function (and so their relative importance) is not quite so clear. We'll pick values rather arbitarily for now; we should tweak these values after we've seen examples of the assignments they produce.
@@ -2103,88 +2081,73 @@ However, we know that if a variable is used (read or written) by an instruction 
 @Other Helpers@ +=
 private static final double COST_OF_SPILL = 100.0;
 @Determine VarInRegAtInstr Coefficient@ +=
-if(r == Register.THESTACK && code.get(i).uses().contains(variables[v]))
+if(r == Register.THESTACK && code.get(i).uses().contains(v))
   coefficient += COST_OF_SPILL;
 ~~~~
 
-The next set of unknowns are used to work out the cost of a given assignment. We'll use constraints to ensure that the <tt>NEW_VAR_IN_REG_FLAG</tt> dependent variables have a one for any <tt>(v, r, i)</tt> combination if register <tt>r</tt> had a different variable in before instruction <tt>i</tt> and contains variable <tt>v</tt>, and in all other circumstances the constraints should force the <tt>NEW_VAR_IN_REG_FLAG</tt> flag to zero. This dependent variable will be an important part of the objective function as we want to penalise assignments for each <tt>NEW_VAR_IN_REG_FLAG</tt> they have set - especially if the register <rr>r</tt> is the dummy <tt>THESTACK</tt> register as this represents an expensive transfer to the stack.
+We need another flag if we want to penalise a spill to the stack. We'll use constraints to ensure that the <tt>NEW_VAR_IN_REG_FLAG</tt> dependent variables have a one for any <tt>(v, r, i)</tt> combination if register <tt>r</tt> had a different variable in before instruction <tt>i</tt> and contains variable <tt>v</tt>, and in all other circumstances the constraints should force the <tt>NEW_VAR_IN_REG_FLAG</tt> flag to zero. This dependent variable will be an important part of the objective function as we want to penalise assignments for each <tt>NEW_VAR_IN_REG_FLAG</tt> they have set (as even <tt>mov</tt>s between registers have some cost) - but especially if the register <rr>r</tt> is the dummy <tt>THESTACK</tt> register.
 
-The cost of register access, <tt>mu</tt> in [the paper](http://grothoff.org/christian/lcpc2006.pdf), can be a function of the register and the instruction. This gives us the option of discouraging moves in frequently-used instructions (such as those in the body of a loop). However, for the minute we'll only give a flat penalty of <tt>+1.0</tt> to the function objective we're trying to minimise.
+The cost of register access, <tt>mu</tt> in [the paper](http://grothoff.org/christian/lcpc2006.pdf), can be a function of the register and the instruction. This gives us the option of discouraging moves in frequently-used instructions (such as those in the body of a loop). However, for the minute we'll only give a flat objective function penalty of <tt>+1.0</tt> for register moves and <tt>+100.0</tt> for stack moves.
 
-~~~~    
+~~~~
+@For Each Combination@ +=
+int newVarInReg = addColumn(allocation);
+glp_set_obj_coef(allocation, newVarInReg, 
+  r == THESTACK ? COST_OF_STACK_ACCESS : COST_OF_REG_ACCESS);
 @Other Helpers@ +=
-static final class NewVarInRegFlag extends ColumnKey {
-  NewVarInRegFlag(int v, int i, Register r) { super(v, i, r); }
-  void addToObjective(glp_prob allocation, int columnIndex, ControlFlowGraph cfg) {
-    glp_set_obj_coef(allocation, columnIndex + 1, COST_OF_REG_ACCESS);
-  }
-}
 private static final double COST_OF_REG_ACCESS = 1.0;
-@Add Column Keys@ +=
-for (int v = 0; v < variables.length; ++v)
-  for(int i = 0; i < code.size(); ++i) {
-    for (Register r : ASSIGNABLE)
-      if(needsAssigning(v, i, r))
-        columns.add(new NewVarInRegFlag( v, i, r));
+private static final double COST_OF_STACK_ACCESS = 100.0;
+~~~~
+
+The objective function as we've defined it so far will give us an efficient allocation. However, there's some domain knowledge we can take advantage of - and we'll do this by adding 'hints' to the objective function. We'll subtract a small amount from the objective function if an allocation satisfies our hint (and so the Integer Programming solver will choose an allocation that follows the hints over one that doesn't). However, these hints dwarfed by the penalties we've defined, so won't come at the cost of additional memory accesses.
+
+Our first hint aims to make as many <tt>mov</tt>s instructions no-ops as possible (especially if the <tt>Instruction</tt> contains a fixed <tt>Register</tt>). For example, as we insert a <tt>mov</tt> just before a <tt>ret</tt> to set the <tt>rax</tt> register to the return value; ideally the return value would already be in <tt>rax</tt> so we could save an instruction. Similarly, after a <tt>Call</tt> <tt>Instruction</tt> we add a <tt>mov</tt> to put the value the function returns in <tt>rax</tt> to the return <tt>Variable</tt> defined in the programme. 
+
+~~~~
+@Instruction Members@ +=
+boolean couldBeNoOp(Variable v, Register r) { return false; }
+@Move Members@ +=
+boolean couldBeNoOp(Variable v, Register r) { return uses(v) && uses(r); }
+@Determine VarInRegAtInstr Coefficient@ +=
+if(code.get(i).couldBeNoOp(v, r))
+  coefficient += MOVE_NOP_HINT;
+@Other Helpers@ +=
+private static final double MOVE_NOP_HINT = -1.0;
+~~~~
+
+Two variables are 'aliased' at an <tt>Instruction</tt> if that <tt>Instruction</tt> makes one of them dead (i.e. <tt>isLive</tt> returns false after the <tt>Instruction</tt>) and makes the other live (i.e. <tt>isLive</tt> returns true for this <tt>Instruction</tt> but not the previous one - remember <tt>isLive</tt> describes the variable's state just _before_ the <tt>Instruction</tt> is executed). Normally we'll use constraints to only allow one variable in a register at once (as one of their values would be erased), but if we assigned two aliasing variables to the same <tt>Register</tt> at an <tt>Instruction</tt> we would't lose information - as we don't mind losing the value of the <tt>Variable</tt> that just became 'dead'. 
+
+~~~~
+@Instruction Members@ +=
+Set<Variable> aliasingVars(ControlFlowGraph cfg) {
+  return Collections.emptySet();
+}
+@Move Members@ +=
+Set<Variable> aliasingVars(ControlFlowGraph cfg) {
+  if(from instanceof Variable && to instanceof Variable)
+}
 ~~~~
 
 
 ~~~~
 @Control Flow Graph Members@ +=
 final Multimap<Integer, Integer> aliasingVars = TreeMultimap.create();
-@Mark Aliased Variables@ +=
-for (int n = 0; n < numNodes; ++n) {
-  Collection<Integer> instrsAfter = instructionsFollowingNode.get(n);
-  if(instrsAfter.size() != 1) continue;
-  int i = getOnlyElement(instrsAfter); Instruction instr = code.get(i); 
-  if(!(instr instanceof Move)) continue;
-  Move move = (Move) instr;
-  if(move.uses(Variable.class).size() != 2) continue; 
-  if(move.cond != null) continue;
-  if(instr.readsFrom(Variable.class).size() == 2) continue; // reg->mem
-  int reads = indexOf(variables, getOnlyElement(instr.readsFrom(Variable.class)));
-  int writes = indexOf(variables, getOnlyElement(instr.writesTo(Variable.class, WILL_ERASE)));
-  if(isLiveAt(reads, nextNode[i]) || isLiveAt(writes, n)) continue;
-  aliasingVars.putAll(n, Arrays.asList(reads, writes));
-}
-~~~~
-
-Hinting. We'd like to make as many _movq_s no-ops as possible (especially if we've defined a register). We deliberately insert a move just before a return to set the _eax_ register to the return value; it'd be nice if it was a no-op. Also, after a _call_ where we move the return value in _eax_ to the return _Variable_. However, currently:
-<pre>
-fn() { a=1; b=5; return a+b; }
-</pre>
-Compiles to:
-<pre>
-movl $1, %eax
-movl $5, %ebx
-movl %eax, %ecx
-addl %ebx, %ecx
-movl %ecx, %eax
-</pre>
-
-~~~~
-@Control Flow Graph Members@ +=
-private final Set<ColumnKey> shouldBeNoOp = Sets.newTreeSet();
-List<Integer> nodesAround(int instruction) {
-  return Arrays.asList(prevNode[instruction], nextNode[instruction]);
-}
-@Generate GLPK Mappings@ +=
-for(int i = 0; i < code.size(); ++i) {
-  if(!(code.get(i) instanceof Move)) continue;
-  for(Variable variable : code.get(i).uses(Variable.class)) {
-    int v = indexOf(variables, variable);
-    for(Register r : code.get(i).uses(Register.class))
-      for(int n : nodesAround(i)) 
-        if(needsAssigning(v, n, r))
-          shouldBeNoOp.add(new VarInRegAtInstr(v, r, n));
+  @Mark Aliased Variables@ +=
+  for (int n = 0; n < numNodes; ++n) {
+    Collection<Integer> instrsAfter = instructionsFollowingNode.get(n);
+    if(instrsAfter.size() != 1) continue;
+    int i = getOnlyElement(instrsAfter); Instruction instr = code.get(i); 
+    if(!(instr instanceof Move)) continue;
+    Move move = (Move) instr;
+    if(move.uses(Variable.class).size() != 2) continue; 
+    if(move.cond != null) continue;
+    if(instr.readsFrom(Variable.class).size() == 2) continue; // reg->mem
+    int reads = indexOf(variables, getOnlyElement(instr.readsFrom(Variable.class)));
+    int writes = indexOf(variables, getOnlyElement(instr.writesTo(Variable.class, WILL_ERASE)));
+    if(isLiveAt(reads, nextNode[i]) || isLiveAt(writes, n)) continue;
+    aliasingVars.putAll(n, Arrays.asList(reads, writes));
   }
-}
-@Determine VarInRegAtInstr Coefficient@ +=
-if(cfg.shouldBeNoOp.contains(this)) coefficient += MOVE_NOP_HINT;
-@Other Helpers@ +=
-private static final double MOVE_NOP_HINT = -1.0;
-~~~~
-
+  ~~~~
 Let's also encourage putting aliased vars in the same register. For that we'll need another flag:
 
 ~~~~
@@ -2330,14 +2293,14 @@ for (int n = 0; n < numNodes; ++n)
       if(aliasingVars.containsKey(n)) {
         for(int avoid : aliasingVars.get(n)) {
           OneVarPerReg constraint = new OneVarPerReg(avoid, r, n);
-          for (int v = 0; v < variables.length; ++v)
+          for (int v = 0; v < numVariables; ++v)
             if(v != avoid && needsAssigning(v, n, r))
               constraint.vars.set(v);
           rows.add(constraint);
         }
       } else {
         OneVarPerReg constraint = new OneVarPerReg(NONE, r, n);
-        for (int v = 0; v < variables.length; ++v)
+        for (int v = 0; v < numVariables; ++v)
           if(needsAssigning(v, n, r))
             constraint.vars.set(v);
         rows.add(constraint);
@@ -2361,7 +2324,7 @@ static final class VarsNotLost extends RowKey {
   }
 }
 @Add Row Keys@ +=
-for (int v = 0; v < variables.length; ++v)
+for (int v = 0; v < numVariables; ++v)
   for (int n = 0; n < numNodes; ++n) {
     VarsNotLost constraint = new VarsNotLost(v, n);
     for (Register r : ASSIGNABLE)
@@ -2376,7 +2339,7 @@ The last pair of constraints ensure that the _NEW_VAR_IN_REG_FLAG_ works as we w
 
 ~~~~
 @Add Row Keys@ +=
-for (int v = 0; v < variables.length; ++v)
+for (int v = 0; v < numVariables; ++v)
   for (Register r : ASSIGNABLE)
     for(Entry<Integer, Integer> n : nextNodes.entries()) {
       if(needsAssigning(v, n.getKey(), r)
@@ -2606,7 +2569,7 @@ for(int i = 0; i < state.code.size(); ++i) {
 ~~~~
 @Calculate Stack Moves Needed@ +=
 Multimap<Integer, Instruction> stackMovesAfter = HashMultimap.create();
-for (int v = 0; v < controlFlow.variables.length; ++v)
+for (int v = 0; v < controlFlow.numVariables; ++v)
   for (int n = 0; n < controlFlow.numNodes; ++n)
     for(Register r : ASSIGNABLE) {
       int index = Collections.binarySearch(controlFlow.columns, new NewVarInRegFlag(v, r, n));
@@ -2632,7 +2595,7 @@ Register whereWasI = whereAmI(allocation, controlFlow, v, controlFlow.prevNode[i
 
 ~~~~
 @Find Where I Live On The Stack@ +=
-Supplier<Long> stackOffset = state.spillVariable(controlFlow.variables[v]);
+Supplier<Long> stackOffset = state.spillVariable(controlFlow.v);
 ~~~~
 
 Who knows where the stack pointer is? If it's not in a fixed register, check the GLPK solution:
