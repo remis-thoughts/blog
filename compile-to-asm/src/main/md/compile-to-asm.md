@@ -2044,12 +2044,13 @@ We'll start by defining the columns of the constraint matrix. The (Java SWIG bin
 ~~~~
 @Generate GLPK Mappings@ +=
 for(int i = 0; i < code.size(); ++i)
-  for (int v = 0; v < numVariables; ++v)
-    for(int i = 0; i < numNodes; ++n)
-      for (Register r : ASSIGNABLE)
-        if(needsAssigning(v, i, r)) {
-          @For Each Combination@
-        }
+  for (Register r : ASSIGNABLE) {
+    @For Each Instruction And Register@
+    for (int v = new Variable(0); v.id < numVariables; v = new Variable(++v.id))
+      if(needsAssigning(v, i, r)) {
+        @For Each Combination@
+      }
+  }
 ~~~~
 
 ~~~~
@@ -2115,74 +2116,37 @@ if(code.get(i).couldBeNoOp(v, r))
 private static final double MOVE_NOP_HINT = -1.0;
 ~~~~
 
-Two variables are 'aliased' at an <tt>Instruction</tt> if that <tt>Instruction</tt> makes one of them dead (i.e. <tt>isLive</tt> returns false after the <tt>Instruction</tt>) and makes the other live (i.e. <tt>isLive</tt> returns true for this <tt>Instruction</tt> but not the previous one - remember <tt>isLive</tt> describes the variable's state just _before_ the <tt>Instruction</tt> is executed). Normally we'll use constraints to only allow one variable in a register at once (as one of their values would be erased), but if we assigned two aliasing variables to the same <tt>Register</tt> at an <tt>Instruction</tt> we would't lose information - as we don't mind losing the value of the <tt>Variable</tt> that just became 'dead'. 
+Two variables are 'aliased' at an <tt>Instruction</tt> if that <tt>Instruction</tt> makes one of them dead (i.e. <tt>isLive</tt> returns false after the <tt>Instruction</tt>) and makes the other live (i.e. <tt>isLive</tt> returns true for this <tt>Instruction</tt> but not the previous one - remember <tt>isLive</tt> describes the variable's state just _before_ the <tt>Instruction</tt> is executed). Normally we'll use constraints to only allow one variable in a register at once (as one of their values would be erased), but if we assigned two aliasing variables to the same <tt>Register</tt> at an <tt>Instruction</tt> we would't lose information - as we don't mind losing the value of the <tt>Variable</tt> that just became 'dead'. Note that only <tt>Definition</tt> <tt>Instruction</tt>s have more than one predecessor and only <tt>Jump</tt> <tt>Instruction</tt>s have more than one successor, so when we're in a <tt>Move</tt> we can assume the set of <tt>next</tt> <tt>Instruction</tt>s has only one element.
 
 ~~~~
 @Instruction Members@ +=
-Set<Variable> aliasingVars(ControlFlowGraph cfg) {
+Set<Variable> aliasingVars(ControlFlowGraph cfg, int i) {
   return Collections.emptySet();
 }
 @Move Members@ +=
-Set<Variable> aliasingVars(ControlFlowGraph cfg) {
-  if(from instanceof Variable && to instanceof Variable)
+Set<Variable> aliasingVars(ControlFlowGraph cfg, int i) {
+  return from instanceof Variable 
+  && to instanceof Variable
+  && cond == null
+  && !cfg.isLiveAt((Variable) to, i)
+  && !cfg.isLiveAt((Variable) from, getOnlyElement(cfg.next.get(i)));
 }
 ~~~~
 
+We'll add another hint to the objective function to encourage the solver to put aliased vars in the same <tt>Register</tt>. For that we'll need another flag indicating if a pair of aliased <tt>Variable</tt>s have been assigned to the same <tt>Register</tt>, so we'll add another column to the constraint matrix. If we were using Quadratic Integer Programming (instead of the Linear Integer Programming) we could have a quadratic objective function. We wouldn't need an extra flag column as we could add (for a v1 and v2 aliasing pair of <tt>Variable</tt>s) a negative 'hint' term for varInRegAtIntr[v1, i, r] *  varInRegAtIntr[v2, i, r], which would only reduce the objective function (giving a better score) if v1 and v2 were assigned to the same <tt>Register</tt>. 
+
+Note that we don't want this hint to apply to every <tt>Instruction</tt> and <tt>Register</tt> pair though, as we'd rather ignore this hint than put two <tt>Variable</tt>s on the stack (although the relative costs of <tt>COST_OF_STACK_ACCESS</tt> versus <tt>ALIASED_VAR_HINT</tt> make this unlikely). We also don't need this flag if the current <tt>Instruction</tt> has a fixed <tt>Register</tt>, as we need two <tt>Variable</tt>s at an <tt>Instruction</tt> for a chance of aliasing happening, and none of the <tt>Instruction</tt>s we use have three operands.
 
 ~~~~
-@Control Flow Graph Members@ +=
-final Multimap<Integer, Integer> aliasingVars = TreeMultimap.create();
-  @Mark Aliased Variables@ +=
-  for (int n = 0; n < numNodes; ++n) {
-    Collection<Integer> instrsAfter = instructionsFollowingNode.get(n);
-    if(instrsAfter.size() != 1) continue;
-    int i = getOnlyElement(instrsAfter); Instruction instr = code.get(i); 
-    if(!(instr instanceof Move)) continue;
-    Move move = (Move) instr;
-    if(move.uses(Variable.class).size() != 2) continue; 
-    if(move.cond != null) continue;
-    if(instr.readsFrom(Variable.class).size() == 2) continue; // reg->mem
-    int reads = indexOf(variables, getOnlyElement(instr.readsFrom(Variable.class)));
-    int writes = indexOf(variables, getOnlyElement(instr.writesTo(Variable.class, WILL_ERASE)));
-    if(isLiveAt(reads, nextNode[i]) || isLiveAt(writes, n)) continue;
-    aliasingVars.putAll(n, Arrays.asList(reads, writes));
-  }
-  ~~~~
-Let's also encourage putting aliased vars in the same register. For that we'll need another flag:
-
-~~~~
+@For Each Instruction And Register@ +=
+if(!code.get(i).aliasingVars(cfg, i).isEmpty()
+&& r != Register.THESTACK
+&& !registerInUse(n, r)) {
+  int aliasedInSameReg = addColumn(allocation);
+  glp_set_obj_coef(allocation, aliasedInSameReg, ALIASED_VAR_HINT);
+}
 @Other Helpers@ +=
-static final class AliasedInSameReg extends ColumnKey {
-  AliasedInSameReg(Register r, int n) { super(NONE, r, n); }
-  void addToObjective(glp_prob allocation, int columnIndex, ControlFlowGraph cfg) {
-    glp_set_obj_coef(allocation, columnIndex + 1, ALIASED_VAR_HINT);
-  }
-}
 private static final double ALIASED_VAR_HINT = -0.5;
-@Add Column Keys@ +=
-for(Integer n : aliasingVars.asMap().keySet())
-  for (Register r : ASSIGNABLE)
-    if(r != Register.THESTACK && !registerInUse(n, r))
-      columns.add(new AliasedInSameReg(r, n));
-~~~~
-
-Now, onto the rows. Similar to column keys...
-
-~~~~
-@Other Helpers@ +=
-static abstract class RowKey extends CellKey {
-  RowKey(int v, Register r, int n) { super(v, r, n); }
-  abstract void addConstraints(
-    glp_prob allocation,
-    int row,
-    List<Constraint> constraints,
-    ControlFlowGraph cfg);
-}
-@Control Flow Graph Members@ +=
-final List<RowKey> rows = Lists.newArrayList();
-@Generate GLPK Mappings@ +=
-@Add Row Keys@
-Collections.sort(rows);
 ~~~~
 
 Constraints:
