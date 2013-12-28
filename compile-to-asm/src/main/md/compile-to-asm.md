@@ -2043,7 +2043,8 @@ We'll start by defining the columns of the constraint matrix. The (Java SWIG bin
 
 ~~~~
 @Generate GLPK Mappings@ +=
-for(int i = 0; i < code.size(); ++i)
+for(int i = 0; i < code.size(); ++i) {
+  @For Each Instruction@
   for (Register r : ASSIGNABLE) {
     @For Each Instruction And Register@
     for (int v = new Variable(0); v.id < numVariables; v = new Variable(++v.id))
@@ -2051,7 +2052,10 @@ for(int i = 0; i < code.size(); ++i)
         @For Each Combination@
       }
   }
+}
 ~~~~
+
+The GLPK API is very C-style, so we'll add some helper methods to make it easier to work with. All our columns are binary (only 0 or 1 valued) columns, and we'll be adding them one at a time. <tt>addColumn</tt> adds this common case, and returns the column index which we'll need to refer to the column in constraints and the objective function.
 
 ~~~~
 @Other Helpers@ +=
@@ -2059,6 +2063,33 @@ static int addColumn(glp_prob problem) {
   int col = glp_add_cols(problem, 1);
   glp_set_col_kind(problem, col, GLP_BV);
   return col;
+}
+~~~~
+
+~~~~
+@Other Helpers@ +=
+static class Constraint implements Closeable {
+  final SWIGTYPE_p_int columns;
+  final SWIGTYPE_p_double values;
+  int len = 0;
+  Constraint(int numVariables) {
+    int size = numVariables * ASSIGNABLE.length + 1;
+    columns = new_intArray(size);
+    values = new_doubleArray(size);
+  }
+  void add(int column, double value) {
+    intArray_setitem(columns, len + 1, column);
+    doubleArray_setitem(values, len + 1, value);
+    ++len;
+  }
+  void add(glp_prob problem, int row) {
+    glp_set_mat_row(problem, row, len, columns, values);
+    len = 0;
+  }
+  void close() {
+    delete_intArray(columns);
+    delete_doubleArray(values);
+  }
 }
 ~~~~
 
@@ -2125,11 +2156,14 @@ Set<Variable> aliasingVars(ControlFlowGraph cfg, int i) {
 }
 @Move Members@ +=
 Set<Variable> aliasingVars(ControlFlowGraph cfg, int i) {
-  return from instanceof Variable 
+  if(from instanceof Variable 
   && to instanceof Variable
   && cond == null
   && !cfg.isLiveAt((Variable) to, i)
-  && !cfg.isLiveAt((Variable) from, getOnlyElement(cfg.next.get(i)));
+  && !cfg.isLiveAt((Variable) from, getOnlyElement(cfg.next.get(i))))
+    return ImmutableSet.of((Variable) to, (Variable) from);
+  else
+    return Collections.emptySet();
 }
 ~~~~
 
@@ -2147,28 +2181,6 @@ if(!code.get(i).aliasingVars(cfg, i).isEmpty()
 }
 @Other Helpers@ +=
 private static final double ALIASED_VAR_HINT = -0.5;
-~~~~
-
-Constraints:
-
-~~~~
-@Other Helpers@ +=
-static final class Constraint {
-  final int row; final int column; final double value;
-  Constraint(int row, int column, double value) {
-    this.row = row; this.column = column; this.value = value;
-  } 
-}
-~~~~
-
-Let's tell GLPK how many columns we'll need in total
-
-~~~~
-@Determine Rows And Columns@ +=
-glp_add_cols(allocation, controlFlow.columns.size());
-glp_add_rows(allocation, controlFlow.rows.size());
-for(int c = 0; c < controlFlow.columns.size(); ++c)
-  glp_set_col_kind(allocation, c + 1, GLP_BV);
 ~~~~
 
 Crazy 1-indexing - leaves blank 0-spaces everywhere
