@@ -2089,13 +2089,13 @@ static class Constraint implements AutoCloseable {
 ~~~~
 @Constraint Members@ +=
 int len = 0;
-void add(int column, double value) {
+void set(int column, double value) {
   intArray_setitem(columns, len + 1, column);
   doubleArray_setitem(values, len + 1, value);
   ++len;
 }
-void add(glp_prob problem, int row) {
-  glp_set_mat_row(problem, row, len, columns, values);
+void addTo(glp_prob problem) {
+  glp_set_mat_row(problem, glp_add_rows(problem, 1), len, columns, values);
   len = 0;
 }
 ~~~~
