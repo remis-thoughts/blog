@@ -2066,30 +2066,37 @@ static int addColumn(glp_prob problem) {
 }
 ~~~~
 
+GLPK also requires you to specify a whole constraint (a whole row of the constraint matrix) at once. However, we're looping over <tt>Instruction</tt>s, <tt>Variable</tt>s and <tt>Register</tt>s, and want to build up our constraints one (v, i, r) combination at a time. We'll use a static class to accumulate components of a <tt>Constraint</tt> in a pair of <tt>SWIGTYPE_p_int</tt> and <tt>SWIGTYPE_p_double</tt> columns. These are arrays stored in native (off-heap) memory and are manually allocated and freed. We'll make our <tt>Constraint</tt> class implement <tt>AutoCloseable</tt> so we can use Java 7's [try-with-resources](http://docs.oracle.com/javase/tutorial/essential/exceptions/tryResourceClose.html) statements to ensure we release the arrays' memory when we leave a block, even if an exception is thrown, so the compiler doesn't leak native memory. We don't want to allocate new native arrays for each (v, i, r) combination as that'll reduce cache locality and require more (relatively expensive) JNI calls. Instead, we'll have one instance of this class for each type of constraint, and we'll reset it every <tt>Instruction</tt>. The most number of columns a constraint will involve is <tt>numVariables * ASSIGNABLE.length</tt> (i.e. every v and r combination), though in practice a combination's contraints will need fewer columns as <tt>needsAssigning</tt> (above) will return false for some. The <tt>+ 1</tt> when choosing <tt>size</tt> is because GLPK arrays are one-indexed - we'll have to be careful of this.
+
 ~~~~
 @Other Helpers@ +=
-static class Constraint implements Closeable {
+static class Constraint implements AutoCloseable {
   final SWIGTYPE_p_int columns;
   final SWIGTYPE_p_double values;
-  int len = 0;
   Constraint(int numVariables) {
     int size = numVariables * ASSIGNABLE.length + 1;
     columns = new_intArray(size);
     values = new_doubleArray(size);
   }
-  void add(int column, double value) {
-    intArray_setitem(columns, len + 1, column);
-    doubleArray_setitem(values, len + 1, value);
-    ++len;
-  }
-  void add(glp_prob problem, int row) {
-    glp_set_mat_row(problem, row, len, columns, values);
-    len = 0;
-  }
   void close() {
     delete_intArray(columns);
     delete_doubleArray(values);
   }
+  @Constraint Members@
+}
+~~~~
+
+~~~~
+@Constraint Members@ +=
+int len = 0;
+void add(int column, double value) {
+  intArray_setitem(columns, len + 1, column);
+  doubleArray_setitem(values, len + 1, value);
+  ++len;
+}
+void add(glp_prob problem, int row) {
+  glp_set_mat_row(problem, row, len, columns, values);
+  len = 0;
 }
 ~~~~
 
