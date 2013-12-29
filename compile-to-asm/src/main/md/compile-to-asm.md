@@ -2120,11 +2120,6 @@ double coefficient = 0d;
 glp_set_obj_coef(allocation, varInRegAtInstr, coefficient);
 ~~~~
 
-We'll now add our first constraints to the problem.
-
-~~~~
-~~~~
-
 How should we decide what value to add to the objective function if a particular (v, i, r) combination is chosen? While we know what assignments we want to penalise or reward, the amount they add to the objective function (and so their relative importance) is not quite so clear. We'll pick values rather arbitarily for now; we should tweak these values after we've seen examples of the assignments they produce.
 
 The first behaviour we want to penalise is spills to the stack. This isn't as simple as increasing the objective function each time a variable is assigned to the <tt>THESTACK</tt> dummy register. For example, what if a variable was live but not used at instructions 3, 4 and 5, and had to be spilled at instructions 3 and 5 due to memory pressure. We wouldn't want to reward an assignment that moved the variable back to a register for instruction 4, only to spill it again for instruction 5. We'd prefer an assignment that spilled it once at instruction 3 and kept it on the stack for instructions 4 and 5. We need a way to penalise moves between the stack and registers, and looking at and assignment to the stack for a single instruction doesn't give us a good enough way to do this.
@@ -2222,6 +2217,42 @@ if(r != Register.THESTACK
   oneVarPerReg.set(varInRegAtInstr, 1.0);
 @After Each Register@ +=
 oneVarPerReg.addTo(allocation, 0, 1);
+~~~~
+
+We also want to ensure <tt>Variable</tt>s aren't 'lost' - they must be assigned to exactly one <tt>Register</tt> (which includes <tt>THESTACK</tt>). This is slightly harder to implement as the inner loop over the (v, i, r) combinations is over <tt>Variable</tt>s. We could either add a second loop over first <tt>Variable</tt>s then <tt>Register</tt>s so we could build up these contraints sequentially, or build up the constraints in parallel. We'd need one for each <tt>Variable</tt>, and as we loop over the (v, i, r)  combinations we'd add their <tt>varInRegAtInstr</tt> to the relevant <tt>Variable<tt>'s constraint accumulator. The latter implementation is below; we'd rather have fewer iterations and better memory access locality at the expense of a minor increase in memory used. We'll start by wrapping each <tt>Variable</tt>'s accumlator in a composite object:
+
+~~~~
+@Other Helpers@ +=
+static class ManyConstraints implements AutoCloseable {
+  final Constraint[] constraints;
+  Constraint(int numVariables) {
+    constraints = new Constraint[numVariables];
+    for(int i = 0; i < constraints.length; ++i)
+      constraints[i] = new Constraint(1);
+  }
+  void close() {
+    for(Constraint constraint : constraints)
+      constraint.close();
+  }
+  void set(Variable v, int column, double value) {
+    constraints[v.id].set(column, value);
+  }
+  void addTo(glp_prob problemm int lowerBound, int upperBound) {
+    for(Constraint constraint : constraints)
+      constraint.addTo(lowerBound, upperBound);
+  }
+}
+~~~~
+
+Adding the constraints is now relatively straightforward:
+
+~~~~
+@GLPK Resources@ +=
+ManyConstraints varsNotLost = new ManyConstraints(numVariables);
+@For Each Combination@ +=
+varsNotLost.set(v, varInRegAtInstr, 1.0);
+@After Each Instruction@ +=
+varsNotLost.addTo(allocation, 1, 1);
 ~~~~
 
 The last pair of constraints ensure that the _NEW_VAR_IN_REG_FLAG_ works as we want. Note that we set the constraints in pairs of nodes, at least one of which _needsAssigning_. We have to overhang (i.e. we don't only add constraints if both nodes _needsAssigning_) as if we don't we'll miss some constraints on the border, and so the flag will be undefined. A NEW_VAR_IN_REG_FLAG value of 1 means the variable just arrived in this register from somewhere. 
