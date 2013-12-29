@@ -2043,14 +2043,18 @@ We'll start by defining the columns of the constraint matrix. The (Java SWIG bin
 
 ~~~~
 @Generate GLPK Mappings@ +=
-for(int i = 0; i < code.size(); ++i) {
-  @For Each Instruction@
-  for (Register r : ASSIGNABLE) {
-    @For Each Instruction And Register@
-    for (int v = new Variable(0); v.id < numVariables; v = new Variable(++v.id))
-      if(needsAssigning(v, i, r)) {
-        @For Each Combination@
-      }
+try (@GLPK Resources@) {
+  for(int i = 0; i < code.size(); ++i) {
+    @For Each Instruction@
+    for (Register r : ASSIGNABLE) {
+      @For Each Instruction And Register@
+      for (int v = new Variable(0); v.id < numVariables; v = new Variable(++v.id))
+        if(needsAssigning(v, i, r)) {
+          @For Each Combination@
+        }
+      @After Each Register@
+    }
+    @After Each Instruction@
   }
 }
 ~~~~
@@ -2086,6 +2090,8 @@ static class Constraint implements AutoCloseable {
 }
 ~~~~
 
+The <tt>set</tt> method is the accumulator - it sets the coefficient in the current constraint to the double value passed in. As described above, it uses <tt>+ 1</tt>s to ensure the <tt>columns</tt> and <tt>values</tt> arrays are one-indexed. The <tt>len</tt> variable keeps track of how many columns we've added to the constraint function, as GLPK expects all column indices in the <tt>columns</tt> array to be valid (i.e. non-zero). We don't have to worry about GLPK keeping a reference to the array or mutating it - <tt>glp_set_mat_row</tt> just does one pass through it, copying the constraints into the <tt>glp_prob</tt>'s internal representation of the problem. <tt>addTo</tt> resets the accumulator after it adds the constraint and sets the row's fixed (<tt>GLP_FX</tt>) or lower and upper (<tt>GLP_DB</tt>) bounds.
+
 ~~~~
 @Constraint Members@ +=
 int len = 0;
@@ -2094,8 +2100,12 @@ void set(int column, double value) {
   doubleArray_setitem(values, len + 1, value);
   ++len;
 }
-void addTo(glp_prob problem) {
-  glp_set_mat_row(problem, glp_add_rows(problem, 1), len, columns, values);
+void addTo(glp_prob problemm int lowerBound, int upperBound) {
+  if(len == 0) return;
+  int row = glp_add_rows(problem, 1);
+  glp_set_mat_row(problem, row, len, columns, values);
+  int type = lowerBound == upperBound ? GLP_FX : GLP_DB;
+  glp_set_row_bnds(problem, row, type, lowerBound, upperBound);
   len = 0;
 }
 ~~~~
@@ -2108,6 +2118,11 @@ int varInRegAtInstr = addColumn(allocation);
 double coefficient = 0d;
 @Determine VarInRegAtInstr Coefficient@
 glp_set_obj_coef(allocation, varInRegAtInstr, coefficient);
+~~~~
+
+We'll now add our first constraints to the problem.
+
+~~~~
 ~~~~
 
 How should we decide what value to add to the objective function if a particular (v, i, r) combination is chosen? While we know what assignments we want to penalise or reward, the amount they add to the objective function (and so their relative importance) is not quite so clear. We'll pick values rather arbitarily for now; we should tweak these values after we've seen examples of the assignments they produce.
@@ -2154,168 +2169,59 @@ if(code.get(i).couldBeNoOp(v, r))
 private static final double MOVE_NOP_HINT = -1.0;
 ~~~~
 
-Two variables are 'aliased' at an <tt>Instruction</tt> if that <tt>Instruction</tt> makes one of them dead (i.e. <tt>isLive</tt> returns false after the <tt>Instruction</tt>) and makes the other live (i.e. <tt>isLive</tt> returns true for this <tt>Instruction</tt> but not the previous one - remember <tt>isLive</tt> describes the variable's state just _before_ the <tt>Instruction</tt> is executed). Normally we'll use constraints to only allow one variable in a register at once (as one of their values would be erased), but if we assigned two aliasing variables to the same <tt>Register</tt> at an <tt>Instruction</tt> we would't lose information - as we don't mind losing the value of the <tt>Variable</tt> that just became 'dead'. Note that only <tt>Definition</tt> <tt>Instruction</tt>s have more than one predecessor and only <tt>Jump</tt> <tt>Instruction</tt>s have more than one successor, so when we're in a <tt>Move</tt> we can assume the set of <tt>next</tt> <tt>Instruction</tt>s has only one element.
+Two variables are 'aliased' at an <tt>Instruction</tt> if that <tt>Instruction</tt> makes one of them dead (i.e. <tt>isLive</tt> returns false after the <tt>Instruction</tt>) and makes the other live (i.e. <tt>isLive</tt> returns true for this <tt>Instruction</tt> but not the previous one - remember <tt>isLive</tt> describes the variable's state just _before_ the <tt>Instruction</tt> is executed). Normally we'll use constraints to only allow one variable in a register at once (as one of their values would be erased), but if we assigned two aliasing variables to the same <tt>Register</tt> at an <tt>Instruction</tt> we would't lose information - as we don't mind losing the value of the <tt>Variable</tt> that just became 'dead'. Note that only <tt>Definition</tt> <tt>Instruction</tt>s have more than one predecessor and only <tt>Jump</tt> <tt>Instruction</tt>s have more than one successor, so when we're in a <tt>Move</tt> we can assume the set of <tt>next</tt> <tt>Instruction</tt>s has only one element. Since the <tt>Instruction</tt> subclasses only have two or fewer operands an <tt>Instruction</tt> will return at most a single pair of operands that alias. We'll represent this by a making <tt>aliasingVars</tt> return either an instance of <tt>AliasingPair</tt> or null if no <tt>Variable</tt>s alias.
 
 ~~~~
+@Other Helpers@ +=
+static class AliasingPair {
+  final Variable a; final Variable b;
+  AliasingPair(Variable a, Variable b) { this.a = a; this.b = b; }
+}
 @Instruction Members@ +=
-Set<Variable> aliasingVars(ControlFlowGraph cfg, int i) {
-  return Collections.emptySet();
+AliasingPair aliasingVars(ControlFlowGraph cfg, int i) {
+  return null;
 }
 @Move Members@ +=
-Set<Variable> aliasingVars(ControlFlowGraph cfg, int i) {
+AliasingPair aliasingVars(ControlFlowGraph cfg, int i) {
   if(from instanceof Variable 
   && to instanceof Variable
   && cond == null
   && !cfg.isLiveAt((Variable) to, i)
   && !cfg.isLiveAt((Variable) from, getOnlyElement(cfg.next.get(i))))
-    return ImmutableSet.of((Variable) to, (Variable) from);
+    return new AliasingPair((Variable) to, (Variable) from);
   else
-    return Collections.emptySet();
+    return null;
 }
 ~~~~
 
-We'll add another hint to the objective function to encourage the solver to put aliased vars in the same <tt>Register</tt>. For that we'll need another flag indicating if a pair of aliased <tt>Variable</tt>s have been assigned to the same <tt>Register</tt>, so we'll add another column to the constraint matrix. If we were using Quadratic Integer Programming (instead of the Linear Integer Programming) we could have a quadratic objective function. We wouldn't need an extra flag column as we could add (for a v1 and v2 aliasing pair of <tt>Variable</tt>s) a negative 'hint' term for varInRegAtIntr[v1, i, r] *  varInRegAtIntr[v2, i, r], which would only reduce the objective function (giving a better score) if v1 and v2 were assigned to the same <tt>Register</tt>. 
-
-Note that we don't want this hint to apply to every <tt>Instruction</tt> and <tt>Register</tt> pair though, as we'd rather ignore this hint than put two <tt>Variable</tt>s on the stack (although the relative costs of <tt>COST_OF_STACK_ACCESS</tt> versus <tt>ALIASED_VAR_HINT</tt> make this unlikely). We also don't need this flag if the current <tt>Instruction</tt> has a fixed <tt>Register</tt>, as we need two <tt>Variable</tt>s at an <tt>Instruction</tt> for a chance of aliasing happening, and none of the <tt>Instruction</tt>s we use have three operands.
+When two <tt>Variable</tt>s alias it's always best to assign them to the same <tt>Register</tt>; if we put another live <tt>Variable</tt> in the <tt>Register</tt> we'd add an extra <tt>mov</tt> <tt>Instruction</tt>. We'll therefore force the solver to assign aliasing <tt>Variable</tt>s together by adding a constraint that makes one <tt>Variable</tt>'s <tt>varInRegAtInstr</tt> minus the other's equal to zero, so either both <tt>varInRegAtInstr</tt>s are one or both are zero:
 
 ~~~~
-@For Each Instruction And Register@ +=
-if(!code.get(i).aliasingVars(cfg, i).isEmpty()
-&& r != Register.THESTACK
-&& !registerInUse(n, r)) {
-  int aliasedInSameReg = addColumn(allocation);
-  glp_set_obj_coef(allocation, aliasedInSameReg, ALIASED_VAR_HINT);
-}
-@Other Helpers@ +=
-private static final double ALIASED_VAR_HINT = -0.5;
+@GLPK Resources@ +=
+Constraint aliasedInSameReg = new Constraint(numVariables);
+@For Each Instruction@ +=
+AliasingPair aliasingVars = code.get(i).aliasingVars(cfg, i);
+@For Each Combination@ +=
+if(aliasingVars != null)
+  if(v.equals(aliasingVars.a))
+    aliasedInSameReg.set(varInRegAtInstr, +1.0);
+  else if(v.equals(aliasingVars.b))
+    aliasedInSameReg.set(varInRegAtInstr, -1.0);
+@After Each Register@ +=
+aliasedInSameReg.addTo(allocation, 0, 0);
 ~~~~
 
-Crazy 1-indexing - leaves blank 0-spaces everywhere
+Now that we've identified any aliasing <tt>Variable</tt>s we can add a constraint to enforce that a single <tt>Register</tt> (but not the stack) can only have a single <tt>Variable</tt>, or a pair of aliasing <tt>Variable</tt>s assigned to it at each <tt>Instruction</tt>. We'll do this by ensuring that the sum of the <tt>varInRegAtInstr</tt>s for each <tt>Variable</tt> assigned to that <tt>Register</tt> is between zero and one (the <tt>Register</tt> could be empty if there are fewer live <tt>Variable</tt>s than there are <tt>Register</tt>s). If the <tt>Variable</tt> is the second of an aliasing pair we skip it, so each pair of aliasing <tt>Variable</tt>s only contributes one <tt>varInRegAtInstr</tt> to the contraint's sum.
 
 ~~~~
-@Determine Rows And Columns@ +=
-List<Constraint> constraints = Lists.newArrayList();
-for(int row = 0; row < controlFlow.rows.size(); ++row)
-  controlFlow.rows.get(row).addConstraints(allocation, row, constraints, controlFlow);
-@Finalise Problem@ +=
-SWIGTYPE_p_int constraintCols = new_intArray(constraints.size() + 1);
-SWIGTYPE_p_int constraintRows = new_intArray(constraints.size() + 1);
-SWIGTYPE_p_double constraintVals = new_doubleArray(constraints.size() + 1);
-for(int i = 1; i <= constraints.size(); ++i) {
-  Constraint c = constraints.get(i - 1);
-  intArray_setitem(constraintCols, i, c.column + 1);
-  intArray_setitem(constraintRows, i, c.row + 1);
-  doubleArray_setitem(constraintVals, i, c.value);
-}
-glp_load_matrix(
-  allocation,
-  constraints.size(),
-  constraintRows,
-  constraintCols,
-  constraintVals);
-delete_intArray(constraintRows);
-delete_intArray(constraintCols);
-delete_doubleArray(constraintVals);
-~~~~
-
-~~~~
-@Other Helpers@ +=
-static final class AliasedVarFlag extends RowKey {
-  AliasedVarFlag(Register r, int n) { super(NONE, r, n); }
-  void addConstraints(glp_prob allocation, int row, List<Constraint> constraints, ControlFlowGraph cfg) {
-    Collection<Integer> aliasing = cfg.aliasingVars.get(n);
-    int constraintType = aliasing.size() == 1 ? GLP_FX : GLP_DB;
-    glp_set_row_bnds(allocation, row + 1, constraintType, 0.0, aliasing.size() - 1.0);
-    constraints.add(new Constraint(
-      row, 
-      Collections.binarySearch(cfg.columns, new AliasedInSameReg(r, n)),
-      -1.0 * aliasing.size()));
-    for(int v : cfg.aliasingVars.get(n))
-      constraints.add(new Constraint(
-        row, 
-        Collections.binarySearch(cfg.columns, new VarInRegAtInstr(v, r, n)),
-        1.0));
-  }
-}
-@Add Row Keys@ +=
-for(Integer n : aliasingVars.asMap().keySet())
-  for (Register r : ASSIGNABLE)
-    if(r != Register.THESTACK  && !registerInUse(n, r))
-      rows.add(new AliasedVarFlag(r, n));
-~~~~
-
-We now get 
-<pre>
-movl $1, %ebx
-movl $5, %ecx
-movl %ebx, %eax
-addl %ecx, %eax
-movl %eax, %eax
-</pre>
-
-Constraint: registers can only ever hold one variable at once (apart from the stack). 
-
-~~~~
-@Other Helpers@ +=
-static final class OneVarPerReg extends RowKey {
-  final BitSet vars = new BitSet();
-  OneVarPerReg(int avoid, Register r, int n) { super(avoid, r, n); }
-  void addConstraints(glp_prob allocation, int row, List<Constraint> constraints, ControlFlowGraph cfg) {
-    glp_set_row_bnds(allocation, row + 1, GLP_DB, 0.0, 1.0);
-    for(int v = vars.nextSetBit(0); v >= 0; v = vars.nextSetBit(v+1))
-      constraints.add(new Constraint(
-        row, 
-        Collections.binarySearch(cfg.columns, new VarInRegAtInstr(v, r, n)),
-        1.0));
-  }
-}
-@Add Row Keys@ +=
-for (int n = 0; n < numNodes; ++n)
-  for (Register r : ASSIGNABLE)
-    if(r != Register.THESTACK)
-      if(aliasingVars.containsKey(n)) {
-        for(int avoid : aliasingVars.get(n)) {
-          OneVarPerReg constraint = new OneVarPerReg(avoid, r, n);
-          for (int v = 0; v < numVariables; ++v)
-            if(v != avoid && needsAssigning(v, n, r))
-              constraint.vars.set(v);
-          rows.add(constraint);
-        }
-      } else {
-        OneVarPerReg constraint = new OneVarPerReg(NONE, r, n);
-        for (int v = 0; v < numVariables; ++v)
-          if(needsAssigning(v, n, r))
-            constraint.vars.set(v);
-        rows.add(constraint);
-      }
-~~~~
-
-Constraint: variables must not be lost; they must be in either the stack or exactly one register. While technically we could put the variable on stack as well as in more than one register, this makes the LP solver much slower as there are so many more possible combinations of assignments to narrow down. Also, if a variable's not live then force it on the stack.
-
-~~~~
-@Other Helpers@ +=
-static final class VarsNotLost extends RowKey {
-  Set<Register> registers = EnumSet.noneOf(Register.class);
-  VarsNotLost(int v, int n) { super(v, Register.THESTACK, n); }
-  void addConstraints(glp_prob allocation, int row, List<Constraint> constraints, ControlFlowGraph cfg) {
-    glp_set_row_bnds(allocation, row + 1, GLP_FX, 1.0, 1.0);
-    for(Register r : registers)
-      constraints.add(new Constraint(
-        row, 
-        Collections.binarySearch(cfg.columns, new VarInRegAtInstr(v, r, n)),
-        1.0));
-  }
-}
-@Add Row Keys@ +=
-for (int v = 0; v < numVariables; ++v)
-  for (int n = 0; n < numNodes; ++n) {
-    VarsNotLost constraint = new VarsNotLost(v, n);
-    for (Register r : ASSIGNABLE)
-      if(needsAssigning(v, n, r))
-        constraint.registers.add(r);
-    if(!constraint.registers.isEmpty())
-      rows.add(constraint);
-  }
+@GLPK Resources@ +=
+Constraint oneVarPerReg = new Constraint(numVariables);
+@For Each Combination@ +=
+if(r != Register.THESTACK
+&& (aliasingVars == null || !v.equals(aliasingVars.b)))
+  oneVarPerReg.set(varInRegAtInstr, 1.0);
+@After Each Register@ +=
+oneVarPerReg.addTo(allocation, 0, 1);
 ~~~~
 
 The last pair of constraints ensure that the _NEW_VAR_IN_REG_FLAG_ works as we want. Note that we set the constraints in pairs of nodes, at least one of which _needsAssigning_. We have to overhang (i.e. we don't only add constraints if both nodes _needsAssigning_) as if we don't we'll miss some constraints on the border, and so the flag will be undefined. A NEW_VAR_IN_REG_FLAG value of 1 means the variable just arrived in this register from somewhere. 
