@@ -2100,7 +2100,7 @@ void set(int column, double value) {
   doubleArray_setitem(values, len + 1, value);
   ++len;
 }
-void addTo(glp_prob problemm int lowerBound, int upperBound) {
+void addTo(glp_prob problem, int lowerBound, int upperBound) {
   if(len == 0) return;
   int row = glp_add_rows(problem, 1);
   glp_set_mat_row(problem, row, len, columns, values);
@@ -2237,9 +2237,9 @@ static class ManyConstraints implements AutoCloseable {
   void set(Variable v, int column, double value) {
     constraints[v.id].set(column, value);
   }
-  void addTo(glp_prob problemm int lowerBound, int upperBound) {
+  void addTo(glp_prob problem, int lowerBound, int upperBound) {
     for(Constraint constraint : constraints)
-      constraint.addTo(lowerBound, upperBound);
+      constraint.addTo(problem, lowerBound, upperBound);
   }
 }
 ~~~~
