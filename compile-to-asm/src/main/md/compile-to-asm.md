@@ -14,7 +14,7 @@ SC : ';';
 @Synthetic Tokens@ +=
 Root;
 @Antlr Parse Rules@ +=
-statement : funcall | ret | assign | whileloop | ifelse;
+statement : funcall | assign | whileloop | ifelse;
 eval : ((statement | fundef) SC)+ -> ^(Root fundef* ^(Definition ^(Name Label["main"]) ^(Parameters) ^(Body statement*)));
 ~~~~
 
@@ -39,7 +39,7 @@ The langauge is also [untyped](http://en.wikipedia.org/wiki/Programming_language
 
 ~~~~
 @Antlr Tokens@ +=
-LP : '('; RP : ')'; C : ','; Definition : 'fn'; Return : 'return';
+LP : '('; RP : ')'; C : ','; Definition : 'fn';
 @Synthetic Tokens@ += 
 Parameters; Call; Name;
 @Antlr Parse Rules@ +=
@@ -93,8 +93,6 @@ Memory de-refencing and [Stack](http://en.wikipedia.org/wiki/Stack-based_memory_
 ~~~~
 @Antlr Tokens@ +=
 Deref : '@'; StackAlloc : '$';
-@Antlr Parse Rules@ +=
-callable : Variable | Label | Intrinsic | Conditional | Deref | StackAlloc | FFI;
 ~~~~
 
 The remainder of the grammar arranges these components in a pretty straight-forward imperative style.
@@ -105,8 +103,21 @@ Assign : '=';
 @Antlr Parse Rules@ +=
 expression : Variable | Label | Number | funcall | FFI;
 assignable : Variable | Label | Deref assignable -> ^(Deref assignable) | FFI;
-ret : Return expression -> ^(Return expression);
 assign : assignable Assign expression -> ^(Assign assignable expression);
+~~~~
+
+As you can see, our langauge doesn't have return statements - instead it uses a function-call style syntax (e.g. <tt>return(a);</tt>). As we'll see below, the x86-64 ABI allows up to two integer return values from a function, and the compiler will be simpler if we don't make returns a special case.
+
+~~~~
+@Antlr Tokens@ +=
+Return : 'return';
+~~~~
+
+The final list of tokens we can call like a function is therefore:
+
+~~~~
+@Antlr Parse Rules@ +=
+callable : Variable | Label | Intrinsic | Conditional | Deref | StackAlloc | FFI | Return;
 ~~~~
 
 Whitespace doesn't affect how the AST is built.
@@ -128,7 +139,7 @@ fn fibs($nth) {
     $last = $this;
     $this = $next;
   };  
-  return $this;
+  return($this);
 };
 </pre>
 
@@ -181,12 +192,12 @@ We'll use subclasses of an <tt>Instruction</tt> class to represent the subset of
                                  |Instruction|
                                  +-----+-----+
                                        |
-     +---------+---------+---------+---+--+-----+------+------+------+------+
-     |         |         |         |      |     |      |      |      |      |
-     |         |         |         |      |     |      |      |      |      |
- +---v----+ +--v-+ +-----v----+ +--v-+ +--v-+ +-v-+ +--v-+ +--v-+ +--v--+ +-v-+
- |BinaryOp| |Call| |Definition| |Jump| |Move| |Pop| |Push| |Swap| |align| |ret|
- +--------+ +----+ +----------+ +----+ +----+ +---+ +----+ +----+ +-----+ +---+
+     +---------+---------+---------+---+--+-----+------+------+------+--------+
+     |         |         |         |      |     |      |      |      |        |
+     |         |         |         |      |     |      |      |      |        |
+ +---v----+ +--v-+ +-----v----+ +--v-+ +--v-+ +-v-+ +--v-+ +--v-+ +--v--+ +---v--+
+ |BinaryOp| |Call| |Definition| |Jump| |Move| |Pop| |Push| |Swap| |align| |Return|
+ +--------+ +----+ +----------+ +----+ +----+ +---+ +----+ +----+ +-----+ +------+
 </pre>
 
 We'll leave <tt>Instruction</tt>'s definition mostly empty for now - we'll introduce its members when we need them.
@@ -426,14 +437,20 @@ static final class ParsingState {
 A typical function definition AST looks like this:
 
 <pre>
-                                +--------+ +--------+  +--------+
-                                |Variable| |Variable|  |Variable|
-                                |  "c"   | |  "b"   |  |  "c"   |
-                                +--------+ +--------+  +--------+
+                                                                    +--------+
+                                                                    |Variable|
+                                                                    |   "c"  |
+                                                                    +--------+
+                                                                         ^
+                                                       +--------+  +----------+
+                                +--------+ +--------+  | Return |  |Parameters|
+                                |Variable| |Variable|  +--------+  +----------+
+                                |  "c"   | |  "b"   |     ^              ^
+                                +--------+ +--------+     +--------------+
                                        ^        ^          ^
                                        +---+----+          |
 +-------------+ +--------+ +--------+  +---+--+        +---+--+
-|    Label    | |Variable| |Variable|  |Assign|        |Return|
+|    Label    | |Variable| |Variable|  |Assign|        | Call |
 |"hello_world"| |  "a"   | |  "b"   |  +------+        +------+
 +-------------+ +--------+ +--------+     ^                ^
        ^             ^       ^            +--------+-------+
@@ -521,7 +538,6 @@ private void parseStatements(Iterable<Tree> statements) {
   for (Tree statement : statements) {
     switch (type(statement)) {
       case Call :   call(statement); break;
-      case Return : @Parse A Return Statement@ break;
       case Assign : @Parse An Assign Statement@ break;
       case While :  @Parse A While Statement@ break;
       case If :     @Parse An If Statement@ break;
@@ -530,55 +546,9 @@ private void parseStatements(Iterable<Tree> statements) {
 }
 ~~~~
 
-### Processing Statements ###
-
-We'll start with the simplest statement - a return. According to [the ABI](http://www.x86-64.org/documentation/abi.pdf), values are returned in the <tt>rax</tt> register, so we'll add a <tt>Move</tt> instruction to put the return value into the right register, then calls the same <tt>addReturn</tt> method we saw in <tt>parseDefinition</tt>. We'll look at <tt>getAsValue</tt> shortly - as the expression attached to the return node can be quite complicated (e.g. the return value of a function call, or the <tt>Label</tt> returned by a nested function defintion) we'll have to calculate that first. The <tt>Value</tt> that is the net result of this expression is returned by <tt>getAsValue</tt>.
-
-~~~~
-@Parse A Return Statement@ +=
-Value ret = getAsValue(get(statement,0));
-code.add(move(ret, Register.rax));
-addReturn();
-~~~~
-
-<tt>addReturn</tt> exists to ensure the Assembly code we generate for our function maintains the invariants in [ABI](http://www.x86-64.org/documentation/abi.pdf). In particular, we must ensure that the values in the following six registers when we leave the function must be the same as when our function was called.
-
-~~~~
-@Other Helpers@ +=
-static final Register[] CALLEE_SAVES = { rbx, rbp, r12, r13, r14, r15 };
-~~~~
-
-We'll move the values in the registers we have to save into <tt>Variable</tt>s. These instructions are added in the constructor of the <tt>ParsingState</tt>, so will be before any instructions added by the statements we process. The variable names have an exclamation mark in them so they can't collide with variable names in the code we're compiling. We'll move the saved values back into their corresponding registers before we return from the function.
-
-~~~~
-@Identify Callee Saves Registers@ +=
-for(Register r : CALLEE_SAVES)
-  code.add(move(r, variable(CALLEE_SAVE_VAR + r)));
-@Parsing State Members@ +=
-void addReturn() {
-  for(Register r : CALLEE_SAVES)
-    code.add(move(variable(CALLEE_SAVE_VAR + r), r));
-  @Before Returning From Function@
-  @Are We Leaving The Main Function@
-  code.add(Compiler.ret);
-}
-@Other Helpers@ +=
-private static final String CALLEE_SAVE_VAR = "save!";
-~~~~
-
-Here, <tt>ret</tt> is a singleton instance as the instruction has no operands, and so the <tt>Instruction</tt> object has no internal state.
-
-~~~~
-@Static Classes@ +=
-static final Instruction ret = new Instruction() {
-  @Ret Members@
-  public String toString() { return @Ret x86 Code@; }
-};
-~~~~
-
 ### Processing Expressions ###
 
-We'll return to <tt>getAsValue</tt>. In a similar way to <tt>parseStatements</tt> we'll use a switch statement to process each type of expression independently. As expressions can contain other expressions (such as in the example AST of <tt>my_func(MY_GLOBAL,@(my_address))</tt> below) this function is often called recursively to flatten the tree of expressions into a list of Assembly instructions.
+Before we get on to statements we'll start by parsing expressions, which we do in<tt>getAsValue</tt>. In a similar way to <tt>parseStatements</tt> we'll use a switch statement to process each type of expression independently. As expressions can contain other expressions (such as in the example AST of <tt>my_func(MY_GLOBAL,@(my_address))</tt> below) this function is often called recursively to flatten the tree of expressions into a list of Assembly instructions.
 
 <pre>
                     +------------+
@@ -689,6 +659,8 @@ switch(type(t, 0)) {
     { @Parse A Dereference@ }
   case StackAlloc:
     { @Parse A Stack Allocation@ }
+  case Return:
+    { @Parse A Return@ }
 }
 ~~~~
 
@@ -731,6 +703,65 @@ else {
   return new AtAddress(ret, 0);
 } 
 ~~~~
+
+### Returning From A Function ###
+
+Returns are another "intrinsic" function call. According to [the ABI](http://www.x86-64.org/documentation/abi.pdf), functions can return up to two integer values in the <tt>rax</tt> and <tt>rdx</tt> registers. Note that this is not directly exposed in C, but some C compilers can make a function that return a struct with two integer members return that struct in these two registers.
+
+~~~~
+@Other Helpers@ +=
+static final Register[] RETURNS = { rax, rdx };
+~~~~
+
+We'll evaluate the zero, one or two expressions that we'll return, and then add <tt>Move</tt> instructions to put the return values into the right registers, and finally call the same <tt>addReturn</tt> method we saw in <tt>parseDefinition</tt>. We'll look at <tt>getAsValue</tt> shortly - as the expression attached to the return node can be quite complicated (e.g. the return value of a function call, or the <tt>Label</tt> returned by a nested function defintion) we'll have to calculate that first. The <tt>Value</tt> that is the net result of this expression is returned by <tt>getAsValue</tt>.
+
+~~~~
+@Parse A Return@ +=
+Value[] returns = new Variable[RETURNS.length];
+for(Register r : RETURNS)
+  if(numChildren(t, 1) > r.ordinal())
+    returns[r.ordinal()] = getAsValue(get(t, 1, r.ordinal));
+for(Register r : RETURNS)
+  if(returns[r.ordinal()] != null)
+    code.add(move(returns[r.ordinal()], r));
+addReturn();
+~~~~
+
+<tt>addReturn</tt> exists to ensure the Assembly code we generate for our function maintains the invariants in [ABI](http://www.x86-64.org/documentation/abi.pdf). In particular, we must ensure that the values in the following six registers when we leave the function must be the same as when our function was called.
+
+~~~~
+@Other Helpers@ +=
+static final Register[] CALLEE_SAVES = { rbx, rbp, r12, r13, r14, r15 };
+~~~~
+
+We'll move the values in the registers we have to save into <tt>Variable</tt>s. These instructions are added in the constructor of the <tt>ParsingState</tt>, so will be before any instructions added by the statements we process. The variable names have an exclamation mark in them so they can't collide with variable names in the code we're compiling. We'll move the saved values back into their corresponding registers before we return from the function.
+
+~~~~
+@Identify Callee Saves Registers@ +=
+for(Register r : CALLEE_SAVES)
+  code.add(move(r, variable(CALLEE_SAVE_VAR + r)));
+@Parsing State Members@ +=
+void addReturn() {
+  for(Register r : CALLEE_SAVES)
+    code.add(move(variable(CALLEE_SAVE_VAR + r), r));
+  @Before Returning From Function@
+  @Are We Leaving The Main Function@
+  code.add(Compiler.ret);
+}
+@Other Helpers@ +=
+private static final String CALLEE_SAVE_VAR = "save!";
+~~~~
+
+Here, <tt>ret</tt> is a singleton instance as the instruction has no operands, and so the <tt>Instruction</tt> object has no internal state.
+
+~~~~
+@Static Classes@ +=
+static final Instruction ret = new Instruction() {
+  @Ret Members@
+  public String toString() { return @Ret x86 Code@; }
+};
+~~~~
+
 
 ### Function Calls ###
 
