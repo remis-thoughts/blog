@@ -413,15 +413,13 @@ We'll need to have the global state (which we'll keep in a single instance of <t
 ~~~~
 @Other Helpers@ +=
 static final class ProgramState {
-  final List<List<Instruction>> text = Lists.newArrayList();
+  final List<ParsingState> text = Lists.newArrayList();
   final Map<Label, Immediate> globals = Maps.newTreeMap();
 }
 static final class ParsingState {
-  List<Instruction> code = Lists.newArrayList();
-  ProgramState program;
-  Label myName;
+  final ProgramState program;
   ParsingState(Tree def, ProgramState program) {
-    (this.program = program).text.add(code);
+    (this.program = program).text.add(this);
     @Get Function Name@
     @Are We Starting The Main Function@
     @Set Up Stack Allocation@
@@ -432,9 +430,54 @@ static final class ParsingState {
 }
 ~~~~
 
+### Connecting Instructions Together ###
+
+We'll make our <tt>Instruction</tt>s form an [intrusive doubly-linked list](http://www.boost.org/doc/libs/1_35_0/doc/html/intrusive/intrusive_vs_nontrusive.html) by adding pointers to the <tt>Instruction</tt>s immediately preceding and following each <tt>Instruction</tt>. These will be null for the first <tt>Instruction</tt> (the function's <tt>Definition</tt>) and for each <tt>Return</tt> (i.e. each exit from the function). This will give us an O(1) insertion into to the middle of the list, and (unlike linked-list containers, like Java's <tt>LinkedList</tt>) will allow us to link one <tt>Instruction</tt> to override the default implementation to allow multiple predecessors or successors, which will be useful when we come to (conditional) <tt>Jump</tt> <tt>Instruction</tt>s.
+
+~~~~
+@Instruction Members@ +=
+Instruction next, prev;
+Instruction append(Instruction i) {
+  if(next != null) {
+    i.next = next;
+    next.prev = i;
+  }
+  next = i;
+  i.prev = this;
+  @After Appending An Instruction@
+  return i;
+}
+~~~~
+
+Importantly, <tt>append</tt> returns the newly-added <tt>Instruction</tt>. We'll actually define <tt>append</tt>'s behaviour more precisely: it must return the <tt>Instruction</tt> that is now at the end of the linked list. In most cases (and so in the default implementation) this is the same <tt>Instruction</tt> as the one that was passed in, but we'll see examples of overriding this behaviour later.
+
+We'll keep references to the first and last <tt>Instruction</tt>s as members of the <tt>ParsingState</tt>, so we can easily iterate forwards and backwards through the code. Our compilation will occur in a series of "passes", or iterations through the <tt>Instruction</tt>s in order. We'll try to do as much work in each pass as possible (not least because iterating through the <tt>Instruction</tt>s will not be very cache-friendly).
+
+~~~~
+@Parsing State Members@ +=
+final Definition head;
+final List<Return> tails = new ArrayList<Return>(2);
+~~~~
+
+The <tt>Ret</tt> <tt>Instruction</tt> (an x86 <tt>ret</tt>) is a good example of non-standard <tt>Instruction</tt> linking. We'll give ourselves dead-code elimination for free by simply not appending any <tt>Instruction</tt>s to a <tt>Ret</tt>. <tt>Ret</tt>'s <tt>append</tt> returns the <tt>Ret</tt>  itself, indicating it's still the end of the linked list. We'll also clear the appended <tt>Instruction</tt>'s <tt>prev</tt> pointer to keep its state consistent:
+
+~~~~
+@Static Classes@ +=
+static final class Ret extends Instruction {
+  @Ret Members@
+  public String toString() { return @Ret x86 Code@; }
+  Instruction append(Instruction i) {
+    i.prev = null;
+    return this;
+  }
+};
+~~~~
+
+This behaviour means the linked list starting at the <tt>head</tt> element in <tt>ParsingState</tt> is only a list (a chain of <tt>Instruction</tt>s with one predecessor and one successor) in the most simple functions. In most cases - functions with more than one exit point, or <tt>Return</tt> statement, we'll end up with a tree of <tt>Instruction</tt>s starting at the <tt>head</tt>, with each branch terminating in a <tt>Ret</tt> and where each fork (or loop) in the tree comes from a <tt>Jump</tt> (conditional or otherwise).
+
 ### Recursing Down Into The AST ###
 
-A typical function definition AST looks like this:
+A typical function definition AST that the lexer and parser gives us looks like this:
 
 <pre>
                                                                     +--------+
@@ -497,7 +540,7 @@ static Label parseDefinition(Tree def, ProgramState program) {
     state.addReturn();
   }
   @Do Register Allocation@
-  return state.myName;
+  return state.head.label;
 }
 ~~~~
 
@@ -505,9 +548,8 @@ The first instruction we need to generate is the Assembly label that marks the s
 
 ~~~~
 @Get Function Name@ +=
-myName = hasChildren(def, 0) ? new Label("_" + text(def, 0, 0)) : new Label();
-code.add(new Definition(
-  myName, 
+head = new Definition(
+  hasChildren(def, 0) ? new Label("_" + text(def, 0, 0)) : new Label();, 
   isMainFn() || myName.isUpperCase(),
   true));
 ~~~~
@@ -746,22 +788,11 @@ void addReturn() {
     code.add(move(variable(CALLEE_SAVE_VAR + r), r));
   @Before Returning From Function@
   @Are We Leaving The Main Function@
-  code.add(Compiler.ret);
+  code.add(new Ret());
 }
 @Other Helpers@ +=
 private static final String CALLEE_SAVE_VAR = "save!";
 ~~~~
-
-Here, <tt>ret</tt> is a singleton instance as the instruction has no operands, and so the <tt>Instruction</tt> object has no internal state.
-
-~~~~
-@Static Classes@ +=
-static final Instruction ret = new Instruction() {
-  @Ret Members@
-  public String toString() { return @Ret x86 Code@; }
-};
-~~~~
-
 
 ### Function Calls ###
 
@@ -1613,7 +1644,7 @@ However, we need a lot more information about how data in our <tt>Variable</tt>s
 ~~~~
 @Instruction Members@ +=
 boolean isNextInstructionReachable() { return true; }
-@Ret Members@ +=
+@Return Members@ +=
 boolean isNextInstructionReachable() { return false; }
 @Jump Members@ += 
 boolean isNextInstructionReachable() { return cond != null; }
@@ -2750,7 +2781,7 @@ if(name instanceof Label)
   return String.format( "call %s", ((Label)name).name); // call a label
 else
   return String.format( "call *%s", name); // indirect function call - code address in a register
-@Ret x86 Code@ += "ret"
+@Return x86 Code@ += "ret"
 @Immediate x86 Code@ += return String.format("$0x%X", value.get());
 @Jump x86 Code@ += return String.format("j%s %s", cond == null ? "mp" : cond, to.name);
 @Move x86 Code@ += 
