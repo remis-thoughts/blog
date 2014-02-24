@@ -459,7 +459,7 @@ final Definition head;
 final List<Return> tails = new ArrayList<Return>(2);
 ~~~~
 
-The <tt>Ret</tt> <tt>Instruction</tt> (an x86 <tt>ret</tt>) is a good example of non-standard <tt>Instruction</tt> linking. We'll give ourselves dead-code elimination for free by simply not appending any <tt>Instruction</tt>s to a <tt>Ret</tt>. <tt>Ret</tt>'s <tt>append</tt> returns the <tt>Ret</tt>  itself, indicating it's still the end of the linked list. We'll also clear the appended <tt>Instruction</tt>'s <tt>prev</tt> pointer to keep its state consistent:
+The <tt>Ret</tt> <tt>Instruction</tt> (an x86 <tt>ret</tt>) is a good example of non-standard <tt>Instruction</tt> linking. We'll give ourselves dead-code elimination for free by simply not appending any <tt>Instruction</tt>s to a <tt>Ret</tt>. <tt>Ret</tt>'s <tt>append</tt> returns the <tt>Ret</tt>  itself, indicating it's still the end of the linked list. We'll also clear the appended <tt>Instruction</tt>'s <tt>prev</tt> pointer to keep its state consistent, as the <tt>Ret</tt>'s <tt>next</tt> pointer will never be set to a non-null value.
 
 ~~~~
 @Static Classes@ +=
