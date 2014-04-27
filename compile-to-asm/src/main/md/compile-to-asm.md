@@ -108,16 +108,11 @@ assign : assignable Assign expression -> ^(Assign assignable expression);
 
 As you can see, our langauge doesn't have return statements - instead it uses a function-call style syntax (e.g. <tt>return(a);</tt>). As we'll see below, the x86-64 ABI allows up to two integer return values from a function, and the compiler will be simpler if we don't make returns a special case.
 
-~~~~
-@Antlr Tokens@ +=
-Return : 'return';
-~~~~
-
 The final list of tokens we can call like a function is therefore:
 
 ~~~~
 @Antlr Parse Rules@ +=
-callable : Variable | Label | Intrinsic | Conditional | Deref | StackAlloc | FFI | Return;
+callable : Variable | Label | Intrinsic | Conditional | Deref | StackAlloc | FFI;
 ~~~~
 
 Whitespace doesn't affect how the AST is built.
@@ -571,7 +566,7 @@ The first instruction we need to generate is the Assembly label that marks the s
 ~~~~
 @Get Function Name@ +=
 current = head = new Definition(
-  hasChildren(def, 0) ? new Label("_" + text(def, 0, 0)) : new Label();, 
+  hasChildren(def, 0) ? new Label("_" + text(def, 0, 0)) : new Label(), 
   isMainFn() || myName.isUpperCase(),
   true));
 ~~~~
@@ -714,7 +709,10 @@ switch(type(t, 0)) {
   case Label:
   case Variable:
   case FFI:
-    { @Parse A Function Call@ }
+    if("return".equals(text(t, 0)))
+      { @Parse A Return@ }
+    else
+      { @Parse A Function Call@ }
   case Intrinsic: 
     { @Parse An Intrinsic Call@ }
   case Conditional:
@@ -723,8 +721,6 @@ switch(type(t, 0)) {
     { @Parse A Dereference@ }
   case StackAlloc:
     { @Parse A Stack Allocation@ }
-  case Return:
-    { @Parse A Return@ }
 }
 ~~~~
 
@@ -1453,12 +1449,26 @@ We know a <tt>Jump</tt> can only reach one <tt>Definiton</tt>, and one <tt>Defin
 }
 @Jump Members@ +=
 @Override Instruction delete() {
-  if(to) {
+  if(to != null) {
     Instruction tmp = to;
     to = null;
     tmp.delete();
   }
   return super.delete();
+}
+~~~~
+
+Like the <tt>Ret</tt> class, we know that if we're making an unconditional jump, then no <tt>Instruction</tt> after the <tt>Jump</tt> is reachable. We'll override <tt>append</tt> in same way as <tt>Ret</tt>, ignoring the new <tt>Instruction</tt> if we can't reach it.
+
+~~~~
+@Jump Members@ +=
+@Override Instruction append(Instruction i) {
+  if(cond == null) {
+    i.prev = null;
+    return this;
+  }
+  else
+    return super.append(i);
 }
 ~~~~
 
@@ -1564,9 +1574,9 @@ If the "test" expression is already a <tt>Conditional</tt> intrinsic function ca
 @Do If Comparison Check@ +=
 StorableValue trueOrFalse = toStorable(getAsValue(get(test, 0)));
 Condition jumpCond;
-if(getLast(code) instanceof Move && ((Move) getLast(code)).cond != null) {
-  jumpCond = ((Move) getLast(code)).cond;
-  code.subList(code.size() - 2, code.size()).clear();
+if(current instanceof Move && ((Move) current).cond != null) {
+  jumpCond = ((Move) current).cond;
+  current = current.delete().delete();
 } else {
   jumpCond = Condition.e;
   append(new BinaryOp(Op.cmpq, new Immediate(0), trueOrFalse));
@@ -2846,7 +2856,7 @@ if(name instanceof Label)
   return String.format( "call %s", ((Label)name).name); // call a label
 else
   return String.format( "call *%s", name); // indirect function call - code address in a register
-@Return x86 Code@ += "ret"
+@Ret x86 Code@ += "ret"
 @Immediate x86 Code@ += return String.format("$0x%X", value.get());
 @Jump x86 Code@ += return String.format("j%s %s", cond == null ? "mp" : cond, to.label.name);
 @Move x86 Code@ += 

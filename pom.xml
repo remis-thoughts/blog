@@ -268,7 +268,7 @@
 							<configuration>
 								<script><![CDATA[
 require 'rubygems'
-load '${project.build.directory}/rubygems-gem-maven-plugin/gems/literate_md-1.0.7/bin/literate_md'								
+load '${project.build.directory}/rubygems-gem-maven-plugin/gems/literate_md-1.0.8/bin/literate_md'								
 								]]></script>
 								<args><![CDATA[
                                     --files ${basedir}/src/main/md/${project.artifactId}.md
@@ -276,8 +276,6 @@ load '${project.build.directory}/rubygems-gem-maven-plugin/gems/literate_md-1.0.
                                     --lang ${language}
                                     --outputdir ${project.build.directory}/${generated.sources.dir}
                                 ]]></args>
-								<!-- redcarpet has C bits -->
-								<supportNative>true</supportNative>
 							</configuration>
 						</execution>
 						<execution>
@@ -290,7 +288,7 @@ load '${project.build.directory}/rubygems-gem-maven-plugin/gems/literate_md-1.0.
 								<script><![CDATA[
 require 'rubygems'
 return if ${skip.javadoc}
-load '${project.build.directory}/rubygems-gem-maven-plugin/gems/literate_md-1.0.7/bin/literate_md'								
+load '${project.build.directory}/rubygems-gem-maven-plugin/gems/literate_md-1.0.8/bin/literate_md'								
 								]]></script>
 								<args><![CDATA[
                                     --files ${basedir}/src/main/md/${project.artifactId}.md
@@ -299,8 +297,6 @@ load '${project.build.directory}/rubygems-gem-maven-plugin/gems/literate_md-1.0.
                                     --outputdir ${project.build.directory}
                                     --standalone
                                 ]]></args>
-								<!-- redcarpet has C bits -->
-								<supportNative>true</supportNative>
 							</configuration>
 						</execution>
 					</executions>
@@ -308,7 +304,7 @@ load '${project.build.directory}/rubygems-gem-maven-plugin/gems/literate_md-1.0.
 						<dependency>
 							<groupId>rubygems</groupId>
 							<artifactId>literate_md</artifactId>
-							<version>1.0.7</version>
+							<version>1.0.8</version>
 							<type>gem</type>
 						</dependency>
 					</dependencies>
