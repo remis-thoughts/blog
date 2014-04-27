@@ -361,11 +361,8 @@ static final class Definition extends Instruction {
     this.label = label; this.isExported = isExported; 
     this.isFunction = isFunction;
   }
-  public boolean equals(Object o) { 
-    return o instanceof Definition && ((Definition)o).label.equals(label);
-  }
-  public int hashCode() { return label.hashCode(); }
   public String toString() { @Definition x86 Code@ }
+  @Definition Members@
 }
 ~~~~
 
@@ -475,6 +472,21 @@ static final class Ret extends Instruction {
 
 This behaviour means the linked list starting at the <tt>head</tt> element in <tt>ParsingState</tt> is only a list (a chain of <tt>Instruction</tt>s with one predecessor and one successor) in the most simple functions. In most cases - functions with more than one exit point, or <tt>Return</tt> statement, we'll end up with a tree of <tt>Instruction</tt>s starting at the <tt>head</tt>, with each branch terminating in a <tt>Ret</tt> and where each fork (or loop) in the tree comes from a <tt>Jump</tt> (conditional or otherwise).
 
+We'll support removing <tt>Instruction</tt>s from a function too; we'll cleanly remove them from the intrinsic linked list, so if they have a <tt>next</tt> <tt>Instruction</tt> then that will become the <tt>Instruction</tt>'s <tt>prev</tt> <tt>Instruction</tt>'s <tt>next</tt>. We'll make <tt>delete</tt> return the previous <tt>Instruction</tt> to give this method a [fluent interface](https://en.wikipedia.org/wiki/Fluent_interface) - which should make code that deletes a series of <tt>Instruction</tt>s more readable.
+
+~~~~
+@Instruction Members@ +=
+Instruction delete() {
+  Instruction oldPrev = prev;
+  if(prev != null)
+    prev.next = next;
+  if(next != null)
+    next.prev = prev;
+  prev = next = null;
+  return oldPrev;
+}
+~~~~
+
 ### Recursing Down Into The AST ###
 
 A typical function definition AST that the lexer and parser gives us looks like this:
@@ -544,11 +556,21 @@ static Label parseDefinition(Tree def, ProgramState program) {
 }
 ~~~~
 
+We'll now talk about how we'll build up the intrinsically linked list of <tt>Instruction</tt>s. We'll keep the 'current' <tt>Instruction</tt> in a the <tt>ParsingState</tt> so it's easy to access from helper methods in <tt>ParsingState</tt> (i.e. it doesn't have to be passed as a parameter and returned), and each time we call <tt>append</tt> to add a new <tt>Instruction</tt>, we'll set <tt>current</tt> to the return value of <tt>append</tt> (which will usually be in <tt>Instruction</tt> just added).
+
+~~~~
+@Parsing State Members@ +=
+Instruction current = null;
+public void append(Instruction i) {
+  current = current.append(i);
+}
+~~~~
+
 The first instruction we need to generate is the Assembly label that marks the start of our function in the generated code. We'll add a leading underscore to the variable's name as it appears in the source code to comply with the [Linux & OSX ABI](http://stackoverflow.com/questions/2627511/why-do-c-compilers-prepend-underscores-to-external-names). If the function is anonymous (there's no name in the source code) we'll generate a random one (using the <tt>new Label()</tt> constructor) and ensure that that function isn't exported.
 
 ~~~~
 @Get Function Name@ +=
-head = new Definition(
+current = head = new Definition(
   hasChildren(def, 0) ? new Label("_" + text(def, 0, 0)) : new Label();, 
   isMainFn() || myName.isUpperCase(),
   true));
@@ -563,7 +585,7 @@ If the AST node is a <tt>Variable</tt> it could be a reference to a local variab
 Map<String, Variable> variables = Maps.newTreemap();
 int numVariables = 0;
 Variable variable(String name) {
-  if(name == null) return new Variable(numVariables++);
+  if(name == null) return new Variable(numVariables++); // anonymous
   if(params.containsKey(name)) return params.get(name);
   Variable ret = variables.get(name);
   if(ret == null)
@@ -647,7 +669,7 @@ private StorableValue toStorable(Value v) {
   if (StorableValue.class.isAssignableFrom(v.getClass())) 
     return (StorableValue) v;
   Variable var = variable(null);
-  code.add(move(v, var));
+  append(move(v, var));
   return var;
 }
 ~~~~
@@ -713,8 +735,8 @@ I said above that "intrinsics", or UTF-8 symbols in the source code corresponded
 Value arg1 = getAsValue(get(t, 1, 0));
 Value arg2 = toStorable(getAsValue(get(t, 1, 1)));
 Variable ret = variable(null);
-code.add(move(arg1, ret));
-code.add(new BinaryOp(Op.parse(text(t, 0)), arg2, ret));
+append(move(arg1, ret));
+append(new BinaryOp(Op.parse(text(t, 0)), arg2, ret));
 return ret;
 ~~~~
 
@@ -725,10 +747,10 @@ The various <tt>Condition</tt> tokens in the langauge's grammar (e.g. <, ≠) ca
 Condition cond = Condition.parse(text(t, 0));
 Value arg1 = getAsValue(get(t, 1, 1));
 StorableValue arg2 = toStorable(getAsValue(get(t, 1, 0)));
-code.add(new BinaryOp(Op.cmpq, arg1, arg2));
+append(new BinaryOp(Op.cmpq, arg1, arg2));
 Variable ret = variable(null);
-code.add(move(new Immediate(0), ret));
-code.add(new Move(new Immediate(1), ret, cond));
+append(move(new Immediate(0), ret));
+append(new Move(new Immediate(1), ret, cond));
 return ret;
 ~~~~
 
@@ -741,7 +763,7 @@ if(val instanceof StorableValue && !(val instanceof AtAddress))
   return new AtAddress((StorableValue)val, 0);
 else {
   Variable ret = variable(null);
-  code.add(move(val, ret));
+  append(move(val, ret));
   return new AtAddress(ret, 0);
 } 
 ~~~~
@@ -765,7 +787,7 @@ for(Register r : RETURNS)
     returns[r.ordinal()] = getAsValue(get(t, 1, r.ordinal));
 for(Register r : RETURNS)
   if(returns[r.ordinal()] != null)
-    code.add(move(returns[r.ordinal()], r));
+    append(move(returns[r.ordinal()], r));
 addReturn();
 ~~~~
 
@@ -781,14 +803,15 @@ We'll move the values in the registers we have to save into <tt>Variable</tt>s. 
 ~~~~
 @Identify Callee Saves Registers@ +=
 for(Register r : CALLEE_SAVES)
-  code.add(move(r, variable(CALLEE_SAVE_VAR + r)));
+  append(move(r, variable(CALLEE_SAVE_VAR + r)));
 @Parsing State Members@ +=
 void addReturn() {
   for(Register r : CALLEE_SAVES)
-    code.add(move(variable(CALLEE_SAVE_VAR + r), r));
+    append(move(variable(CALLEE_SAVE_VAR + r), r));
   @Before Returning From Function@
   @Are We Leaving The Main Function@
-  code.add(new Ret());
+  Ret ret = new Ret();
+  tails.add(ret);
 }
 @Other Helpers@ +=
 private static final String CALLEE_SAVE_VAR = "save!";
@@ -804,7 +827,7 @@ However, both x86-64 conventions agree that 64-bit integers are returned in the 
 @Parse A Function Call@ +=
 call(t);
 Variable var = variable(null);
-code.add(move(Register.rax, var));
+append(move(Register.rax, var));
 return var;
 ~~~~
 
@@ -825,7 +848,7 @@ static final class Call extends Instruction {
   public String toString() { @Call x86 Code@ }
 }
 @Make The Call@ +=
-code.add(new Call(getAsValue(get(t, 0))));
+append(new Call(getAsValue(get(t, 0))));
 ~~~~
 
 We'll start by using <tt>getAsValue</tt> to generate code that evaluate all the expressions we're going to pass as parameters. These expressions can be complicated (and can even include other function calls). We need to keep all the parameter <tt>Value</tt>s we've calculated so far, which reduces the registers available for evaluating subsequent parameters. While we can't avoid this for the six parameters we're passing in registers, we could calculate the parameter values we're passing on the stack and put them there - so they don't need to take up registers. However, this means we can't use the stack layout described in next, so we won't do this.
@@ -856,10 +879,10 @@ int numArgs = values.size(),
 for(int r = storedArgs - 1; r >= 0; --r) {
   Value arg = values.get(registerArgs + r);
   @Move Values From Memory@
-  code.add(storeArg(arg, r));
+  append(storeArg(arg, r));
 }
 for(int r = 0; r < registerArgs; ++r) // regs second so they don't get flattened by mem switch
-  code.add(move(values.get(r), PARAMETERS[r]));
+  append(move(values.get(r), PARAMETERS[r]));
 ~~~~
 
 ### The Stack Layout ###
@@ -881,7 +904,7 @@ static boolean hasDynamicAllocation(Tree t) {
 @Set Up Stack Allocation@ +=
 if(hasDynamicAllocation(get(def, 2))) {
   framePointer = variable(null);
-  code.add(move(rsp, framePointer));
+  append(move(rsp, framePointer));
 } else
   framePointer = null;
 @After Stack Allocation Setup@
@@ -892,7 +915,7 @@ The frame pointer is restored in the <tt>addReturn</tt> method, so it gets inser
 ~~~~
 @Before Returning From Function@ +=
 if(framePointer != null)
-  code.add(move(framePointer, Register.rsp));
+  append(move(framePointer, Register.rsp));
 ~~~~
 
 The two methods of laying out the stack memory means we'll generate Assembly code like GCC with the [-fomit-frame-pointer](http://gcc.gnu.org/onlinedocs/gcc-3.4.4/gcc/Optimize-Options.html) option turned on.
@@ -985,7 +1008,7 @@ Now, if we want to generate a <tt>mov</tt> instruction store the <tt>arg</tt> <t
 private Value toRegister(Value v) {
   if(v instanceof AtAddress) {
     Variable loaded = variable(null);
-    code.add(move(v, loaded));
+    append(move(v, loaded));
     v = loaded;
   }
   return v;
@@ -1007,7 +1030,7 @@ If a function's stack space is allocated statically then we don't need to do any
 ~~~~
 @Remove Args From Stack@ +=
 if(framePointer != null)
-  code.add(new BinaryOp(
+  append(new BinaryOp(
     Op.addq,
     new Immediate(storedArgs * SIZE), 
     rsp));
@@ -1019,7 +1042,7 @@ The x86 <tt>mov</tt> instruction doesn't allow both operands to be indirect (i.e
 @Move Values From Memory@ +=
 if(arg instanceof AtAddress && framePointer != null) {
   Variable tmp = variable(null); 
-  code.add(move(arg, tmp));
+  append(move(arg, tmp));
   arg = tmp;
 }
 ~~~~
@@ -1072,14 +1095,14 @@ In the System V AMD ABI [the stack grows downwards](http://stackoverflow.com/a/1
 @Statically Allocate On Stack@ +=
 long offset = allocateOnStack((Immediate)size);
 if(framePointer == null) {
-  code.add(move(rsp, ret));
-  code.add(new BinaryOp(
+  append(move(rsp, ret));
+  append(new BinaryOp(
     Op.addq,
     new Immediate(new StaticStackVarLocation(this, offset)), 
     ret));
 } else {
-  code.add(move(framePointer, ret));
-  code.add(new BinaryOp(
+  append(move(framePointer, ret));
+  append(new BinaryOp(
     Op.subq,
     new Immediate(offset + ((Immediate)size).value.get() + SIZE), 
     ret));
@@ -1108,9 +1131,9 @@ We can dynamically allocate memory easily by just subtracting the amount of memo
 
 ~~~~
 @Dynamically Allocate On Stack@ +=
-code.add(new BinaryOp(Op.subq, size, Register.rsp));
+append(new BinaryOp(Op.subq, size, Register.rsp));
 @Align The Stack@
-code.add(move(Register.rsp, ret));
+append(move(Register.rsp, ret));
 ~~~~
 
 We've said above that if we call another function we need the stack pointer to be 16-byte aligned, and if a function has dynamic allocations we can ensure this in one of two ways; we can align the stack after every dynamic allocation or we can align the stack before each function call. In both cases "aligning the stack" means allocating between one and 15 bytes by using a <tt>and</tt> instruction to rounding the stack pointer down to a multiple of 16. The compiler currently generates Assembly code that  aligns the stack after every dynamic allocation as [on some CPUs](http://lemire.me/blog/archives/2012/05/31/data-alignment-for-speed-myth-or-reality) accessing aligned memory is faster than accessing unaligned memory.
@@ -1122,8 +1145,8 @@ Unfortunately, we can't just <tt>and</tt> the stack pointer with <tt>0xFFFFFFFFF
 alignStack();
 @Parsing State Members@ +=
 void alignStack() {
-  code.add(new BinaryOp(Op.shrq, new Immediate(4), rsp));
-  code.add(new BinaryOp(Op.shlq, new Immediate(4), rsp));
+  append(new BinaryOp(Op.shrq, new Immediate(4), rsp));
+  append(new BinaryOp(Op.shlq, new Immediate(4), rsp));
 }
 ~~~~
 
@@ -1173,12 +1196,12 @@ boolean isMainFn() {
 }
 @Are We Starting The Main Function@ +=
 if(isMainFn()) {
-  code.add(new Push(rsp));
+  append(new Push(rsp));
   alignStack();
 }
 @Are We Leaving The Main Function@ +=
 if(isMainFn())
-  code.add(new Pop(rsp));
+  append(new Pop(rsp));
 @Static Classes@ +=
 private static final class Pop extends Instruction {
   final StorableValue value;
@@ -1220,13 +1243,13 @@ Now we can add Assembly instructions to subtract this number from <tt>rsp</tt> w
 
 ~~~~
 @After Stack Allocation Setup@ +=
-code.add(new BinaryOp(
+append(new BinaryOp(
   Op.subq,
   new Immediate(new StaticStackBytes(this)), 
   rsp));
 @Before Returning From Function@ +=
 if(framePointer == null)
-  code.add(new BinaryOp(
+  append(new BinaryOp(
     Op.addq,
     new Immediate(new StaticStackBytes(this)), 
     rsp));
@@ -1269,7 +1292,7 @@ private Map<String, StorableValue> params = Maps.newTreemap();
 for(int p = 0, count = numChildren(def, 1); p < count; ++p) {
   String v = text(def, 1, p).substring(1);
   if(p < PARAMETERS.length)
-    code.add(move(PARAMETERS[p], variable(v)));
+    append(move(PARAMETERS[p], variable(v)));
   else
     params.put(v, parameter(p - PARAMETERS.length));
 }
@@ -1373,10 +1396,10 @@ x86 instructions don't support more than one level of indirection (e.g. you can 
 @Generate Mov Instructions@ +=
 for(; numDerefs > 1; --numDerefs) {
   Variable inter = variable(null);
-  code.add(move(to, inter));
+  append(move(to, inter));
   to = new AtAddress(inter, 0);
 }
-code.add(move(expr, to));
+append(move(expr, to));
 ~~~~
 
 We mentioned above we give the variable an initial value zero when we declare it (implicitly the first time we see it). We'll make an exception to this for compile-time constants (which we'll define as the right-hand side of the assignment is an <tt>Immediate</tt>), and we'll embed that constant as initial value at the <tt>Label</tt> in the Assembly code generate. If we do use the right-hand side as the initial value we don't need to generate instructions to copy the immediate to the location of the <tt>Label</tt>, so we'll <tt>break</tt> out of the switch statement we're in.
@@ -1390,23 +1413,58 @@ if(numDerefs <= 1
 } 
 ~~~~
 
-### If Statements ###
+### Jumps ###
 
-If-statements (with an optional else-block) are the first <tt>Statement</tt> we'll cover that allows control flow to jump to different locations in a function. We'll use [jump](http://www.unixwiz.net/techtips/x86-jumps.html) instructions to do this. Jump instructions are like the conditional <tt>mov</tt> instructions we met above; as well as unconditional jumps we can also add a suffix to indicate the jump instruction should only be executed if certain flags in the [status register](http://en.wikipedia.org/wiki/Status_register) are set. As we're just jumping to different points in the same function the <tt>Jump</tt> instruction and the <tt>Label</tt> <tt>Definition</tt> we're jumping to will both be in the same <tt>text</tt> segment of the generated Assembly code, so we don't need to worry about [far jumps](http://stackoverflow.com/questions/14812160/near-and-far-jmps).
+We'll use [jump](http://www.unixwiz.net/techtips/x86-jumps.html) instructions to do this. Jump instructions are like the conditional <tt>mov</tt> instructions we met above; as well as unconditional jumps we can also add a suffix to indicate the jump instruction should only be executed if certain flags in the [status register](http://en.wikipedia.org/wiki/Status_register) are set. As we're just jumping to different points in the same function the <tt>Jump</tt> instruction and the <tt>Label</tt> <tt>Definition</tt> we're jumping to will both be in the same <tt>text</tt> segment of the generated Assembly code, so we don't need to worry about [far jumps](http://stackoverflow.com/questions/14812160/near-and-far-jmps).
 
 ~~~~
 @Static Classes@ +=
 private static class Jump extends Instruction {
-  final Label to; final Condition cond;
-  Jump(Label to, Condition cond) { 
+  Definition to; final Condition cond;
+  Jump(Definition to, Condition cond) { 
     this.to = to; this.cond = cond; 
+    @After Constructing A Jump@
   }
   public String toString() { @Jump x86 Code@ }
   @Jump Members@
 }
 ~~~~
 
-We'll compile if and if-with-else blocks slightly differently. The two lists of Assembly instructions below show that if we have an else block we need to append an unconditional jump to the end of the code in the if-block so that we skip over the instructions in the else-block. If the <tt>cmp</tt> fails when we have an else-block we'll jump to the start of that (rather than the <tt>end</tt> <tt>Label</tt> added at the end of the statement), and control flow will run straight through to the <tt>end</tt> <tt>Label</tt>.
+The language we're using restricts control flow a lot more strictly that x86 assembly does. Firstly, we'll ensure each <tt>Label</tt> definition is only referenced by at most one <tt>Jump</tt> <tt>Instruction</tt>. Jumps are reflected in the intrinsic doubly-linked list of <tt>Instruction</tt>s as extra links between pairs of <tt>Jump</tt> and <tt>Definition</tt> <tt>Instruction</tt>s. This restriction means each <tt>Definition</tt> only needs a single extra field to store a pointer to the relevant <tt>Jump</tt> <tt>Instruction</tt>; otherwise we'd need a collection of all the <tt>Jump</tt>s that reference the <tt>Definition</tt>.
+
+~~~~
+@Definition Members@ +=
+Jump comeFrom = null;
+@After Constructing A Jump@ +=
+to.comeFrom = this;
+~~~~
+
+We know a <tt>Jump</tt> can only reach one <tt>Definiton</tt>, and one <tt>Definiton</tt> can only be reached by one <tt>Jump</tt>, so we'll override <tt>delete</tt> in both <tt>Instruction</tt> subclasses to make a delete on a <tt>Jump</tt> delete the corresponding <tt>Definition</tt> too, and vice versa. This means <tt>Instruction</tt> intrinsic linked list won't ever contain a <tt>Definition</tt> that nothing jumps to or a <tt>Jump</tt> whose <tt>Definition</tt> doesn't exist. Note that we'll have to set the <tt>to</tt> or <tt>comeFrom</tt> pointer to null before calling <tt>delete</tt> on the other <tt>Instruction</tt> of the pair to avoid an infinite recursion.
+
+~~~~
+@Definition Members@ +=
+@Override Instruction delete() {
+  if(comeFrom != null) {
+    Instruction tmp = comeFrom;
+    comeFrom = null;
+    tmp.delete();
+  }
+  return super.delete();
+}
+@Jump Members@ +=
+@Override Instruction delete() {
+  if(to) {
+    Instruction tmp = to;
+    to = null;
+    tmp.delete();
+  }
+  return super.delete();
+}
+~~~~
+
+### If Statements ###
+
+If-statements (with an optional else-block) are the first <tt>Statement</tt> we'll cover that allows control flow to jump to different locations in a function. We'll compile if and if-with-else blocks slightly differently. The two lists of Assembly instructions below show that if we have an else block we need to append an unconditional jump to the end of the code in the if-block so that we skip over the instructions in the else-block. If the <tt>cmp</tt> fails when we have an else-block we'll jump to the start of that (rather than the <tt>end</tt> <tt>Label</tt> added at the end of the statement), and control flow will run straight through to the <tt>end</tt> <tt>Label</tt>.
 
 <pre>
 if >(x, 0) { xxx }
@@ -1457,7 +1515,7 @@ static boolean isNeverZero(Tree t) {
 }
 ~~~~
 
-We'll just generate Assembly code for the if-block or else-block as appropriate (and we'll not generate code for the test) if the test expression is a constant:
+We'll just generate Assembly code for the if-block or else-block as appropriate:
 
 ~~~~
 @Parse An If Statement@ +=
@@ -1466,14 +1524,21 @@ Tree
   ifTrue = get(statement, 1), 
   ifFalse = numChildren(statement) == 3 ? get(statement, 2) : null;
 if(isConstant(get(test,0))) {
-  if(isNeverZero(get(test, 0)))
-    parseStatements(children(ifTrue));
-  else if(ifFalse != null)
-    parseStatements(children(ifFalse));
+  @Skip If Statement@
 } else {
   Label endIf = parseIf(test, ifTrue, ifFalse); 
-  code.add(new Definition(endIf, false, false));
+  append(new Definition(endIf, false, false));
 }
+~~~~
+
+However, if the test is a constant we can do a compile-time optimisation by just inlining whichever branch will (always) be chosen (and we'll not generate code for the test).
+
+~~~~
+@Skip If Statement@ +=
+if(isNeverZero(get(test, 0)))
+  parseStatements(children(ifTrue));
+else if(ifFalse != null)
+  parseStatements(children(ifFalse));
 ~~~~
 
 In both types of if-statement we only execute the jump following the <tt>cmp</tt> if the comparison failed. This means we'll need to use the inverse of the <tt>Condition</tt> we're testing for as the <tt>Jump</tt>'s condition.
@@ -1504,7 +1569,7 @@ if(getLast(code) instanceof Move && ((Move) getLast(code)).cond != null) {
   code.subList(code.size() - 2, code.size()).clear();
 } else {
   jumpCond = Condition.e;
-  code.add(new BinaryOp(Op.cmpq, new Immediate(0), trueOrFalse));
+  append(new BinaryOp(Op.cmpq, new Immediate(0), trueOrFalse));
 }
 ~~~~
 
@@ -1512,7 +1577,7 @@ If we don't have an else-block we'll jump to the <tt>end</tt> <tt>Label</tt> we 
 
 ~~~~
 @Parse An If With No Else@ +=
-code.add(new Jump(end, jumpCond.inverse()));
+append(new Jump(end, jumpCond.inverse()));
 parseStatements(children(ifTrue));
 ~~~~
 
@@ -1547,10 +1612,10 @@ If we need to generate Assembly code following this pattern we don't need to do 
 ~~~~
 @Parse An If With An Else@ +=
 Label ifFalseLabel = new Label();
-code.add(new Jump(ifFalseLabel, jumpCond.inverse()));
+append(new Jump(ifFalseLabel, jumpCond.inverse()));
 parseStatements(children(ifTrue));
-code.add(new Jump(end, null));
-code.add(new Definition(ifFalseLabel, false, false));
+append(new Jump(end, null));
+append(new Definition(ifFalseLabel, false, false));
 parseStatements(children(ifFalse));
 ~~~~
 
@@ -1573,9 +1638,9 @@ If we've decided an unconditional loop is executed (the test expression evaluate
 ~~~~
 @Parse An Unconditional Loop@ +=
 if(isNeverZero(get(statement, 0, 0))) {
-  code.add(new Definition(loopTop, false, false));
+  append(new Definition(loopTop, false, false));
   parseStatements(children(get(statement, 1)));
-  code.add(new Jump(loopTop, null));
+  append(new Jump(loopTop, null));
 }
 ~~~~
 
@@ -1605,10 +1670,10 @@ If the test expression is false (the <tt>cmp</tt> instruction in the diagram abo
 
 ~~~~
 @Parse A Conditional Loop@ +=
-code.add(new Definition(loopTop, false, false));
+append(new Definition(loopTop, false, false));
 Label endWhile = parseIf(get(statement, 0), get(statement, 1), null);
-code.add(new Jump(loopTop, null)); 
-code.add(new Definition(endWhile, false, false));
+append(new Jump(loopTop, null)); 
+append(new Definition(endWhile, false, false));
 ~~~~
 
 ## (II) Register Allocation via Linear Programming ##
@@ -2027,7 +2092,7 @@ There's one edge case when processing the <tt>Instruction</tt>s at the end of th
 
 ~~~~
 @No Return Statement Given@ +=
-state.code.add(move(rax, rax));
+state.append(move(rax, rax));
 ~~~~
 
 ### What Needs Assigning ###
@@ -2783,7 +2848,7 @@ else
   return String.format( "call *%s", name); // indirect function call - code address in a register
 @Return x86 Code@ += "ret"
 @Immediate x86 Code@ += return String.format("$0x%X", value.get());
-@Jump x86 Code@ += return String.format("j%s %s", cond == null ? "mp" : cond, to.name);
+@Jump x86 Code@ += return String.format("j%s %s", cond == null ? "mp" : cond, to.label.name);
 @Move x86 Code@ += 
 if(cond == null)
   return String.format("movq %s, %s", from, to);
