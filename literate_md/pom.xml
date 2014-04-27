@@ -10,7 +10,7 @@
 
 	<!-- I'm versioning this separately to keep it in sync with the https://rubygems.org/gems/literate_md 
 		history. -->
-	<version>1.0.7</version>
+	<version>1.0.8</version>
 
 	<name>literate_md</name>
 	<description><![CDATA[Literate programming using markdown! Converts files to html or extracts the code snippets into one or more source files. To use:
@@ -61,8 +61,8 @@ Options:
 	<dependencies>
 		<dependency>
 			<groupId>rubygems</groupId>
-			<artifactId>redcarpet</artifactId>
-			<version>[0,2.3.0]</version>
+			<artifactId>kramdown</artifactId>
+			<version>[0,)</version>
 			<type>gem</type>
 		</dependency>
 		<dependency>

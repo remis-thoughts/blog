@@ -1,13 +1,13 @@
-require 'test/unit'
+require 'minitest/autorun'
 require 'ostruct'
  
-class TestLiterateMD < Test::Unit::TestCase
+class TestLiterateMD < Minitest::Test
   def run_and_verify opts, actual_file, expected_file
     tidy_up actual_file
     $opts = opts
     run_it
-    expected = File.open(expected_file, 'r'){|f|f.read}
-    actual = File.open(actual_file, 'r'){|f|f.read}
+    expected = File.read expected_file
+    actual = File.read actual_file
     assert_equal expected, actual
     tidy_up actual_file
   end
@@ -37,9 +37,9 @@ class TestLiterateMD < Test::Unit::TestCase
   
   def run_it 
     begin
-  	  load 'bin/literate_md'
-	rescue SystemExit => e
+      load 'bin/literate_md'
+    rescue SystemExit => e
       assert_equal e.status, 0
-	end
+    end
   end
 end

@@ -1,7 +1,6 @@
 #!/usr/bin/ruby -rubygems
 
-require 'coderay'
-require 'redcarpet'
+require 'kramdown'
 require 'trollop'
 require 'fileutils'
 
@@ -16,51 +15,68 @@ end
 
 $allowed = '(\w| )*|((.*:)?\*)'
 html_opts = {
-  :fenced_code_blocks => true, 
-  :superscript => true, 
-  :tables => true, 
-  :lax_html_blocks => true, 
-  :strikethrough => true
+  :enable_coderay => true, 
+  :coderay_default_lang => opts.lang.to_sym,
+  :standalone => opts.standalone,
 }
 $ext_for_lang = {
   :ruby => 'rb',
   :c => 'c',
 }
 
-class Weave < Redcarpet::Render::XHTML
-  attr_accessor :default_lang, :original_text, :standalone
-  def initialize; super; @tokens = Hash.new end
-  def block_code(code, lang)
-  	l_ang, r_ang, equiv = "__lang__", "__rang__", "__equiv__"
-  	line_num = @original_text[0,@original_text.index(code)].count("\n")+1
-    code = code.
-      gsub(/@(#{$allowed})@\s*\+=/) {|match| "#{l_ang}" + to_token(match) + "#{r_ang}+#{equiv}"}.
-      gsub(/@(#{$allowed})@/) {|match| "#{l_ang}" + to_token(match) + "#{r_ang}"}
-    code = CodeRay.
-      scan(code, lang.nil? ? @default_lang : lang.to_sym).
-      html(
-        :wrap => :div, 
-        :css => :style, 
-        :line_numbers => :table,
-        :line_number_start => line_num)
-    code.gsub!(/#{l_ang}/,'&lang;')
-    code.gsub!(/#{r_ang}/,'&rang;')
-    code.gsub!(/#{equiv}/,'&equiv;')
-    @tokens.each_pair {|k,v| code.gsub! v, k }
-    code
-  end  
-  def codespan(code); block_code(code,nil) end
-  def doc_header
-    @original_text.gsub!(/\t/,'    ') # redcarpet converts tabs somewhere
-    @standalone ? "<html><body>" : nil
-  end
-  def doc_footer; "</body></html>" if @standalone end
-  def to_token code
-    code = code[1, code.rindex('@')-1]
-    if @tokens.has_key? code
-      @tokens[code]
-    else
-      @tokens[code] = "__token#{@tokens.size}__"
+module Kramdown::Converter
+  class Weave < Html
+
+    def initialize root, options
+      super(root, options)
+      @tokens, @default_lang, @original_text, @standalone = 
+        Hash.new, options[:coderay_default_lang], options[:original_text], options[:standalone]
+    end
+
+    def convert_codeblock el, indent
+      code, lang = el.value, extract_code_language(el.attr)
+    	l_ang, r_ang, equiv = "__lang__", "__rang__", "__equiv__"
+    	line_num = @original_text[0,@original_text.index(code)].count("\n")+1
+      code = code.
+        gsub(/@(#{$allowed})@\s*\+=/) {|match| "#{l_ang}" + to_token(match) + "#{r_ang}+#{equiv}"}.
+        gsub(/@(#{$allowed})@/) {|match| "#{l_ang}" + to_token(match) + "#{r_ang}"}
+      code = CodeRay.
+        scan(code, lang.nil? ? @default_lang : lang.to_sym).
+        html(
+          :wrap => :div, 
+          :css => :style, 
+          :line_numbers => :table,
+          :line_number_start => line_num)
+      puts code
+      code.gsub!(/#{l_ang}/,'&lang;')
+      code.gsub!(/#{r_ang}/,'&rang;')
+      code.gsub!(/#{equiv}/,'&equiv;')
+      @tokens.each_pair {|k,v| code.gsub! v, k }
+      code
+    end
+
+    def convert_codespan el, indent
+      convert_codeblock el, indent
+    end
+
+    def convert_root(el, indent)
+      text = super(el, indent)
+      if @standalone
+        "<html><body>\n#{text}\n</body></html>"
+      else
+        text
+      end
+    end
+
+  private
+
+    def to_token code
+      code = code[1, code.rindex('@')-1]
+      if @tokens.has_key? code
+        @tokens[code]
+      else
+        @tokens[code] = "__token#{@tokens.size}__"
+      end
     end
   end
 end
@@ -71,54 +87,65 @@ def write_to path, data
 end
 
 if opts.weave
-  r = Redcarpet::Markdown.new(Weave, html_opts)
-  r.renderer.default_lang = opts.lang.to_sym
-  r.renderer.standalone = opts.standalone
   opts.files.split(',').each{|file|
-    code = File.open(file, 'r'){|f|f.read}
-    r.renderer.original_text = code
-	html = r.render(code)
-	write_to("#{opts.outputdir}/#{File.basename(file)}.html", html)
+    text = html_opts[:original_text] = File.read(file)
+    r = Kramdown::Document.new(text, html_opts)
+	  html = r.to_weave
+	  write_to("#{opts.outputdir}/#{File.basename(file)}.html", html)
   }
 end
 
-class Tangle < Redcarpet::Render::Base
-  attr_accessor :default_lang, :links, :file_no_ext
-  def block_code(code, lang)
-    last_find = 0
-    chunks = 
-      [{:start => last_find, :anchor => '*', :anchor_len => 0}] + 
-      code.scan(/(@(#{$allowed})@\s*\+=)/).map{|x|
-        {:start => last_find = code.index(x[0], last_find), :anchor => x[1], :anchor_len => x[0].length}
-      } +
-      [{:start => code.length, :anchor_len => 0}]
-    (1..chunks.length-1).each{|index|
-      last, this = chunks[index-1], chunks[index]
-      new_snippet = code[
-        last[:start] + last[:anchor_len], # start index
-        this[:start] - (last[:start] + last[:anchor_len]) # length of substr
-      ]
-      @links[normalise(last[:anchor],lang)] << new_snippet if not new_snippet.strip.empty?
-    }
-    nil
-  end
-  def normalise(link_name, lang)
-    if link_name == '*'
-      "#{@file_no_ext}.#{$ext_for_lang[lang.nil? ? @default_lang : lang.to_sym]}:*"
-    else
-      link_name
+module Kramdown::Converter
+  class Tangle < Html
+
+    def initialize root, options
+      super(root, options)
+      @links, @file_no_ext, @default_lang = 
+        options[:links], options[:file_no_ext], options[:coderay_default_lang]
+    end
+
+    def convert_codeblock el, indent
+      code, lang = el.value, extract_code_language(el.attr)
+      last_find = 0
+      chunks = 
+        [{:start => last_find, :anchor => '*', :anchor_len => 0}] + 
+        code.scan(/(@(#{$allowed})@\s*\+=)/).map{|x|
+          {:start => last_find = code.index(x[0], last_find), :anchor => x[1], :anchor_len => x[0].length}
+        } +
+        [{:start => code.length, :anchor_len => 0}]
+      (1..chunks.length-1).each{|index|
+        last, this = chunks[index-1], chunks[index]
+        new_snippet = code[
+          last[:start] + last[:anchor_len], # start index
+          this[:start] - (last[:start] + last[:anchor_len]) # length of substr
+        ]
+        @links[normalise(last[:anchor],lang)] << new_snippet if not new_snippet.strip.empty?
+      }
+      ''
+    end
+
+    def convert_codespan el, indent
+      convert_codeblock el, indent
+    end
+
+  private
+
+    def normalise(link_name, lang)
+      if link_name == '*'
+        "#{@file_no_ext}.#{$ext_for_lang[(lang || @default_lang).to_sym]}:*"
+      else
+        link_name
+      end
     end
   end
-  def codespan(code); block_code(code,nil) end
 end
 
 if opts.tangle
-  links = Hash.new{|h,k|h[k]=[]}
-  r = Redcarpet::Markdown.new(Tangle, html_opts)
-  r.renderer.default_lang, r.renderer.links = opts.lang.to_sym, links
+  links = html_opts[:links] = Hash.new{|h,k|h[k]=[]}
   opts.files.split(',').each{|file|
-    r.renderer.file_no_ext = file[0,file.rindex('.')]
-	r.render(File.open(file, 'r'){|f|f.read})
+    html_opts[:file_no_ext] = file[0,file.rindex('.')]
+  	r = Kramdown::Document.new(File.read(file), html_opts)
+    r.to_tangle
   }
   resolve = lambda{|parts| parts.join('').gsub(/@(#{$allowed})@/) {|match|resolve.call(links[match[1..-2]])} }
   links.keys.reject{|k|!k.end_with? ':*'}.each{|root|
