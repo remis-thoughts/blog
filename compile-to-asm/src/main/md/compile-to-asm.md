@@ -482,6 +482,30 @@ Instruction delete() {
 }
 ~~~~
 
+As there's not an external container for <tt>Instruction</tt>s (only each <tt>Instruction</tt> knows which <tt>Instruction</tt>(s) follow it), traversing the linked list of <tt>Instruction</tt>s is best done via the [Vistor design pattern](???). We'll define a visitor interface, and each <tt>Instruction</tt> will invoke the vistor on itself, before recursively calling all the <tt>Instruction</tt>s that follow it. We'll have be careful to uphold the guarantee that each <tt>Instruction</tt> is only visited exactly once, regardless of the function's control flow.
+
+~~~~
+@Static Classes@ +=
+interface InstructionVisitor {
+  void visit(Instruction i);
+}
+@Instruction Members@ +=
+void visit(InstructionVisitor v) {
+  v.visit(this);
+  if(next != null)
+    next.visit(v);
+}
+~~~~
+
+Most Java implementations don't do [tail-call optimisation](???), so the call to <tt>next.visit(v)</tt> will increase the stack space the compiler's using by adding another stack frame. If there are too many <tt>Instruction</tt>s in a function we risk causing a <tt>StackOverflowException</tt>. We'll make a call to <tt>visit</tt> finish when it gets to the last <tt>Ret</tt> <tt>Instruction</tt> by overriding the definition (which is not strictly necessary as a <tt>Ret</tt>'s <tt>next</tt> pointer should never be set to a non-null value):
+
+~~~~
+@Ret Members@ +=
+void visit(InstructionVisitor v) {
+  v.visit(this);
+}
+~~~~
+
 ### Recursing Down Into The AST ###
 
 A typical function definition AST that the lexer and parser gives us looks like this:
