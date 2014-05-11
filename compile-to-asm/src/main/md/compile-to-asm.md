@@ -484,14 +484,17 @@ Instruction delete() {
 
 As there's not an external container for <tt>Instruction</tt>s (only each <tt>Instruction</tt> knows which <tt>Instruction</tt>(s) follow it), traversing the linked list of <tt>Instruction</tt>s is best done via the [Vistor design pattern](???). We'll define a visitor interface, and each <tt>Instruction</tt> will invoke the vistor on itself, before recursively calling all the <tt>Instruction</tt>s that follow it. We'll have be careful to uphold the guarantee that each <tt>Instruction</tt> is only visited exactly once, regardless of the function's control flow.
 
+An <tt>InstructionVisitor</tt> may not want to visit every single following <tt>Instruction</tt>, so we'll add a mechanism that allows the visit to stop. We'll make the <tt>visit</tt> method return a boolean, and if a visitor returns false for an <tt>Instruction</tt> then the iteration through the linked list of <tt>Instruction</tt>s stops there and no more <tt>Instruction</tt>s are visited.
+
 ~~~~
 @Static Classes@ +=
 interface InstructionVisitor {
-  void visit(Instruction i);
+  boolean visit(Instruction i);
 }
 @Instruction Members@ +=
 void visit(InstructionVisitor v) {
-  v.visit(this);
+  if(!v.visit(this))
+    return;
   if(next != null)
     next.visit(v);
 }
@@ -1439,7 +1442,7 @@ We'll use [jump](http://www.unixwiz.net/techtips/x86-jumps.html) instructions to
 
 ~~~~
 @Static Classes@ +=
-private static class Jump extends Instruction {
+static abstract class Jump extends Instruction {
   Definition to; final Condition cond;
   Jump(Definition to, Condition cond) { 
     this.to = to; this.cond = cond; 
@@ -1493,6 +1496,61 @@ Like the <tt>Ret</tt> class, we know that if we're making an unconditional jump,
   }
   else
     return super.append(i);
+}
+~~~~
+
+We want the visitor pattern we're using for the <tt>Instruction</tt> class follow both possible <tt>Instruction</tt>s that can follow a <tt>Jump</tt>. For an unconditional <tt>Jump</tt>, this is just the <tt>Definition</tt> of the <tt>Label</tt> it jumps to, but for a conditional <tt>Jump</tt> the <tt>Instruction</tt> directly following the <tt>Jump</tt> could also be executed.
+
+The complexity comes with ensuring each <tt>Instruction</tt> is only ever visited once. Since <tt>Jump</tt> <tt>Instruction</tt>s only have a single <tt>Label</tt>, and we've decided that when we map the AST to a set of <tt>Instruction</tt>s we'll ensure that each control flow structure (i.e. <tt>if</tt>s and <tt>while</tt>s) will only create one <tt>Jump</tt> <tt>Instruction</tt> for each <tt>Definition</tt>, we know that the single <tt>Definiton</tt> for a <tt>Jump</tt> will either be before the <tt>Jump</tt> or after it. When translating the AST's control flow nodes to <tt>Instruction</tt>s we'll also ensure that this property holds for every possible control flow path through the function. Again, by making our high-level language restrict the possible control flow we can make assumptions that simplify the compiler.
+
+On to the first case - if the <tt>Definition</tt> is always before the <tt>Jump</tt>. In this case, when we visit the <tt>Jump</tt> we don't need to follow the control flow branch to the definition as we must have already visited the <tt>Definition</tt>. We only need to visit the <tt>Instruction</tt> directly following this one (which the <tt>next</tt> pointer refers to) if the <tt>Jump</tt> is conditional:
+
+~~~~
+@Static Classes@ +=
+static class BackwardJump extends Jump {
+  BackwardJump(Definition to, Condition cond) { 
+    super(to, cond);
+  }
+  void visit(InstructionVisitor v) {
+    if(!v.visit(this))
+      return;
+    if(cond != null && next != null)
+      next.visit(v);
+  }
+}
+~~~~
+
+The second case is a bit harder. If we know the <tt>Definition</tt> is in a later <tt>Instruction</tt>, then just iterating through <tt>next</tt> then all <tt>Instruction</tt>s after the <tt>Definition</tt> then we may visit some <tt>Instruction</tt>s twice. However, we can't just iterate through <tt>Instruction</tt>s after <tt>next</tt> as control flow may exit the function (maybe via a <tt>return</tt> statement) before the <tt>Definition</tt> - and so we won't visit those <tt>Instruction</tt>s. Instead, we'll add a [decorator](???) to <tt>InstructionVisitor</tt> so we can visit <tt>Instruction</tt>s starting at <tt>next</tt> - but only as far as the <tt>Definition</tt> we'll jump to. We'll then start iterating from the <tt>Definition</tt>, ensuring we only visit those <tt>Instruction</tt>s once.
+
+~~~~
+@Static Classes@ +=
+static class StopAtDefinition implements InstructionVisitor {
+  final InstructionVisitor decorated; final Definition to;
+  StopAtDefinition(InstructionVisitor decorated, Definition to) {
+    this.decorated = decorated; this.to = to;
+  }
+  boolean visit(Instruction i) {
+    return i.equals(to)) ? false : decorated.visit(i);
+  }
+}
+~~~~
+
+Note that if the jump is unconditional we'll never use the <tt>next</tt> pointer (as control flow will always jump somewhere else) - so we can just start visiting from the  <tt>Definition</tt>.
+
+~~~~
+@Static Classes@ +=
+static class ForwardJump extends Jump {
+  ForwardJump(Definition to, Condition cond) { 
+    super(to, cond);
+  }
+  void visit(InstructionVisitor v) {
+    if(!v.visit(this))
+      return;
+    if(cond != null && next != null)
+      next.visit(new StopAtDefinitionOf(v, to));
+    to.visit(v);
+  }
+  @Forward Jump Members@
 }
 ~~~~
 
@@ -2844,7 +2902,7 @@ static <I> void topologicalRemove(
 
 ## (III) Writing the Output ##
 
-We'll now write out all the <tt>Instruction</tt>s we've generated in AT&T syntax. You can compile thw generated Assembly code with [GNU's "as"](http://tigcc.ticalc.org/doc/gnuasm.html) ([OSX-specific documentation](https://developer.apple.com/library/mac/#documentation/DeveloperTools/Reference/Assembler/000-Introduction/introduction.html)), [yasm](http://yasm.tortall.net) or LLVM's assembler, ["llvm-mc"](???).
+We'll now write out all the <tt>Instruction</tt>s we've generated in AT&T syntax. You can compile the generated Assembly code with [GNU's "as"](http://tigcc.ticalc.org/doc/gnuasm.html) ([OSX-specific documentation](https://developer.apple.com/library/mac/#documentation/DeveloperTools/Reference/Assembler/000-Introduction/introduction.html)), [yasm](http://yasm.tortall.net) or LLVM's assembler, ["llvm-mc"](???).
 
 ~~~~
 @Write The Output@ +=
@@ -2926,13 +2984,27 @@ static final class DefineLong extends Instruction {
 }
 ~~~~
 
+We'll also use a static class to represent the start of each segment.
+
+~~~~
+@Static Classes@ +=
+static final class Segment extends Instruction {
+  final String segment;
+  Segment(String segment) {
+    this.segment = segment;
+  }
+  public String toString() { @Segment x86 Code@ }
+}
+~~~~
+
 The <tt>.data</tt> and <tt>[.bss](http://en.wikipedia.org/wiki/.bss)</tt> segments of the Assembly code we output have read and write, but not execute, permissions. We'll store our exported and unexported variables here, although we'll make no attempt to group the variables in each segment either by whether or not they're exported or by the patterns of read and write accesses to them. As space for the values stored in the <tt>.bss</tt> segment isn't allocated in the binary file the assembler creates, when the loader copies the binary file into memory it "inflates" the binary file, allocating zero-initialised memory for each variable in the <tt>.bss</tt> segment. Values in the <tt>.data</tt> segment are stored in the binary file, so the loader just copies these verbatim into memory. This means we'll divide the <tt>Label</tt>s in the <tt>global</tt> map between the <tt>.bss</tt> and <tt>.data</tt> sections depending on whether the initial value of the symbol (the <tt>Immediate</tt> in the map) is zero.
 
 ~~~~
 @Populate Bss And Data Sections@ +=
-List<Instruction> 
-  bss = Lists.newArrayList(), 
-  data = Lists.newArrayList();
+Instruction
+  bss = new Segment("bss"),
+  data = new Segment("data");
+Instruction bssHead = bss, dataHead = data;
 for(Entry<Label, Immediate> global : program.globals.entrySet()) {
   Definition def = new Definition(
     global.getKey(), 
@@ -2940,9 +3012,9 @@ for(Entry<Label, Immediate> global : program.globals.entrySet()) {
     false);
   DefineLong value = new DefineLong(global.getValue());
   if(value.initialValue == 0)
-    addAll(bss, def, value);
+    bss = bss.append(def).append(value);
   else
-    addAll(data, def, value);
+    data = data.append(def).append(value);
 }
 ~~~~
 
@@ -3009,30 +3081,43 @@ public boolean isNoOp(Value arg1, StorableValue arg2) { return false; }
 
 We'll only write out a section if it has at least one <tt>Instruction</tt>, so for example if we don't have any zero-initialised <tt>Label</tt>s we won't write out a <tt>.bss</tt> segment. We'll also align each segment as [on some processors](???) that will make accessing the first memory address (either executable code in the <tt>.text</tt> segment or data in the <tt>.bss</tt> or <tt>.data</tt> segments). As all <tt>Value</tt>s in the the compiled language are 64-bits every value stored in the <tt>.data</tt> or <tt>.bss</tt> segments will be 8- or 16-byte aligned. The <tt>.p2align</tt> directive (which is slightly [more portable](???) than the <tt>.align</tt> directive as it as consistent behaviour across all architectures - not that it matters as we're only compiling for x86-64) will make the assembler [insert dummy instructions](http://stackoverflow.com/a/11277804/42543) so that the first <tt>Instruction</tt> of the segment begins on a 16-byte boundary, as the <tt>4</tt> means "ensure the right-most four bits are zero".
 
-It's safe to the no-op filtering after the <tt>isEmpty</tt> check as only <tt>Instruction</tt>s in the <tt>.text</tt> segment can be no-ops, and if the <tt>.text</tt> segment has at least one function it'll have at least one <tt>Definition</tt> <tt>Instruction</tt>, which can never be a no-op. 
+~~~~
+@Segment x86 Code@ +=
+return String.format(".%s\n\t.p2align 4\n", segment);
+~~~~
 
-We'll do some minor formatting of the generated Assembly code; we'll indent everything with a tab unless it's a <tt>Label<tt> <tt>Definition</tt>, the <tt>.code64</tt> directive we printed as the first line of the output or any of the alignment or segment name directives this method prints.
+We'll use the <tt>InstructionVisitor</tt> mechanism to print out the generated assembly code to an <tt>Appendable</tt>. We'll inject a <tt>InstructionVisitor</tt> implementation to the first <tt>Instruction</tt> of every function (and the data & bss segments), and use its <tt>visit</tt> method to print the relevant code. The <tt>Printer</tt> visitor can skip the no-op <tt>Instruction</tt>s we identified earlier, and do some minor formatting of the generated Assembly code. It'll indent everything with a tab unless it's a <tt>Label<tt> <tt>Definition</tt> or a <tt>Segment</tt> - and will always return <tt>true</tt> as we want to visit every <tt>Instruction</tt>.
 
 ~~~~
-@Other Helpers@ +=
-static void writeSegment(Appendable out, String seg, Iterable<Instruction> is) throws IOException {
-  if(Iterables.isEmpty(is)) return;
-  out.append(seg).append("\n\t.p2align 4\n");
-  for(Instruction i : Iterables.filter(is, noNoOps)) {
-    if(!(i instanceof Definition))
-      out.append('\t');
-    out.append(i.toString()).append('\n');
+@Static Classes@ +=
+static class Printer implements InstructionVisitor {
+  final Appendable out;
+  Printer(Appendable out) {
+    this.out = out;
+  }
+  boolean visit(Instruction i) {
+    if(!i.isNoOp()) {
+      if(!(i instanceof Definition) && !(i instanceof Segment))
+        out.append('\t');
+      out.append(i.toString()).append('\n');  
+    }
+    return true;
   }
 }
 ~~~~
 
-We can now use this method to write out all three segments. The <tt>.text</tt> segment is the only segment we're writing to which has execute permissions by default, so we'll put all the Assembly code we've generated for the functions there. The <tt>List</tt>s of <tt>Instruction</tt>s in the <tt>ProgramState</tt> are concatenated without re-ordering, so the functions will appear in the <tt>.text</tt> segment in the same order that they appear in the source code (with nested functions appearing before the functions they are declared in). It may be more efficient to put the code for functions that call each other next to each other, so when the code for the caller is pulled into the instruction cache any code for the called function on the same cache line will be pulled in for free, saving a memory load when we make the call.
+We can now use this method to write out all three segments. The <tt>.text</tt> segment is the only segment we're writing to which has execute permissions by default, so we'll put all the Assembly code we've generated for the functions there. The <tt>ParsingState</tt>s in the <tt>ProgramState</tt> are added to the <tt>.text</tt> segment without re-ordering, so the functions will appear in the same order that they appear in the source code (with nested functions appearing before the functions they are declared in). It may be more efficient to put the code for functions that call each other next to each other, so when the code for the caller is pulled into the instruction cache any code for the called function on the same cache line will be pulled in for free, saving a memory load when we make the call. We'll also only print the text & bss segments if they have at least one <tt>Definition</tt> (i.e. the <tt>next</tt> pointer of the <tt>Segment</tt> isn't empty).
 
 ~~~~
 @Append Instructions@ +=
-writeSegment(asmOut, ".bss", bss);
-writeSegment(asmOut, ".data", data);
-writeSegment(asmOut, ".text", Iterables.concat(program.text));
+InstructionVisitor printer = new Printer(asmOut);
+if(bss.next != null)
+  bss.visit(printer);
+if(data.next != null)
+  data.visit(printer);
+new Segment("text").visit(printer);
+for(ParsingState function : program.text)
+  function.head.visit(printer);
 ~~~~
 
 ## Appendices ##
