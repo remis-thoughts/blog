@@ -292,7 +292,7 @@ The remaining <tt>Value</tt> types look like this:
 @Static Classes@ +=
 static final class Variable implements StorableValue, Comparable<Variable> {
   final int id;
-  Variable(id) { this.id = id; }
+  Variable(int id) { this.id = id; }
   public boolean equals(Object o) { return o instanceof Variable && ((Variable)o).id == id; }
   public int hashCode() { return id; }
   public int compareTo(Variable o) { return Ints.compare(id, o.id); }
@@ -429,26 +429,27 @@ We'll make our <tt>Instruction</tt>s form an [intrusive doubly-linked list](http
 ~~~~
 @Instruction Members@ +=
 Instruction next, prev;
-Instruction append(Instruction i) {
+Instruction append(Instruction i, ParsingState state) {
   if(next != null) {
     i.next = next;
     next.prev = i;
   }
   next = i;
   i.prev = this;
-  @After Appending An Instruction@
+  if(state != null) {
+    @Update Parsing State@
+  }
   return i;
 }
 ~~~~
 
 Importantly, <tt>append</tt> returns the newly-added <tt>Instruction</tt>. We'll actually define <tt>append</tt>'s behaviour more precisely: it must return the <tt>Instruction</tt> that is now at the end of the linked list. In most cases (and so in the default implementation) this is the same <tt>Instruction</tt> as the one that was passed in, but we'll see examples of overriding this behaviour later.
 
-We'll keep references to the first and last <tt>Instruction</tt>s as members of the <tt>ParsingState</tt>, so we can easily iterate forwards and backwards through the code. Our compilation will occur in a series of "passes", or iterations through the <tt>Instruction</tt>s in order. We'll try to do as much work in each pass as possible (not least because iterating through the <tt>Instruction</tt>s will not be very cache-friendly).
+We'll keep references to the first <tt>Instruction</tt> as a member of the <tt>ParsingState</tt>, so we can easily iterate forwards through the function's code. Our compilation will occur in a series of "passes", or iterations through the <tt>Instruction</tt>s in order. We'll try to do as much work in each pass as possible (not least because iterating through the <tt>Instruction</tt>s will not be very cache-friendly).
 
 ~~~~
 @Parsing State Members@ +=
 final Definition head;
-final List<Return> tails = new ArrayList<Return>(2);
 ~~~~
 
 The <tt>Ret</tt> <tt>Instruction</tt> (an x86 <tt>ret</tt>) is a good example of non-standard <tt>Instruction</tt> linking. We'll give ourselves dead-code elimination for free by simply not appending any <tt>Instruction</tt>s to a <tt>Ret</tt>. <tt>Ret</tt>'s <tt>append</tt> returns the <tt>Ret</tt>  itself, indicating it's still the end of the linked list. We'll also clear the appended <tt>Instruction</tt>'s <tt>prev</tt> pointer to keep its state consistent, as the <tt>Ret</tt>'s <tt>next</tt> pointer will never be set to a non-null value.
@@ -458,7 +459,7 @@ The <tt>Ret</tt> <tt>Instruction</tt> (an x86 <tt>ret</tt>) is a good example of
 static final class Ret extends Instruction {
   @Ret Members@
   public String toString() { return @Ret x86 Code@; }
-  Instruction append(Instruction i) {
+  Instruction append(Instruction i, ParsingState state) {
     i.prev = null;
     return this;
   }
@@ -482,7 +483,7 @@ Instruction delete() {
 }
 ~~~~
 
-As there's not an external container for <tt>Instruction</tt>s (only each <tt>Instruction</tt> knows which <tt>Instruction</tt>(s) follow it), traversing the linked list of <tt>Instruction</tt>s is best done via the [Vistor design pattern](???). We'll define a visitor interface, and each <tt>Instruction</tt> will invoke the vistor on itself, before recursively calling all the <tt>Instruction</tt>s that follow it. We'll have be careful to uphold the guarantee that each <tt>Instruction</tt> is only visited exactly once, regardless of the function's control flow.
+As there's not an external container for <tt>Instruction</tt>s (only each <tt>Instruction</tt> knows which <tt>Instruction</tt>(s) follow it), traversing the linked list of <tt>Instruction</tt>s is best done via the [Vistor design pattern](???). We'll need to support both forward and backwards iteration, so we'll add an enum to specify the direction of traversal. Each <tt>Instruction</tt> will invoke the vistor on itself, before passing it to the <tt>Instruction</tt>s that follow or precede it as appropriate. We'll have be careful to uphold the guarantee that each <tt>Instruction</tt> is only visited exactly once, regardless of the function's control flow.
 
 An <tt>InstructionVisitor</tt> may not want to visit every single following <tt>Instruction</tt>, so we'll add a mechanism that allows the visit to stop. We'll make the <tt>visit</tt> method return a boolean, and if a visitor returns false for an <tt>Instruction</tt> then the iteration through the linked list of <tt>Instruction</tt>s stops there and no more <tt>Instruction</tt>s are visited.
 
@@ -491,21 +492,26 @@ An <tt>InstructionVisitor</tt> may not want to visit every single following <tt>
 interface InstructionVisitor {
   boolean visit(Instruction i);
 }
+enum Direction { FORWARDS, BACKWARDS};
 @Instruction Members@ +=
-void visit(InstructionVisitor v) {
+void visit(InstructionVisitor v, Direction d) {
   if(!v.visit(this))
     return;
-  if(next != null)
-    next.visit(v);
+  if(d == FORWARDS && next != null)
+    next.visit(v, d);
+  if(d == BACKWARDS && prev != null)
+    prev.visit(v, d);
 }
 ~~~~
 
-Most Java implementations don't do [tail-call optimisation](???), so the call to <tt>next.visit(v)</tt> will increase the stack space the compiler's using by adding another stack frame. If there are too many <tt>Instruction</tt>s in a function we risk causing a <tt>StackOverflowException</tt>. We'll make a call to <tt>visit</tt> finish when it gets to the last <tt>Ret</tt> <tt>Instruction</tt> by overriding the definition (which is not strictly necessary as a <tt>Ret</tt>'s <tt>next</tt> pointer should never be set to a non-null value):
+Most Java implementations don't do [tail-call optimisation](???), so the call to <tt>visit(v, d)</tt> will increase the stack space the compiler's using by adding another stack frame. If there are too many <tt>Instruction</tt>s in a function we risk causing a <tt>StackOverflowException</tt>. We'll make a call to <tt>visit</tt> finish when it gets to the last <tt>Ret</tt> <tt>Instruction</tt> by overriding the definition (which is not strictly necessary as a <tt>Ret</tt>'s <tt>next</tt> pointer should never be set to a non-null value):
 
 ~~~~
 @Ret Members@ +=
-void visit(InstructionVisitor v) {
+void visit(InstructionVisitor v, Direction d) {
   v.visit(this);
+  if(d == BACKWARDS && prev != null)
+    prev.visit(v, d);
 }
 ~~~~
 
@@ -569,7 +575,7 @@ It turns out that we can parse each statement of a function independently. Howev
 static Label parseDefinition(Tree def, ProgramState program) {
   ParsingState state = new ParsingState(def, program);  
   state.parseStatements(children(def, 2));
-  if(getLast(state.code) != ret) {
+  if(!(state.current instanceof Ret)) {
     @No Return Statement Given@ 
     state.addReturn();
   }
@@ -584,7 +590,7 @@ We'll now talk about how we'll build up the intrinsically linked list of <tt>Ins
 @Parsing State Members@ +=
 Instruction current = null;
 public void append(Instruction i) {
-  current = current.append(i);
+  current = current.append(i, this);
 }
 ~~~~
 
@@ -604,7 +610,7 @@ If the AST node is a <tt>Variable</tt> it could be a reference to a local variab
 
 ~~~~
 @Parsing State Members@ +=
-Map<String, Variable> variables = Maps.newTreemap();
+Map<String, Variable> variables = Maps.newTreeMap();
 int numVariables = 0;
 Variable variable(String name) {
   if(name == null) return new Variable(numVariables++); // anonymous
@@ -807,7 +813,7 @@ We'll evaluate the zero, one or two expressions that we'll return, and then add 
 Value[] returns = new Variable[RETURNS.length];
 for(Register r : RETURNS)
   if(numChildren(t, 1) > r.ordinal())
-    returns[r.ordinal()] = getAsValue(get(t, 1, r.ordinal));
+    returns[r.ordinal()] = getAsValue(get(t, 1, r.ordinal()));
 for(Register r : RETURNS)
   if(returns[r.ordinal()] != null)
     append(move(returns[r.ordinal()], r));
@@ -833,8 +839,7 @@ void addReturn() {
     append(move(variable(CALLEE_SAVE_VAR + r), r));
   @Before Returning From Function@
   @Are We Leaving The Main Function@
-  Ret ret = new Ret();
-  tails.add(ret);
+  append(new Ret());
 }
 @Other Helpers@ +=
 private static final String CALLEE_SAVE_VAR = "save!";
@@ -1310,7 +1315,7 @@ When we first enter a function the parameter values will either be in the <tt>PA
 
 ~~~~
 @Parsing State Members@ +=
-private Map<String, StorableValue> params = Maps.newTreemap();
+private Map<String, StorableValue> params = Maps.newTreeMap();
 @Parse Function Parameters@ +=
 for(int p = 0, count = numChildren(def, 1); p < count; ++p) {
   String v = text(def, 1, p).substring(1);
@@ -1440,12 +1445,14 @@ if(numDerefs <= 1
 
 We'll use [jump](http://www.unixwiz.net/techtips/x86-jumps.html) instructions to do this. Jump instructions are like the conditional <tt>mov</tt> instructions we met above; as well as unconditional jumps we can also add a suffix to indicate the jump instruction should only be executed if certain flags in the [status register](http://en.wikipedia.org/wiki/Status_register) are set. As we're just jumping to different points in the same function the <tt>Jump</tt> instruction and the <tt>Label</tt> <tt>Definition</tt> we're jumping to will both be in the same <tt>text</tt> segment of the generated Assembly code, so we don't need to worry about [far jumps](http://stackoverflow.com/questions/14812160/near-and-far-jmps).
 
+As well as the <tt>Definition</tt> of the <tt>Label</tt> the <tt>Jump</tt> jumps to, we'll also have members to store the <tt>Condition</tt> if the jump is conditional, and the location of the <tt>Definition</tt> relative to the <tt>Jump</tt> (either <tt>FORWARDS</tt> if the <tt>Definiton</tt> is after the <tt>Jump</tt> and <tt>BACKWARDS</tt> otherwise). This will be useful later when we cover this <tt>Instruction</tt>'s <tt>visit</tt> implementation later.
+
 ~~~~
 @Static Classes@ +=
-static abstract class Jump extends Instruction {
-  Definition to; final Condition cond;
-  Jump(Definition to, Condition cond) { 
-    this.to = to; this.cond = cond; 
+static class Jump extends Instruction {
+  Definition to; final Condition cond; Direction dir;
+  Jump(Definition to, Condition cond, Direction dir) { 
+    this.to = to; this.cond = cond; this.dir = dir;
     @After Constructing A Jump@
   }
   public String toString() { @Jump x86 Code@ }
@@ -1489,35 +1496,39 @@ Like the <tt>Ret</tt> class, we know that if we're making an unconditional jump,
 
 ~~~~
 @Jump Members@ +=
-@Override Instruction append(Instruction i) {
+@Override Instruction append(Instruction i, ParsingState state) {
   if(cond == null) {
     i.prev = null;
     return this;
   }
   else
-    return super.append(i);
+    return super.append(i, state);
 }
 ~~~~
 
 We want the visitor pattern we're using for the <tt>Instruction</tt> class follow both possible <tt>Instruction</tt>s that can follow a <tt>Jump</tt>. For an unconditional <tt>Jump</tt>, this is just the <tt>Definition</tt> of the <tt>Label</tt> it jumps to, but for a conditional <tt>Jump</tt> the <tt>Instruction</tt> directly following the <tt>Jump</tt> could also be executed.
+
+~~~~
+@Jump Members@ +=
+void visit(InstructionVisitor v, Direction d) {
+  if(!v.visit(this))
+    return;
+  if(d == BACKWARDS && prev != null)
+    prev.visit(v, d);
+  if(d == FORWARDS) {
+    @Visiting a Jump@
+  }
+}
+~~~~
 
 The complexity comes with ensuring each <tt>Instruction</tt> is only ever visited once. Since <tt>Jump</tt> <tt>Instruction</tt>s only have a single <tt>Label</tt>, and we've decided that when we map the AST to a set of <tt>Instruction</tt>s we'll ensure that each control flow structure (i.e. <tt>if</tt>s and <tt>while</tt>s) will only create one <tt>Jump</tt> <tt>Instruction</tt> for each <tt>Definition</tt>, we know that the single <tt>Definiton</tt> for a <tt>Jump</tt> will either be before the <tt>Jump</tt> or after it. When translating the AST's control flow nodes to <tt>Instruction</tt>s we'll also ensure that this property holds for every possible control flow path through the function. Again, by making our high-level language restrict the possible control flow we can make assumptions that simplify the compiler.
 
 On to the first case - if the <tt>Definition</tt> is always before the <tt>Jump</tt>. In this case, when we visit the <tt>Jump</tt> we don't need to follow the control flow branch to the definition as we must have already visited the <tt>Definition</tt>. We only need to visit the <tt>Instruction</tt> directly following this one (which the <tt>next</tt> pointer refers to) if the <tt>Jump</tt> is conditional:
 
 ~~~~
-@Static Classes@ +=
-static class BackwardJump extends Jump {
-  BackwardJump(Definition to, Condition cond) { 
-    super(to, cond);
-  }
-  void visit(InstructionVisitor v) {
-    if(!v.visit(this))
-      return;
-    if(cond != null && next != null)
-      next.visit(v);
-  }
-}
+@Visiting a Jump@ +=
+if(dir == BACKWARDS && cond != null && next != null)
+  next.visit(v, d);
 ~~~~
 
 The second case is a bit harder. If we know the <tt>Definition</tt> is in a later <tt>Instruction</tt>, then just iterating through <tt>next</tt> then all <tt>Instruction</tt>s after the <tt>Definition</tt> then we may visit some <tt>Instruction</tt>s twice. However, we can't just iterate through <tt>Instruction</tt>s after <tt>next</tt> as control flow may exit the function (maybe via a <tt>return</tt> statement) before the <tt>Definition</tt> - and so we won't visit those <tt>Instruction</tt>s. Instead, we'll add a [decorator](???) to <tt>InstructionVisitor</tt> so we can visit <tt>Instruction</tt>s starting at <tt>next</tt> - but only as far as the <tt>Definition</tt> we'll jump to. We'll then start iterating from the <tt>Definition</tt>, ensuring we only visit those <tt>Instruction</tt>s once.
@@ -1525,12 +1536,12 @@ The second case is a bit harder. If we know the <tt>Definition</tt> is in a late
 ~~~~
 @Static Classes@ +=
 static class StopAtDefinition implements InstructionVisitor {
-  final InstructionVisitor decorated; final Definition to;
-  StopAtDefinition(InstructionVisitor decorated, Definition to) {
+  final InstructionVisitor decorated; final Instruction to;
+  StopAtDefinition(InstructionVisitor decorated, Instruction to) {
     this.decorated = decorated; this.to = to;
   }
-  boolean visit(Instruction i) {
-    return i.equals(to)) ? false : decorated.visit(i);
+  public boolean visit(Instruction i) {
+    return i == to ? false : decorated.visit(i);
   }
 }
 ~~~~
@@ -1538,20 +1549,46 @@ static class StopAtDefinition implements InstructionVisitor {
 Note that if the jump is unconditional we'll never use the <tt>next</tt> pointer (as control flow will always jump somewhere else) - so we can just start visiting from the  <tt>Definition</tt>.
 
 ~~~~
-@Static Classes@ +=
-static class ForwardJump extends Jump {
-  ForwardJump(Definition to, Condition cond) { 
-    super(to, cond);
-  }
-  void visit(InstructionVisitor v) {
-    if(!v.visit(this))
-      return;
-    if(cond != null && next != null)
-      next.visit(new StopAtDefinitionOf(v, to));
-    to.visit(v);
-  }
-  @Forward Jump Members@
+@Visiting a Jump@ +=
+if(dir == FORWARDS) {
+  if(cond != null && next != null)
+    next.visit(new StopAtDefinition(v, to), d);
+  to.visit(v, d);
 }
+~~~~
+
+We'll add a similar implementation of <tt>visit</tt> to <tt>Definition</tt>, as iterating backwards from a <tt>Definition</tt> is a mirror of iterating forwards from a <tt>Jump</tt>. We'll use the <tt>Direction</tt> of the <tt>comeFrom</tt> member (an instance of <tt>Jump</tt>) to work out where the <tt>Definition</tt> is in relation to the <tt>Jump</tt>.
+
+~~~~
+@Definition Members@ +=
+void visit(InstructionVisitor v, Direction d) {
+  if(!v.visit(this))
+    return;
+  if(d == FORWARDS && next != null)
+    next.visit(v, d);
+  if(d == BACKWARDS) {
+    @Visiting a Definition@
+  }
+}
+~~~~
+
+If the <tt>Jump</tt> is <tt>FORWARDS</tt> the <tt>Definition</tt> is after the <tt>Jump</tt> so when iterating backwards we'll hit the <tt>Definition</tt> first - and so we need to take the measures described above to avoid processing the <tt>Jump</tt> (and prior <tt>Instruction</tt>s) twice.
+
+~~~~
+@Visiting a Definition@ +=
+if(comeFrom.dir == FORWARDS)
+  if(comeFrom.cond != null && prev != null)
+    prev.visit(new StopAtDefinition(v, comeFrom), d);
+  comeFrom.visit(v, d);
+}
+~~~~
+
+And if the <tt>Jump</tt> is backwards then we'll visit the <tt>Jump</tt> (in <tt>comeFrom</tt>) before the <tt>Definition</tt>, so we don't need to re-process it.
+
+~~~~
+@Visiting a Definition@ +=
+if(comeFrom.dir == BACKWARDS && comeFrom.cond != null && prev != null)
+  prev.visit(v, d);
 ~~~~
 
 ### If Statements ###
@@ -1669,7 +1706,7 @@ If we don't have an else-block we'll jump to the <tt>end</tt> <tt>Label</tt> we 
 
 ~~~~
 @Parse An If With No Else@ +=
-append(new Jump(end, jumpCond.inverse()));
+append(new Jump(end, jumpCond.inverse(), FORWARDS));
 parseStatements(children(ifTrue));
 ~~~~
 
@@ -1704,9 +1741,9 @@ If we need to generate Assembly code following this pattern we don't need to do 
 ~~~~
 @Parse An If With An Else@ +=
 Label ifFalseLabel = new Label();
-append(new Jump(ifFalseLabel, jumpCond.inverse()));
+append(new Jump(ifFalseLabel, jumpCond.inverse(), FORWARDS));
 parseStatements(children(ifTrue));
-append(new Jump(end, null));
+append(new Jump(end, null, FORWARDS));
 append(new Definition(ifFalseLabel, false, false));
 parseStatements(children(ifFalse));
 ~~~~
@@ -1732,7 +1769,7 @@ If we've decided an unconditional loop is executed (the test expression evaluate
 if(isNeverZero(get(statement, 0, 0))) {
   append(new Definition(loopTop, false, false));
   parseStatements(children(get(statement, 1)));
-  append(new Jump(loopTop, null));
+  append(new Jump(loopTop, null, BACKWARDS));
 }
 ~~~~
 
@@ -1764,7 +1801,7 @@ If the test expression is false (the <tt>cmp</tt> instruction in the diagram abo
 @Parse A Conditional Loop@ +=
 append(new Definition(loopTop, false, false));
 Label endWhile = parseIf(get(statement, 0), get(statement, 1), null);
-append(new Jump(loopTop, null)); 
+append(new Jump(loopTop, null, BACKWARDS)); 
 append(new Definition(endWhile, false, false));
 ~~~~
 
@@ -1784,227 +1821,8 @@ static final Register[] ASSIGNABLE = {
 We'll use the Java [SWIG bindings](http://www.xypron.de/projects/linopt/apidocs/index.html) for the [GLPK](???) to actually solve the linear programming problem. A linear programming problem basically asks for a value for each of a set of variables to minimise (or maximise) a particular function (the "objective function"), subject to a series of constraints on the values of these variables. For our problem of variable assignment, most of the variables are going to be of the form "is variable _x_ in register _y_ at this point?". We need a clear yes-or-no answer, so we need to constrain the values that the linear programming variable can to *integers* between 0 and 1 (inclusive), which we'll interpret as a yes or no accordingly. The requirement that the value is an integer means our problem is actually an [integer programming](http://en.wikipedia.org/wiki/Integer_programming) problem.
 
 ~~~~
-@Other Helpers@ +=
-static glp_prob getLPproblem(ControlFlowGraph controlFlow) {
-  glp_prob allocation = glp_create_prob();
-  @Determine Rows And Columns@
-  @Set Up Objective@
-  @Finalise Problem@
-  return allocation;
-}
-~~~~
-
-### The Node Graph ###
-
-However, we need a lot more information about how data in our <tt>Variable</tt>s flows through the <tt>Instruction</tt>s of our function, which we'll store in an instance of <tt>ControlFlowGraph</tt>. The <tt>Instruction</tt>s we've generated are usually executed sequentially, however the various <tt>Jump</tt> <tt>Instruction</tt>s can (if they have <tt>Condition</tt>s) or will (if they don't) make the next instruction the CPU executes be the one at the <tt>Label</tt> that the <tt>Jump</tt> points to. We'll make each <tt>Instruction</tt> expose this information using two methods; <tt>isNextInstructionReachable</tt> will return true if the CPU could execute the <tt>Instruction</tt> directly after this one - so only unconditional <tt>Jump</tt> and <tt>ret</tt> <tt>Instruction</tt>s will return false.
-
-~~~~
-@Instruction Members@ +=
-boolean isNextInstructionReachable() { return true; }
-@Return Members@ +=
-boolean isNextInstructionReachable() { return false; }
-@Jump Members@ += 
-boolean isNextInstructionReachable() { return cond != null; }
-~~~~
-
-The other method is <tt>couldJumpTo</tt>, which returns the <tt>Label</tt> marking the <tt>Instruction</tt> that the CPU could execute next, if the CPU doesn't just execute the <tt>Instruction</tt> following the current one. This will be null for most <tt>Instruction</tt>s (i.e. control flow won't jump to a different <tt>Instruction</tt>).
-
-~~~~
-@Instruction Members@ +=
-Label couldJumpTo() { return null; }
-@Jump Members@ += 
-Label couldJumpTo() { return to; }
-~~~~
-
-
-We'll use these two method to building up a [directed graph](http://en.wikipedia.org/wiki/Directed_graph). The <tt>Instruction</tt>s are the nodes in this graph, and they hold the state just before they are executed. The links between the <tt>Instruction</tt>s are created based on the what <tt>couldJumpTo</tt> and <tt>isNextInstructionReachable</tt> return:
-
-<pre>
-             ...
-              |
-+-------------+
-|             |
-|           +--+
-|           |a:|
-|           +--+
-|             |
-|           +----------+
-|           |add 0x1, b|
-|           +----------+
-|             |
-|           +----------+
-|           |cmp 0x3, b|
-|           +----------+
-|             |
-|           +-----+
-+-----------|jne a|
-            +-----+
-              |
-            +-----------+
-            |mov b, %rax|
-            +-----------+
-              |
-             ...
-</pre>
-
-We'll use two <tt>Multimaps</tt> to store indices into the <tt>code</tt> <tt>List</tt>, as each <tt>Instruction</tt> can have more than one predecessor (e.g. a <tt>Definition</tt> that control flow jumps to) or successor (e.g. a conditional <tt>Jump</tt>). We'll use <tt>code.size()</tt> to represent the node in the graph that comes after all <tt>ret</tt> <tt>Instruction</tt>s. This makes traversing the directed graph backwards is as easy as traversing it forwards, as there's a single point of entry (a single starting node) either way. As the nodes represent the state before their <tt>Instruction</tt>. This means the graph node <tt>0</tt> is the node before the first <tt>Instruction</tt> (the <tt>Definition</tt> for the function name).
-
-~~~~
-@Control Flow Graph Members@ +=
-Multimap<Integer, Integer> 
-  next = TreeMultimap.create(),
-  previous = TreeMultimap.create(); 
-~~~~
-
-Now we can iterate through the function's <tt>List</tt> of <tt>Instruction</tt>s, where at each <tt>Instruction</tt> at least one of three properties will hold: 
-
-~~~~
-@Fit Instructions Between Nodes@ +=
-for(int i = 0; i < code.size(); ++i ) {
-  Instruction instr = code.get(i);
-  if(instr.isNextInstructionReachable()) {
-    @Choose Next Node@
-  }
-  if(instr.couldJumpTo() != null) {
-    @Jump To Node@
-  }
-  if(next.get(i).isEmpty()) {
-    @Choose Last Node@
-  }
-}
-~~~~
-
-The first property, is that control flow could reach the next <tt>Instruction</tt>. If this is the case, we can easily chain the two <tt>Instruction</tt>s together as we know the graph node - the index of the <tt>code</tt> <tt>List</tt> - for the next <tt>Instruction</tt> is just one greater than this <tt>Instruction</tt>'s index.
-
-~~~~
-@Choose Next Node@ +=
-previous.put(i+1, i);
-next.put(i, i+1);
-~~~~
-
-The second property holds if control flow can jump to another <tt>Label</tt>. We'll find the <tt>Instruction</tt> where that <tt>Label</tt> is defined using a rather inefficient linear search of the <tt>code</tt> <tt>List</tt>, and we'll chain the graph nodes together as before:
-
-~~~~
-@Jump To Node@ +=
-int jumpTo = code.indexOf(new Definition(instr.couldJumpTo(), false, false));
-previous.put(jumpTo, i);
-next.put(i, jumpTo);
-~~~~
-
-If control flow can't reach an <tt>Instruction</tt> after the current one, and the current instruction doesn't jump to another node then the last property must hold and the <tt>Instruction</tt> must be a <tt>ret</tt>. We'll indicate that this <tt>Instruction</tt> is one exit from the function by chaining it to the <tt>code.size()</tt> graph node (which can't ever be used as the graph node of another <tt>Instruction</tt> as no <tt>Instruction</tt>s in the <tt>code</tt> <tt>List</tt> have this for an index).
-
-~~~~
-@Choose Last Node@ +=
-previous.put(code.size(), i);
-next.put(i, code.size());
-~~~~
-
-We now have a O(lg n) lookups (as we're using a binary-tree based <tt>Multimap</tt> implementation) for the nodes before and after an <tt>Instruction</tt>.
-
-### Overview ###
-
-We'll spend the new part of this section mapping out how control and data flows through this function's <tt>code</tt>. We'll use this information to strip out any 'dead' (unreachable) code, and iterate until all code is reachable. At runtime we may not actually execute every <tt>Instruction</tt> if control flow is driven by the function's parameters.
-
-~~~~
-@Other Helpers@ +=
-static final class ControlFlowGraph {
-  @Control Flow Graph Members@
-  ControlFlowGraph(List<Instruction> code, StorableValue framePointer) {
-    do {
-      @Fit Instructions Between Nodes@
-      @Join Nodes Together@
-      @Map Nodes To Instructions@
-      @Strip Out Dead Code@
-    } while(!instructionsFollowingNode.get(UNASSIGNED).isEmpty());
-    @Store Code@
-    @Store Frame Pointer@
-    @Variables Used At Next Instruction@
-    @Identify Function Calls@
-    @Calculate Liveness@
-    @Find Registers Already In Use@
-    @Generate GLPK Mappings@
-  }
-}
-~~~~ 
-
-We cna then build a Integer Programming problem out of the <tt>ControlFlowGraph</tt>, and give it to GLPK to solve.
-
-~~~~
-@Do Register Allocation@ +=
-ControlFlowGraph controlFlow = new ControlFlowGraph(state.code, state.framePointer);
-if(controlFlow.numVariables > 0) { @Solve@ }
-~~~~
-
-We'll finish by using the solution of the Integer Programming problem to replace the <tt>Variable</tt> left in our <tt>code</tt> <tt>List</tt> with <tt>Register</tt>s.
-
-~~~~
-@Other Helpers@ +=
-static void copySolutionIntoCode(glp_prob allocation, ControlFlowGraph controlFlow, ParsingState state) {
-  @Copy Solution Into Code@
-  @Calculate Stack Moves Needed@
-  @Insert Stack Moves@
-}
-~~~~
-
-### Dead Code Elimination ###
-
-We'll use a queue-based algorithm for deciding which nodes are dead. We'll seed the queue with nodes we know are dead, the we'll repeatedly examine the head of the queue, adding new <tt>Instruction</tt>s to the queue of nodes to examine until we've processed all that we can. If we've flagged any <tt>code</tt> indices as dead in the <tt>BitSet</tt> we'll remove the corresponding <tt>Instruction</tt>s from the <tt>code</tt> <tt>List</tt>.
-
-~~~~
-@Strip Out Dead Code@ +=
-BitSet 
-  dead = new BitSet(code.size()), 
-  unneeded = new BitSet(code.size());
-Queue<Integer> maybeDead = Queues.newArrayDeque();
-@Seed Dead Instructions@
-while (!maybeDead.isEmpty()) {
-  int i = maybeDead.poll();
-  @Are Next Instructions Dead@
-}
-@Remove Dead Code@
-~~~~
-
-Clearly if an <tt>Instruction</tt>'s index doesn't appear as a value in the <tt>next</tt> <tt>Multimap</tt> (and so in the keys of the <tt>previous</tt> <tt>Multimap</tt>) then control flow can't get to it. We'll do a linear scan of all the <tt>Instruction</tt>s (except the one at index <tt>0</tt>; as it's the entry point to the function it must have no predecessors), adding them to the <tt>Queue</tt> of graph nodes to examine if they don't appear as keys of the <tt>previous</tt> <tt>Multimap</tt>.
-
-~~~~
-@Seed Dead Instructions@ +=
-for(int i = 1; i < code.size(); ++i) {
-  if(!previous.keySet().contains(i))
-    maybeDead.add(i);
-~~~~
-
-We can skip any <tt>Instruction</tt>s we've already flagged as dead, and we can flag any <tt>Instruction</tt> that is only reachable from dead <tt>Instruction</tt>s. If we've found a dead <tt>Instruction</tt> we'll add all its sucessors to the <tt>Queue</tt> of <tt>Instruction</tt>s to process (so we many end up processing a non-dead <tt>Instruction</tt> several times). However, since we're skipping already dead <tt>Instruction</tt>s, and as we only add successors of dead <tt>Instruction</tt>s the algorithm is guaranteed to terminate in <tt>O(code.size())</tt> iterations, even if the function itself doesn't.
-
-~~~~
-@Are Next Instructions Dead@ +=
-if (dead.get(i))
-  continue;
-boolean isDead = true;
-for (int p : previous.get(i))
-  isDead &= dead.get(p);
-if (isDead) {
-  dead.set(i);
-  maybeDead.addAll(next.get(i));
-  @Found Dead Instruction@
-}
-~~~~
-
-In the first section of the article we created a new unique <tt>Label</tt> for each <tt>Jump</tt> <tt>Instruction</tt>, so if we remove the <tt>Jump</tt>, we can safely remove the <tt>Definition</tt> of its target too. However, we don't want to flag it as dead as we could then incorrectly mark its successors as dead, so we'll use the separate <tt>unneeded</tt> <tt>BitSet</tt> to flag it.
-
-~~~~
-@Found Dead Instruction@ +=
-Instruction inst = code.get(i); 
-if (inst instanceof Jump)
-  unneeded.set(code.indexOf(new Definition(((Jump) inst).to, false, false)));
-~~~~
-
-We'll iterate over the dead <tt>Instruction</tt>s we've identified in the <tt>BitSet</tt> and remove them from the <tt>code</tt> <tt>List</tt>. We'll iterate over the <tt>BitSet</tt> in reverse so we don't modify the indices of <tt>Instruction</tt>s we haven't processed yet. It's also safe to merge the <tt>unneeded</tt> <tt>BitSet</tt> into the <tt>dead</tt> one as we've finished iterating over the <tt>code</tt>.
-
-~~~~
-@Remove Dead Code@ +=
-dead.or(unneeded);
-for (int i = dead.previousSetBit(code.size()); i >= 0; i = dead.previousSetBit(i - 1))
-  code.remove(i);
+@Parsing State Members@ +=
+glp_prob allocation = glp_create_prob();
 ~~~~
 
 ### Variable Reads and Writes ###
@@ -2072,71 +1890,36 @@ Set<Value> readsFrom() {
 
 ### Liveness ###
 
-We'll use <tt>BitSet</tt>s to store liveness information as we just need a per-variable-per-instruction flag. This means we need a way to map <tt>Variable</tt>s to a distinct integer between <tt>0</tt> and one less than the number of distinct <tt>Variable</tt>s the function uses.
+We'll use a <tt>BitSet</tt>s at each <tt>Instruction</tt> to store the ids of <tt>Variable</tt>s that are live at that <tt>Instruction</tt>. Because of the way we choose the <tt>id</tt>s of <tt>Variable</tt>s we know that they'll be integers between zero (inclusive) and the number of <tt>Variable</tt>s in the function (exclusive). This means a <tt>BitSet</tt> is the most dense way of storing liveness (you can think of it as a <tt>Variable</tt> being in a member of the set of live <tt>Variable</tt>s at that <tt>Instruction</tt>).
 
-We'll use a <tt>Variable</tt>'s index into the <tt>variables</tt> array, <tt>v</tt> and an <tt>Instruction</tt>'s into the <tt>code</tt> array, <tt>i</tt> to determine which index in the liveness <tt>BitSet</tt> to use. We'll use <tt>i * numVariables + v</tt> rather than <tt>v * code.size() + i</tt> as we're likely to process liveness instruction-by-instruction, so it's better for cache locality to have all the <tt>Variable</tt>'s liveness flags for a given <tt>Instruction</tt> together.
-
-~~~~
-@Control Flow Graph Members@ +=
-final BitSet isLive;
-boolean isLiveAt(Variable v, int i) {
-  return isLive.get(i * numVariables + v.id);
-}
-~~~~
-
-We'll also store the frame pointer (if the function has one):
+We'll define "liveness" such that if the current <tt>Instruction</tt> reads a <tt>Variable</tt> then that <tt>Variable</tt> is "live" at that <tt>Instruction</tt>; if the current <tt>Instruction</tt> writes to (and doesn't read) a <tt>Variable</tt> then the <tt>Variable</tt> is no longer "live", and otherwise the <tt>Variable</tt> is live if it is live in any of the <tt>Instruction</tt>s following the one we're considering. 
 
 ~~~~
-@Control Flow Graph Members@ +=
-final Variable framePointer;
-@Store Frame Pointer@ +=
-this.framePointer = framePointer;
+@Instruction Members@ +=
+final BitSet isLive = new BitSet();
 ~~~~
 
-Much like the algorithm to remove dead code, we'll keep iterating over the code array until we reach a steady state - so the helpers below all return a <tt>boolean</tt> indicating whether they've changed anything in the <tt>BitSet</tt>s they're given. The <tt>copyFrom</tt> helper copies the set bits in the <tt>num</tt> bits after <tt>indexFrom</tt> to the <tt>num</tt> bits after <tt>indexTo</tt>. We'll use this method to propagate liveness information from one <tt>Instruction</tt> to another, as variables that are live and aren't touched by the current <tt>Instruction</tt> stay live, and the variables that are dead similarly stay dead. 
-
 ~~~~
-@Other Helpers@ +=
-static boolean setAndGet(BitSet set, int index) {
-  boolean ret = set.get(index); set.set(index); return ret;
-}
-static boolean copyFrom(BitSet set, int indexFrom, int indexTo, int num) {
-  boolean ret = false;
-  for(
-    int index = set.nextSetBit(indexFrom);
-    index >= 0 && index < indexFrom + num;
-    index = set.nextSetBit(index + 1)
-  ) 
-    ret |= setAndGet(set, index + indexTo - indexFrom);
-  return ret;
-}
-~~~~
-
-We'll process the <tt>Instruction</tt>s in reverse. If the current <tt>Instruction</tt> reads a <tt>Variable</tt> then we set the liveness flag; if the current <tt>Instruction</tt> writes to (and doesn't read) a <tt>Variable</tt> then we clear the liveness flag, otherwise we set the liveness flag if it is set in any of the <tt>Instruction</tt>s following the one we're considering. Processing the control flow graph in reverse helps avoid two problems: (1) any <tt>Variable</tt> that is written to but never reads is never marked as live (if we were processing the <tt>Instruction</tt>s in the normal order, if we saw a write we wouldn't be able to tell if that <tt>Variable</tt> gets written to later) and (2) the two-writes-without-an-intervening-read problem discussed above is handled correctly - the first write we process (the second in the normal order) kills the <tt>Variable</tt>, so it correctly remains dead between that write and the next (the first in the normal order).
-
-We'll also keep track of which <tt>Instruction</tt>s we've processed in the <tt>seen</tt> <tt>BitSet</tt>, as we want to process each <tt>Instruction</tt> at least once. If we just relied on the <tt>changed</tt> flag the algorithm would terminate prematurely if no <tt>Variable</tt>s were live for two consecutive <tt>Instruction</tt>s. We don't need to update the changed flag when the current <tt>Instruction</tt> reads a <tt>Variable</tt> as we'll only do this the first time we process that <tt>Instruction</tt>, and in this case the <tt>Instruction</tt> won't be <tt>seen</tt> so we'll always process all its predecessors. The changed flag is mainly for loops in the code; if a <tt>Variable</tt> is live at any <tt>Instruction</tt> in the loop body and isn't killed in the loop body or the loop test then it'll be live for every <tt>Instruction</tt> in the loop body - even those after it.
-
-~~~~
-@Calculate Liveness@ +=
-Queue<Integer> unprocessed = Queues.newArrayDeque();
-unprocessed.add(code.size());
-BitSet seen = new BitSet(code.size());
-for(Integer i = unprocessed.poll(); i != null; i = unprocessed.poll()) {
-  boolean changed = false;
-  for(int nextI : next.get(i))
-      changed |= copyFrom(isLive, nextI * numVariables, i * numVariables, numVariables);
-  for(int v = 0; v < numVariables; ++v) {
-    boolean isWritten = code.get(i).writesTo(WILL_ERASE).contains(v);
-    boolean isRead = code.get(i).readsFrom().contains(v);
-    if(isWritten && !isRead)
-      isLive.clear(index);
-    else if(isRead)
-      isLive.set(i * numVariables + v)
+@Static Classes@ +=
+static class KillVariables implements InstructionVisitor {
+  final Set<Value> changed;
+  KillVariables(Set<Value> changed) {
+    this.changed = changed;
   }
-  if(!seen.get(i) || changed)
-    unprocessed.addAll(previous.get(i));
-  seen.set(i);
+  public boolean visit(Instruction i) {
+    Set<Value> erased = Sets.difference(
+      i.writesTo(WILL_ERASE), 
+      i.readsFrom());
+    Iterable<Variable> propagated = Iterables.filter(
+      Sets.difference(erased, changed),
+      Variable.class);
+    for(Variable v : propagated)
+      i.isLive.set(v.id);
+    return !Iterables.isEmpty(propagated);
+  }
 }
+@Update Parsing State@ +=
+visit(new KillVariables(readsFrom()), BACKWARDS);
 ~~~~
 
 ### Registers In Use ###
@@ -2999,12 +2782,14 @@ static final class Segment extends Instruction {
 
 The <tt>.data</tt> and <tt>[.bss](http://en.wikipedia.org/wiki/.bss)</tt> segments of the Assembly code we output have read and write, but not execute, permissions. We'll store our exported and unexported variables here, although we'll make no attempt to group the variables in each segment either by whether or not they're exported or by the patterns of read and write accesses to them. As space for the values stored in the <tt>.bss</tt> segment isn't allocated in the binary file the assembler creates, when the loader copies the binary file into memory it "inflates" the binary file, allocating zero-initialised memory for each variable in the <tt>.bss</tt> segment. Values in the <tt>.data</tt> segment are stored in the binary file, so the loader just copies these verbatim into memory. This means we'll divide the <tt>Label</tt>s in the <tt>global</tt> map between the <tt>.bss</tt> and <tt>.data</tt> sections depending on whether the initial value of the symbol (the <tt>Immediate</tt> in the map) is zero.
 
+We'll store the bss & data <tt>Instruction</tt>s in local variables; <tt>data</tt> and <tt>bss</tt> contain the head of each segment's intrinsic linked list and <tt>dataTail</tt> and <tt>bssTail</tt> store the current ends of the lists.
+
 ~~~~
 @Populate Bss And Data Sections@ +=
 Instruction
   bss = new Segment("bss"),
   data = new Segment("data");
-Instruction bssHead = bss, dataHead = data;
+Instruction bssTail = bss, dataTail = data;
 for(Entry<Label, Immediate> global : program.globals.entrySet()) {
   Definition def = new Definition(
     global.getKey(), 
@@ -3012,9 +2797,9 @@ for(Entry<Label, Immediate> global : program.globals.entrySet()) {
     false);
   DefineLong value = new DefineLong(global.getValue());
   if(value.initialValue == 0)
-    bss = bss.append(def).append(value);
+    bssTail = bssTail.append(def, null).append(value, null);
   else
-    data = data.append(def).append(value);
+    dataTail = dataTail.append(def, null).append(value, null);
 }
 ~~~~
 
@@ -3112,12 +2897,12 @@ We can now use this method to write out all three segments. The <tt>.text</tt> s
 @Append Instructions@ +=
 InstructionVisitor printer = new Printer(asmOut);
 if(bss.next != null)
-  bss.visit(printer);
+  bss.visit(printer, FORWARDS);
 if(data.next != null)
-  data.visit(printer);
-new Segment("text").visit(printer);
+  data.visit(printer, FORWARDS);
+asmOut.append(new Segment("text").toString());
 for(ParsingState function : program.text)
-  function.head.visit(printer);
+  function.head.visit(printer, FORWARDS);
 ~~~~
 
 ## Appendices ##
@@ -3129,6 +2914,7 @@ The appendices contain a few pieces of miscellaneous boilerplate. We'll start wi
 import static com.blogspot.remisthoughts.compiletoasm.UnsignedLexer.*;
 import static com.blogspot.remisthoughts.compiletoasm.Compiler.Register.*;
 import static com.blogspot.remisthoughts.compiletoasm.Compiler.WriteType.*;
+import static com.blogspot.remisthoughts.compiletoasm.Compiler.Direction.*;
 import static com.google.common.collect.Iterables.*;
 import static org.gnu.glpk.GLPK.*;
 import java.io.*;
@@ -3205,9 +2991,6 @@ Some array helpers (we do a lot of linear searching, but not enough to warrant s
 @Other Helpers@ +=
 static <T> int indexOf(T[] ts, T t) {
   return Arrays.asList(ts).indexOf(t);
-}
-static <T> void addAll(Collection<T> ts, T... toAdd) {
-  ts.addAll(Arrays.asList(toAdd));
 }
 ~~~~
 
