@@ -606,20 +606,36 @@ current = head = new Definition(
 
 We'll assign a unique number to each <tt>Variable</tt>. This way we can keep track of how many distinct <tt>Variable</tt>s we've got, and it'll be useful later for generating array indices for a <tt>Variable</tt>. We'll turn the <tt>ParsingState</tt> into a factory, and use the convention that passing <tt>null</tt> as the parameter returns a new unique <tt>Variable</tt>.
 
-If the AST node is a <tt>Variable</tt> it could be a reference to a local variable defined in this function or a reference to one of the parameters (as they are AST nodes of type <tt>Variable</tt> too). We've seen that one of the <tt>ParsingState</tt>'s fields is a <tt>Map</tt> of <tt>Variable</tt> names to <tt>Value</tt>s that access those parameters (but not how that map's built up yet). We'll look up our new <tt>Variable</tt> in this map to see if it's actually a reference to one of the function parameter - and if so we'll return the <tt>StorableValue</tt> that accesses it instead.
-
 ~~~~
 @Parsing State Members@ +=
 Map<String, Variable> variables = Maps.newTreeMap();
 int numVariables = 0;
-Variable variable(String name) {
+StoreableValue variable(String name) {
   if(name == null) return new Variable(numVariables++); // anonymous
-  if(params.containsKey(name)) return params.get(name);
+  @Is This A Register Name@
+  @Is This A Parameter@
   Variable ret = variables.get(name);
   if(ret == null)
     variables.put(name, ret = new Variable(numVariables++));
   return ret;
 }
+~~~~
+
+If the AST node is a <tt>Variable</tt> it could be a reference to a local variable defined in this function or a reference to one of the parameters (as they are AST nodes of type <tt>Variable</tt> too). We've seen that one of the <tt>ParsingState</tt>'s fields is a <tt>Map</tt> of <tt>Variable</tt> names to <tt>Value</tt>s that access those parameters (but not how that map's built up yet). We'll look up our new <tt>Variable</tt> in this map to see if it's actually a reference to one of the function parameter - and if so we'll return the <tt>StorableValue</tt> that accesses it instead.
+
+~~~~
+@Is This A Parameter@ +=
+if(params.containsKey(name))
+  return params.get(name);
+~~~~
+
+We'll take this opportunity to give the programming language more control over register access: if a <tt>Variable</tt> has the name of a <tt>Register</tt>, we'll treat that as a direct access of that register. While you could use this feature as a way of overriding the register allocation algorithm in the second section, this feature is intended to provide a way of inspecting the contents of 'special' registers like the stack pointer (<tt>rsp</tt>) or the instruction pointer (<tt>rip</tt>):
+
+~~~~
+@Is This A Register Name@ +=
+Optional<Register> reg = Enums.getIfPresent(Register.class, name);
+if(reg.isPresent())
+  return ret.get();
 ~~~~
 
 What we do for each statement depends on the statement's type, so we'll switch on that:
@@ -1890,36 +1906,58 @@ Set<Value> readsFrom() {
 
 ### Liveness ###
 
-We'll use a <tt>BitSet</tt>s at each <tt>Instruction</tt> to store the ids of <tt>Variable</tt>s that are live at that <tt>Instruction</tt>. Because of the way we choose the <tt>id</tt>s of <tt>Variable</tt>s we know that they'll be integers between zero (inclusive) and the number of <tt>Variable</tt>s in the function (exclusive). This means a <tt>BitSet</tt> is the most dense way of storing liveness (you can think of it as a <tt>Variable</tt> being in a member of the set of live <tt>Variable</tt>s at that <tt>Instruction</tt>).
-
-We'll define "liveness" such that if the current <tt>Instruction</tt> reads a <tt>Variable</tt> then that <tt>Variable</tt> is "live" at that <tt>Instruction</tt>; if the current <tt>Instruction</tt> writes to (and doesn't read) a <tt>Variable</tt> then the <tt>Variable</tt> is no longer "live", and otherwise the <tt>Variable</tt> is live if it is live in any of the <tt>Instruction</tt>s following the one we're considering. 
+We'll use a <tt>OpenBitSet</tt>s ([lucene's](???) bitset implementation) at each <tt>Instruction</tt> to store the ids of <tt>Variable</tt>s that are live at that <tt>Instruction</tt>. Because of the way we choose the <tt>id</tt>s of <tt>Variable</tt>s we know that they'll be integers between zero (inclusive) and the number of <tt>Variable</tt>s in the function (exclusive). This means an <tt>OpenBitSet</tt> is a very dense way of storing liveness as it only needs one bit per <tt>Variable</tt> in the function (you can think of it as a <tt>Variable</tt> being in a member of the set of live <tt>Variable</tt>s at that <tt>Instruction</tt>), even if it isn't sparse.
 
 ~~~~
 @Instruction Members@ +=
-final BitSet isLive = new BitSet();
+final OpenBitSet isLive;
 ~~~~
+
+Like most collection implementations, we should try and tell the <tt>isLive</tt> <tt>OpenBitSet</tt> the most number of elements (<tt>Variable</tt> ids in this case) we're ever going to put in it so we don't have to resize it repeatedly as we put more and more elements in it. The <tt>ParsingState</tt> already keeps track of the number of <tt>Variable</tt>s it's seen, and clearly there can't be more live <tt>Variable</tt>s than the total number of <tt>Variable</tt>s, so we'll use this counter to initialize the <tt>OpenBitSet</tt> in <tt>append</tt>. This has another useful side-effect: when we <tt>append</tt> an <tt>Instruction</tt> we'll clear out any previous liveness information, which keeps the possibility of re-using or moving <tt>Instruction</tt>s open.
+
+~~~~
+@Update Parsing State@ +=
+isLive = new OpenBitSet(state.numVariables);
+~~~~
+
+We'll define "liveness" such that if the current <tt>Instruction</tt> reads a <tt>Variable</tt> then that <tt>Variable</tt> is "live" at that <tt>Instruction</tt>; if the current <tt>Instruction</tt> writes to (and doesn't read) a <tt>Variable</tt> then the <tt>Variable</tt> is no longer "live" (i.e. has been "killed"), and otherwise the <tt>Variable</tt> is live if it is live in any of the <tt>Instruction</tt>s following the one we're considering.
+
+~~~~
+@Calculate Variables Killed@ +=
+Set<Value> killed = Sets.difference(
+  i.writesTo(WILL_ERASE), 
+  i.readsFrom());
+~~~~
+
+Liveness will be only be computed once, in the <tt>append</tt> method. The <tt>InstructionVisitor</tt> mechanism gives us a way of minimalising the work we have to do each <tt>append</tt>; if the newly-appended <tt>Instruction</tt> makes a <tt>Variable</tt> live, we'll iterate backwards through every code path from the new <tt>Instruction</tt>, marking that <tt>Variable</tt> as live, until we get to an <tt>Instruction</tt> that kills it (i.e. it writes to that <tt>Variable</tt> but doesn't read it).
 
 ~~~~
 @Static Classes@ +=
 static class KillVariables implements InstructionVisitor {
-  final Set<Value> changed;
-  KillVariables(Set<Value> changed) {
-    this.changed = changed;
+  final Set<Value> nowLive;
+  KillVariables(Set<Value> nowLive) {
+    this.nowLive = nowLive;
   }
   public boolean visit(Instruction i) {
-    Set<Value> erased = Sets.difference(
-      i.writesTo(WILL_ERASE), 
-      i.readsFrom());
-    Iterable<Variable> propagated = Iterables.filter(
-      Sets.difference(erased, changed),
-      Variable.class);
-    for(Variable v : propagated)
-      i.isLive.set(v.id);
-    return !Iterables.isEmpty(propagated);
+    boolean anyPropagated = false;
+    @Calculate Variables Killed@
+    @Calculate Variables Propagated@
+    return anyPropagated;
   }
 }
 @Update Parsing State@ +=
 visit(new KillVariables(readsFrom()), BACKWARDS);
+~~~~
+
+We only want to iterate once regardless of how many <tt>Variable</tt>s the new <tt>Instruction</tt> makes live, so the <tt>InstructionVisitor</tt> will keep a <tt>Set</tt> of alll the newly-live <tt>Variable</tt>s, and will only stop iterating when all of them have been marked as dead along all code paths back from the new <tt>Instruction</tt>. We also don't want to keep iterating when all we're doing is marking <tt>Variable</tt>s live that are already marked as live, so we'll also stop at a particular <tt>Instruction</tt> if all of the <tt>nowLive</tt> <tt>Variable</tt>s we're propagated are all live.
+
+~~~~
+@Calculate Variables Propagated@ +=
+Iterable<Variable> propagated = Iterables.filter(
+  Sets.difference(killed, nowLive),
+  Variable.class);
+for(Variable v : propagated)
+  anyPropagated |= !i.isLive.getAndSet(v.id);
 ~~~~
 
 ### Registers In Use ###
@@ -2924,6 +2962,7 @@ import java.util.concurrent.atomic.*;
 import org.antlr.runtime.ANTLRInputStream;
 import org.antlr.runtime.CommonTokenStream;
 import org.antlr.runtime.tree.*;
+import org.apache.lucene.util.OpenBitSet;
 import com.google.common.base.*;
 import com.google.common.io.*;
 import com.google.common.collect.*;
