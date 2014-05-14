@@ -183,16 +183,23 @@ for(Tree child : children(ast)) {
 We'll use subclasses of an <tt>Instruction</tt> class to represent the subset of Assembly instructions the compiler will generate. The (flat) inheritance hierarchyis shown below (via [asciiflow](http://www.asciiflow.com/#)):
 
 <pre>
-                                 +-----------+
-                                 |Instruction|
-                                 +-----+-----+
-                                       |
-     +---------+---------+---------+---+--+-----+------+------+------+--------+
-     |         |         |         |      |     |      |      |      |        |
-     |         |         |         |      |     |      |      |      |        |
- +---v----+ +--v-+ +-----v----+ +--v-+ +--v-+ +-v-+ +--v-+ +--v-+ +--v--+ +---v--+
- |BinaryOp| |Call| |Definition| |Jump| |Move| |Pop| |Push| |Swap| |align| |Return|
- +--------+ +----+ +----------+ +----+ +----+ +---+ +----+ +----+ +-----+ +------+
+                   +-----------+
+                   |Instruction|
+                   +-----+-----+
+                         |
+     +---------+---------+---------+------+----+
+     |         |         |         |      |    |
+     |         |         |         |      |    |
+ +---v----+ +--v-+ +-----v----+ +--v-+ +--v-+  |
+ |BinaryOp| |Call| |Definition| |Jump| |Move|  |
+ +--------+ +----+ +----------+ +----+ +----+  |
+                                               |
+   +------+------+------+------+------+--------+
+   |      |      |      |      |      |
+   |      |      |      |      |      |
+ +-v-+ +--v-+ +--v-+ +--v--+ +-v-+ +--v-+
+ |Pop| |Push| |Swap| |align| |Ret| |Head|
+ +---+ +----+ +----+ +-----+ +---+ +----+
 </pre>
 
 We'll leave <tt>Instruction</tt>'s definition mostly empty for now - we'll introduce its members when we need them.
@@ -346,18 +353,34 @@ static final class Label implements StorableValue, Comparable<Label> {
 }
 ~~~~
 
-We'll add an <tt>Instruction</tt> that defines a label; the <tt>isExported</tt> flag is true if this symbol should be marked as exported in the GOT. As labels have to be unique (i.e. only appear once in a file) the equality test doesn't check the <tt>isExported</tt> flag. Not all <tt>Label</tt> options represent the start of functions; if- and while-statements use labels to define control flow. We'll use the <tt>isFunction</tt> flag to differentiate these two cases so we can embed debugging information in the generated Assembly code (see section three). 
+We'll add an <tt>Instruction</tt> that defines a label. We'll use two different subclasses of <tt>Instruction</tt> to represent the two ways our generated assembly code uses label definitions. The first, <tt>Definition</tt>, is just for control flow within the function. This will never be visible from outside the function, so we don't need to worry about the visibility of the symbol it's defining. 
+
+http://www.keil.com/support/man/docs/armasm/armasm_caccjfff.htm
+http://tigcc.ticalc.org/doc/gnuasm.html#SEC48L
 
 ~~~~
 @Static Classes@ +=
-static final class Definition extends Instruction {
-  final Label label; final boolean isExported; boolean isFunction;
-  Definition(Label label, boolean isExported, boolean isFunction) { 
-    this.label = label; this.isExported = isExported; 
-    this.isFunction = isFunction;
+static class Definition extends Instruction {
+  final Label label;
+  Definition(Label label) { 
+    this.label = label;
   }
   public String toString() { @Definition x86 Code@ }
   @Definition Members@
+}
+~~~~~
+
+The second <tt>Instruction</tt> class we'll use to represent the definition of a <tt>Label</tt>, <tt>Head</tt>, only occurs as the first <tt>Instruction</tt> of the function. This <tt>Instruction</tt> defines the <tt>Label</tt> with the function's name, and the location of this <tt>Label</tt> will appear in the GOT so other code that links to the binary we're generating can call it. The <tt>isExported</tt> flag is true if this symbol should be marked as exported in the GOT.
+
+~~~~
+@Static Classes@ +=
+static final class Head extends Instruction {
+  final boolean isExported; final Label label;
+  Head(Label label, boolean isExported) { 
+    this.label = label; this.isExported = isExported;
+  }
+  public String toString() { @Head x86 Code@ }
+  @Head Members@
 }
 ~~~~
 
@@ -436,9 +459,7 @@ Instruction append(Instruction i, ParsingState state) {
   }
   next = i;
   i.prev = this;
-  if(state != null) {
-    @Update Parsing State@
-  }
+  @Update Parsing State@
   return i;
 }
 ~~~~
@@ -449,7 +470,7 @@ We'll keep references to the first <tt>Instruction</tt> as a member of the <tt>P
 
 ~~~~
 @Parsing State Members@ +=
-final Definition head;
+final Instruction head;
 ~~~~
 
 The <tt>Ret</tt> <tt>Instruction</tt> (an x86 <tt>ret</tt>) is a good example of non-standard <tt>Instruction</tt> linking. We'll give ourselves dead-code elimination for free by simply not appending any <tt>Instruction</tt>s to a <tt>Ret</tt>. <tt>Ret</tt>'s <tt>append</tt> returns the <tt>Ret</tt>  itself, indicating it's still the end of the linked list. We'll also clear the appended <tt>Instruction</tt>'s <tt>prev</tt> pointer to keep its state consistent, as the <tt>Ret</tt>'s <tt>next</tt> pointer will never be set to a non-null value.
@@ -460,6 +481,7 @@ static final class Ret extends Instruction {
   @Ret Members@
   public String toString() { return @Ret x86 Code@; }
   Instruction append(Instruction i, ParsingState state) {
+    @Ignoring Appended@
     i.prev = null;
     return this;
   }
@@ -482,6 +504,21 @@ Instruction delete() {
   return oldPrev;
 }
 ~~~~
+
+We should also define here the exact semantics of <tt>append</tt>, and in particular when it should be called. When we're generating <tt>Instruction</tt>s that follow linear control flow (i.e. don't have jumps) then we know <tt>append</tt> will be called exactly once on each new <tt>Instruction</tt>, even if this call doesn't actually wire up the new <tt>Instruction</tt> (e.g. the implementation in <tt>Ret</tt>). To keep the code simple, for non-linear control flow (e.g. when <tt>append</tt>ing a <tt>Definition</tt> that can be jumped to or reached directly from the previous <tt>Instruction</tt>) we'll enforce the condition that <tt>append</tt> will *still only be called once* on the <tt>Instruction</tt> being appended, regardless of the number of ways control flow can reach that <tt>Instruction</tt>. A corollery of this is that wiring up jump <tt>Instruction</tt>s to their corresponding <tt>Definition</tt> <tt>Instruction</tt>s must occur via some other mechanism, which we'll cover later.
+
+Another clarification we should make should be what initialization work we do in an <tt>Instruction</tt>'s constructor and what initialization work we do elsewhere. This question is very relevant for [incremental compilers](https://en.wikipedia.org/wiki/Incremental_compiler); compilers that modify their outputs as the source code they're given is modified. While this article doesn't cover building an incremental compiler, we want to make that an easy extension to implement. In particular, as parts of the source code get added, deleted or moved the corresponding parts of the Antlr-generated AST should be updated, which would then add, remove and (importantly) move sequences of <tt>Instruction</tt>s in the linked list. Adding and deleting are covered by the <tt>append</tt> and <tt>delete</tt> methods detailed above, but some forward planning is needed if we're to support detaching a chain of <tt>Instruction</tt>s and <tt>append</tt>ing it elsewhere (much more efficient than deleting the chain and creating a new one just like it elsewhere). This requirement means we should push as much of the semantic analysis of the code into <tt>append</tt> as possible, which in turn means we should provide a hook in <tt>append</tt> that we can use to reset any of the <tt>Instruction</tt>'s internal state relating to the analysis:
+
+~~~~
+@Instruction Members@ +=
+void reset(ParsingState state) { 
+  @Reset The Instruction@ 
+}
+@Update Parsing State@ += reset(state);
+@Ignoring Appended@ += reset(state);
+~~~~
+
+### Visiting Instructions ###
 
 As there's not an external container for <tt>Instruction</tt>s (only each <tt>Instruction</tt> knows which <tt>Instruction</tt>(s) follow it), traversing the linked list of <tt>Instruction</tt>s is best done via the [Vistor design pattern](???). We'll need to support both forward and backwards iteration, so we'll add an enum to specify the direction of traversal. Each <tt>Instruction</tt> will invoke the vistor on itself, before passing it to the <tt>Instruction</tt>s that follow or precede it as appropriate. We'll have be careful to uphold the guarantee that each <tt>Instruction</tt> is only visited exactly once, regardless of the function's control flow.
 
@@ -598,10 +635,9 @@ The first instruction we need to generate is the Assembly label that marks the s
 
 ~~~~
 @Get Function Name@ +=
-current = head = new Definition(
+current = head = new Head(
   hasChildren(def, 0) ? new Label("_" + text(def, 0, 0)) : new Label(), 
-  isMainFn() || myName.isUpperCase(),
-  true));
+  isMainFn() || myName.isUpperCase());
 ~~~~
 
 We'll assign a unique number to each <tt>Variable</tt>. This way we can keep track of how many distinct <tt>Variable</tt>s we've got, and it'll be useful later for generating array indices for a <tt>Variable</tt>. We'll turn the <tt>ParsingState</tt> into a factory, and use the convention that passing <tt>null</tt> as the parameter returns a new unique <tt>Variable</tt>.
@@ -1514,6 +1550,7 @@ Like the <tt>Ret</tt> class, we know that if we're making an unconditional jump,
 @Jump Members@ +=
 @Override Instruction append(Instruction i, ParsingState state) {
   if(cond == null) {
+    @Ignoring Appended@
     i.prev = null;
     return this;
   }
@@ -1672,7 +1709,7 @@ if(isConstant(get(test,0))) {
   @Skip If Statement@
 } else {
   Label endIf = parseIf(test, ifTrue, ifFalse); 
-  append(new Definition(endIf, false, false));
+  append(new Definition(endIf, false));
 }
 ~~~~
 
@@ -1760,7 +1797,7 @@ Label ifFalseLabel = new Label();
 append(new Jump(ifFalseLabel, jumpCond.inverse(), FORWARDS));
 parseStatements(children(ifTrue));
 append(new Jump(end, null, FORWARDS));
-append(new Definition(ifFalseLabel, false, false));
+append(new Definition(ifFalseLabel, false));
 parseStatements(children(ifFalse));
 ~~~~
 
@@ -1783,7 +1820,7 @@ If we've decided an unconditional loop is executed (the test expression evaluate
 ~~~~
 @Parse An Unconditional Loop@ +=
 if(isNeverZero(get(statement, 0, 0))) {
-  append(new Definition(loopTop, false, false));
+  append(new Definition(loopTop, false));
   parseStatements(children(get(statement, 1)));
   append(new Jump(loopTop, null, BACKWARDS));
 }
@@ -1815,10 +1852,10 @@ If the test expression is false (the <tt>cmp</tt> instruction in the diagram abo
 
 ~~~~
 @Parse A Conditional Loop@ +=
-append(new Definition(loopTop, false, false));
+append(new Definition(loopTop, false));
 Label endWhile = parseIf(get(statement, 0), get(statement, 1), null);
 append(new Jump(loopTop, null, BACKWARDS)); 
-append(new Definition(endWhile, false, false));
+append(new Definition(endWhile, false));
 ~~~~
 
 ## (II) Register Allocation via Linear Programming ##
@@ -1916,7 +1953,7 @@ final OpenBitSet isLive;
 Like most collection implementations, we should try and tell the <tt>isLive</tt> <tt>OpenBitSet</tt> the most number of elements (<tt>Variable</tt> ids in this case) we're ever going to put in it so we don't have to resize it repeatedly as we put more and more elements in it. The <tt>ParsingState</tt> already keeps track of the number of <tt>Variable</tt>s it's seen, and clearly there can't be more live <tt>Variable</tt>s than the total number of <tt>Variable</tt>s, so we'll use this counter to initialize the <tt>OpenBitSet</tt> in <tt>append</tt>. This has another useful side-effect: when we <tt>append</tt> an <tt>Instruction</tt> we'll clear out any previous liveness information, which keeps the possibility of re-using or moving <tt>Instruction</tt>s open.
 
 ~~~~
-@Update Parsing State@ +=
+@Reset The Instruction@ +=
 isLive = new OpenBitSet(state.numVariables);
 ~~~~
 
@@ -1934,9 +1971,12 @@ Liveness will be only be computed once, in the <tt>append</tt> method. The <tt>I
 ~~~~
 @Static Classes@ +=
 static class KillVariables implements InstructionVisitor {
-  final Set<Value> nowLive;
+  final Set<Variable> nowLive;
   KillVariables(Set<Value> nowLive) {
-    this.nowLive = nowLive;
+    this.nowLive = Sets.newHashSet(
+      Iterables.filter(
+        nowLive,
+        Variable.class));
   }
   public boolean visit(Instruction i) {
     boolean anyPropagated = false;
@@ -1953,10 +1993,8 @@ We only want to iterate once regardless of how many <tt>Variable</tt>s the new <
 
 ~~~~
 @Calculate Variables Propagated@ +=
-Iterable<Variable> propagated = Iterables.filter(
-  Sets.difference(killed, nowLive),
-  Variable.class);
-for(Variable v : propagated)
+nowLive.removeAll(killed);
+for(Variable v : nowLive)
   anyPropagated |= !i.isLive.getAndSet(v.id);
 ~~~~
 
@@ -2732,16 +2770,16 @@ We'll now write out all the <tt>Instruction</tt>s we've generated in AT&T syntax
 @Append Instructions@
 ~~~~
 
-We'll fill in all the <tt>toString</tt> methods of the <tt>Instruction</tt> subclasses, starting with <tt>Definition</tt>. If the <tt>Label</tt>'s exported we'll insert a <tt>.globl</tt> directive to tell the assembler to flag it in the symbol table it builds up.
+We'll fill in all the <tt>toString</tt> methods of the <tt>Instruction</tt> subclasses, starting with <tt>Definition</tt> and its subclass <tt>FunctionDefinition</tt>. If a the <tt>Label</tt>'s a function definition and is exported we'll insert a <tt>.globl</tt> directive to tell the assembler to flag it in the symbol table it builds up.
 
 ~~~~
 @Definition x86 Code@ +=
-StringBuilder ret = new StringBuilder();
+return label.name + ':';
+@Head x86 Code@ +=
 if(isExported)
-  ret.append(".globl ").append(label.name).append('\n');
-return ret
-  .append(label.name).append(':')
-  .toString();
+  return String.format(".globl %s\n%s:", label.name, label.name);
+else
+  return label.name + ':';
 ~~~~
 
 Note that this generates the same Assembly code for the symbol definition marking the beginning of a function and an label just used for control flow within a function. Assemblers can embed debug information in the generated binary to help debuggers discriminate between the two use cases (among other things). The [various formats](http://dwarfstd.org/doc/Debugging%20using%20DWARF-2012.pdf) use different methods to embed this information; _stabs_ adds extra symbols to the binary's symbol table while _dwarf_ adds all the debug information to a different section of the executable (usually with section names beginning with <tt>.debug_</tt>). The assembler expects different [directives](http://cs.mtu.edu/~mmkoksal/blog/?x=entry:entry120116-130037) for the different debug formats; COFF uses a variety of directives inside a <tt>.def</tt> block, dwarf uses a [set of directives](http://www.logix.cz/michal/devel/gas-cfi) beginning with <tt>.cfi_</tt> for stack frame tracking and a [complex](http://stackoverflow.com/questions/14422229/basic-os-x-assembly-and-the-mach-o-format) tree describing the assembly code in debug sections of the binary and stabs uses <tt>.stabs</tt> [and other](http://www.chemie.fu-berlin.de/chemnet/use/info/gas/gas_7.html#SEC122) directives.
@@ -2831,8 +2869,7 @@ Instruction bssTail = bss, dataTail = data;
 for(Entry<Label, Immediate> global : program.globals.entrySet()) {
   Definition def = new Definition(
     global.getKey(), 
-    global.getKey().isUpperCase(), 
-    false);
+    global.getKey().isUpperCase());
   DefineLong value = new DefineLong(global.getValue());
   if(value.initialValue == 0)
     bssTail = bssTail.append(def, null).append(value, null);
