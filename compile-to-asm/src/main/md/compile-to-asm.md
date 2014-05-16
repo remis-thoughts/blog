@@ -520,35 +520,49 @@ void reset(ParsingState state) {
 
 ### Visiting Instructions ###
 
-As there's not an external container for <tt>Instruction</tt>s (only each <tt>Instruction</tt> knows which <tt>Instruction</tt>(s) follow it), traversing the linked list of <tt>Instruction</tt>s is best done via the [Vistor design pattern](???). We'll need to support both forward and backwards iteration, so we'll add an enum to specify the direction of traversal. Each <tt>Instruction</tt> will invoke the vistor on itself, before passing it to the <tt>Instruction</tt>s that follow or precede it as appropriate. We'll have be careful to uphold the guarantee that each <tt>Instruction</tt> is only visited exactly once, regardless of the function's control flow.
+As there's not an external container for <tt>Instruction</tt>s (only each <tt>Instruction</tt> knows which <tt>Instruction</tt>(s) follow it), traversing the linked list of <tt>Instruction</tt>s is best done via the [Vistor design pattern](???). We won't try to do a completely general mechanism - we'll just implement the specific patterns of iteration we need.
 
-An <tt>InstructionVisitor</tt> may not want to visit every single following <tt>Instruction</tt>, so we'll add a mechanism that allows the visit to stop. We'll make the <tt>visit</tt> method return a boolean, and if a visitor returns false for an <tt>Instruction</tt> then the iteration through the linked list of <tt>Instruction</tt>s stops there and no more <tt>Instruction</tt>s are visited.
+The first pattern is a simple forward iteration through every <tt>Instruction</tt>, visiting each <tt>Instruction</tt> exactly once. Each <tt>Instruction</tt> will invoke the visitor, (which we'll call <tt>OnePassVisitor</tt>) on itself, before passing it to the <tt>Instruction</tt>s that directly follow it. This pattern of iteration will be useful later for printing out the final list of <tt>Instruction</tt>s. However, we may not always want to iterate through every following <tt>Instruction</tt>, so we'll give a <tt>OnePassVisitor</tt> a mechanism to terminate the iteration early. We'll make the <tt>visit</tt> method return a boolean, and if a visitor returns false for an <tt>Instruction</tt> then the backwards iteration through the linked list of <tt>Instruction</tt>s stops there and no more <tt>Instruction</tt>s are visited.
 
 ~~~~
 @Static Classes@ +=
-interface InstructionVisitor {
+interface OnePassVisitor {
   boolean visit(Instruction i);
 }
-enum Direction { FORWARDS, BACKWARDS};
 @Instruction Members@ +=
-void visit(InstructionVisitor v, Direction d) {
+void visit(OnePassVisitor v) {
   if(!v.visit(this))
     return;
-  if(d == FORWARDS && next != null)
+  if(next != null)
     next.visit(v, d);
-  if(d == BACKWARDS && prev != null)
-    prev.visit(v, d);
 }
 ~~~~
 
-Most Java implementations don't do [tail-call optimisation](???), so the call to <tt>visit(v, d)</tt> will increase the stack space the compiler's using by adding another stack frame. If there are too many <tt>Instruction</tt>s in a function we risk causing a <tt>StackOverflowException</tt>. We'll make a call to <tt>visit</tt> finish when it gets to the last <tt>Ret</tt> <tt>Instruction</tt> by overriding the definition (which is not strictly necessary as a <tt>Ret</tt>'s <tt>next</tt> pointer should never be set to a non-null value):
+Most Java implementations don't do [tail-call optimisation](???), so the call to <tt>visit(v)</tt> will increase the stack space the compiler's using by adding another stack frame. If there are too many <tt>Instruction</tt>s in a function we risk causing a <tt>StackOverflowException</tt>. We'll make a call to <tt>visit</tt> finish when it gets to the last <tt>Ret</tt> <tt>Instruction</tt> by overriding the definition (which is not strictly necessary as a <tt>Ret</tt>'s <tt>next</tt> pointer should never be set to a non-null value):
+
+The second type of iteration is mainly for building up the structures that store information about data-flow in the function. We want to use <tt>OnePassVisitor</tt>s as rarely as possible as it does a lot of work - and so far we've been trying to make work we do when <tt>append</tt>ing an <tt>Instruction</tt> as localised as possible. There are two ways we could update the data flow information when we <tt>append</tt> an <tt>Instruction</tt>: (1) push information from the current <tt>Instruction</tt> to the new one, then update the new <tt>Instruction</tt> with information it changes, or (2) set the new <tt>Instruction</tt>'s information just based on what it does, then pull that information back to the current <tt>Instruction</tt>, and then pull it back through previous <tt>Instruction</tt>s until it's no longer relevant. For reasons we'll cover later, we'll do the latter, so the second visitor class looks like: 
 
 ~~~~
-@Ret Members@ +=
-void visit(InstructionVisitor v, Direction d) {
-  v.visit(this);
-  if(d == BACKWARDS && prev != null)
-    prev.visit(v, d);
+@Static Classes@ +=
+interface PullBackVisitor {
+  boolean visit(Instruction i, Set<Instruction> next);
+}
+~~~~
+
+A <tt>PullBackVisitor</tt> implementation can pull information from the <tt>next</tt> <tt>Set</tt> of <tt>Instruction</tt>s (which will usually only contain one - the <tt>Instruction</tt> pointed to by this <tt>Instruction</tt>'s <tt>next</tt> member) into the current <tt>Instruction</tt> <tt>i</tt>. We've set we want limit the amount of backwards iteration a <tt>PullBackVisitor</tt> does, so we'll use the same boolean return value mechanism as a <tt>OnePassVisitor</tt> to the iteration to stop.
+
+~~~~
+@Instruction Members@ +=
+void visit(PullBackVisitor v) {
+  if(!v.visit(this, next()))
+    return;
+  if(prev != null)
+    prev.visit(v);
+}
+Set<Instruction> next() {
+  return next == null ?
+    Collections.<Instruction>emptySet() :
+    ImmutableSet.of(next);
 }
 ~~~~
 
@@ -1559,38 +1573,36 @@ Like the <tt>Ret</tt> class, we know that if we're making an unconditional jump,
 }
 ~~~~
 
-We want the visitor pattern we're using for the <tt>Instruction</tt> class follow both possible <tt>Instruction</tt>s that can follow a <tt>Jump</tt>. For an unconditional <tt>Jump</tt>, this is just the <tt>Definition</tt> of the <tt>Label</tt> it jumps to, but for a conditional <tt>Jump</tt> the <tt>Instruction</tt> directly following the <tt>Jump</tt> could also be executed.
+### Visiting Jumps and Definitions ###
+
+<tt>Jump</tt> <tt>Instruction</tt>s can't use the default implementations of <tt>visit</tt> to process <tt>OnePassVisitor</tt>s and <tt>PullBackVisitor</tt>s as control flow may proceeed to one of two places. For an unconditional <tt>Jump</tt>, control flow will only get to the <tt>Definition</tt> of the <tt>Label</tt> it jumps to, but a conditional <tt>Jump</tt> can reach the <tt>Instruction</tt> directly following the <tt>Jump</tt> too.
 
 ~~~~
 @Jump Members@ +=
-void visit(InstructionVisitor v, Direction d) {
+boolean visit(OnePassVisitor v) {
   if(!v.visit(this))
     return;
-  if(d == BACKWARDS && prev != null)
-    prev.visit(v, d);
-  if(d == FORWARDS) {
-    @Visiting a Jump@
-  }
+  @Visiting a Jump@
 }
 ~~~~
 
-The complexity comes with ensuring each <tt>Instruction</tt> is only ever visited once. Since <tt>Jump</tt> <tt>Instruction</tt>s only have a single <tt>Label</tt>, and we've decided that when we map the AST to a set of <tt>Instruction</tt>s we'll ensure that each control flow structure (i.e. <tt>if</tt>s and <tt>while</tt>s) will only create one <tt>Jump</tt> <tt>Instruction</tt> for each <tt>Definition</tt>, we know that the single <tt>Definiton</tt> for a <tt>Jump</tt> will either be before the <tt>Jump</tt> or after it. When translating the AST's control flow nodes to <tt>Instruction</tt>s we'll also ensure that this property holds for every possible control flow path through the function. Again, by making our high-level language restrict the possible control flow we can make assumptions that simplify the compiler.
+The complexity comes with ensuring each <tt>Instruction</tt> is only ever visited once by a <tt>OnePassVisitor</tt>. Since <tt>Jump</tt> <tt>Instruction</tt>s only have a single <tt>Label</tt>, and we've decided that when we map the AST to a set of <tt>Instruction</tt>s we'll ensure that each control flow structure (i.e. <tt>if</tt>s and <tt>while</tt>s) will only create one <tt>Jump</tt> <tt>Instruction</tt> for each <tt>Definition</tt>, we know that the single <tt>Definiton</tt> for a <tt>Jump</tt> will either be before the <tt>Jump</tt> or after it. When translating the AST's control flow nodes to <tt>Instruction</tt>s we'll also ensure that this property holds for every possible control flow path through the function. Again, by making our high-level language restrict the possible control flow we can make assumptions that simplify the compiler.
 
 On to the first case - if the <tt>Definition</tt> is always before the <tt>Jump</tt>. In this case, when we visit the <tt>Jump</tt> we don't need to follow the control flow branch to the definition as we must have already visited the <tt>Definition</tt>. We only need to visit the <tt>Instruction</tt> directly following this one (which the <tt>next</tt> pointer refers to) if the <tt>Jump</tt> is conditional:
 
 ~~~~
 @Visiting a Jump@ +=
-if(dir == BACKWARDS && cond != null && next != null)
-  next.visit(v, d);
+if(dir == BACKWARDS && next != null)
+  next.visit(v);
 ~~~~
 
 The second case is a bit harder. If we know the <tt>Definition</tt> is in a later <tt>Instruction</tt>, then just iterating through <tt>next</tt> then all <tt>Instruction</tt>s after the <tt>Definition</tt> then we may visit some <tt>Instruction</tt>s twice. However, we can't just iterate through <tt>Instruction</tt>s after <tt>next</tt> as control flow may exit the function (maybe via a <tt>return</tt> statement) before the <tt>Definition</tt> - and so we won't visit those <tt>Instruction</tt>s. Instead, we'll add a [decorator](???) to <tt>InstructionVisitor</tt> so we can visit <tt>Instruction</tt>s starting at <tt>next</tt> - but only as far as the <tt>Definition</tt> we'll jump to. We'll then start iterating from the <tt>Definition</tt>, ensuring we only visit those <tt>Instruction</tt>s once.
 
 ~~~~
 @Static Classes@ +=
-static class StopAtDefinition implements InstructionVisitor {
-  final InstructionVisitor decorated; final Instruction to;
-  StopAtDefinition(InstructionVisitor decorated, Instruction to) {
+static class StopBeforeDefinition implements OnePassVisitor {
+  final OnePassVisitor decorated; final Definition to;
+  StopAtDefinition(OnePassVisitor decorated, Definition to) {
     this.decorated = decorated; this.to = to;
   }
   public boolean visit(Instruction i) {
@@ -1605,44 +1617,37 @@ Note that if the jump is unconditional we'll never use the <tt>next</tt> pointer
 @Visiting a Jump@ +=
 if(dir == FORWARDS) {
   if(cond != null && next != null)
-    next.visit(new StopAtDefinition(v, to), d);
-  to.visit(v, d);
+    next.visit(new StopBeforeDefinition(v, to));
+  to.visit(v);
 }
 ~~~~
 
-We'll add a similar implementation of <tt>visit</tt> to <tt>Definition</tt>, as iterating backwards from a <tt>Definition</tt> is a mirror of iterating forwards from a <tt>Jump</tt>. We'll use the <tt>Direction</tt> of the <tt>comeFrom</tt> member (an instance of <tt>Jump</tt>) to work out where the <tt>Definition</tt> is in relation to the <tt>Jump</tt>.
+Supporting <tt>PullBackVisitor</tt>s is easier as we're iterating backwards - as only one <tt>Instruction</tt> can ever precede a <tt>Jump</tt>. We do have to override the <tt>next</tt> method though; control flow can always reach the <tt>to</tt> <tt>Definition</tt>, so it will always be a member of the returned set. We also don't care where the <tt>Definition</tt> is relative to the <tt>Jump</tt>, as in either case (before or after) ccontrol flow can still reach it.
 
 ~~~~
-@Definition Members@ +=
-void visit(InstructionVisitor v, Direction d) {
-  if(!v.visit(this))
+@Jump Members@ +=
+Set<Instruction> next() {
+  if(cond != null && next != null)
+    return ImmutableSet.of(next, to);
+  else
+    return ImmutableSet.of(to);
+}
+~~~~
+
+The <tt>Definition</tt> class supports <tt>OnePassVisitor</tt>s without modification, as although control flow can reach it from either the preceding <tt>Instruction</tt> or exactly one <tt>Jump</tt> elsewhere in the function, only one <tt>Instruction</tt> will ever be executed after it: the <tt>Instruction</tt> directly following it. On the other hand, we do need to override the <tt>visit</tt> method for <tt>PullBackVisitor</tt>s, as once it's invoked the <tt>visit</tt> method on the <tt>PullBackVisitor</tt> it should iterate through both preceding <tt>Instruction</tt>s.
+
+~~~~
+@Jump Members@ +=
+void visit(PullBackVisitor v) {
+  if(!v.visit(this, next()))
     return;
-  if(d == FORWARDS && next != null)
-    next.visit(v, d);
-  if(d == BACKWARDS) {
-    @Visiting a Definition@
-  }
+  if(prev != null)
+    prev.visit(v);
+  comeFrom.visit(v);
 }
 ~~~~
 
-If the <tt>Jump</tt> is <tt>FORWARDS</tt> the <tt>Definition</tt> is after the <tt>Jump</tt> so when iterating backwards we'll hit the <tt>Definition</tt> first - and so we need to take the measures described above to avoid processing the <tt>Jump</tt> (and prior <tt>Instruction</tt>s) twice.
-
-~~~~
-@Visiting a Definition@ +=
-if(comeFrom.dir == FORWARDS)
-  if(comeFrom.cond != null && prev != null)
-    prev.visit(new StopAtDefinition(v, comeFrom), d);
-  comeFrom.visit(v, d);
-}
-~~~~
-
-And if the <tt>Jump</tt> is backwards then we'll visit the <tt>Jump</tt> (in <tt>comeFrom</tt>) before the <tt>Definition</tt>, so we don't need to re-process it.
-
-~~~~
-@Visiting a Definition@ +=
-if(comeFrom.dir == BACKWARDS && comeFrom.cond != null && prev != null)
-  prev.visit(v, d);
-~~~~
+You can see that a badly-behaved <tt>PullBackVisitor</tt> could always return true from <tt>visit</tt>, and if a <tt>Definition</tt> was before its <tt>Jump</tt> we'd keep iterating forever. This shouldn't be a problem in practice as we don't let arbitary code use this visitor mechanism, but it's worth bearing in mind if the compiler was extended with a plugin mechanism or additional optimization code passes.
 
 ### If Statements ###
 
@@ -2946,11 +2951,11 @@ We'll only write out a section if it has at least one <tt>Instruction</tt>, so f
 return String.format(".%s\n\t.p2align 4\n", segment);
 ~~~~
 
-We'll use the <tt>InstructionVisitor</tt> mechanism to print out the generated assembly code to an <tt>Appendable</tt>. We'll inject a <tt>InstructionVisitor</tt> implementation to the first <tt>Instruction</tt> of every function (and the data & bss segments), and use its <tt>visit</tt> method to print the relevant code. The <tt>Printer</tt> visitor can skip the no-op <tt>Instruction</tt>s we identified earlier, and do some minor formatting of the generated Assembly code. It'll indent everything with a tab unless it's a <tt>Label<tt> <tt>Definition</tt> or a <tt>Segment</tt> - and will always return <tt>true</tt> as we want to visit every <tt>Instruction</tt>.
+We'll use the <tt>OnePassVisitor</tt> mechanism to print out the generated assembly code to an <tt>Appendable</tt>. We'll inject a <tt>Printer</tt>into the first <tt>Instruction</tt> of every function (and the data & bss segments), and use its <tt>visit</tt> method to print the relevant code. The <tt>Printer</tt> visitor can skip the no-op <tt>Instruction</tt>s we identified earlier, and do some minor formatting of the generated Assembly code. It'll indent everything with a tab unless it's a <tt>Label<tt> <tt>Definition</tt> or a <tt>Segment</tt> - and will always return <tt>true</tt> as we want to visit every <tt>Instruction</tt>.
 
 ~~~~
 @Static Classes@ +=
-static class Printer implements InstructionVisitor {
+static class Printer implements OnePassVisitor {
   final Appendable out;
   Printer(Appendable out) {
     this.out = out;
