@@ -1948,18 +1948,22 @@ Set<Value> readsFrom() {
 
 ### Liveness ###
 
+A <tt>Variable</tt> is "live" at an <tt>Instruction</tt> if we care about what value the <tt>Variable</tt> contains immediately before the <tt>Instruction</tt> is executed. <tt>Variable</tt>s become live as the function writes values to them, and <tt>Variable</tt>s are no longer live when every control flow path doesn't read from them. We'll use liveness to limit the size of the linear programming problem we'll construct. Liveness analysis will also help reduce memory pressure as if we just stored every <tt>Variable</tt> regardless of whether we needed it, we'd have more competition for space in the registers, so more <tt>Variable</tt> accesses would require reading from memory.
+
 We'll use a <tt>OpenBitSet</tt>s ([lucene's](???) bitset implementation) at each <tt>Instruction</tt> to store the ids of <tt>Variable</tt>s that are live at that <tt>Instruction</tt>. Because of the way we choose the <tt>id</tt>s of <tt>Variable</tt>s we know that they'll be integers between zero (inclusive) and the number of <tt>Variable</tt>s in the function (exclusive). This means an <tt>OpenBitSet</tt> is a very dense way of storing liveness as it only needs one bit per <tt>Variable</tt> in the function (you can think of it as a <tt>Variable</tt> being in a member of the set of live <tt>Variable</tt>s at that <tt>Instruction</tt>), even if it isn't sparse.
 
 ~~~~
 @Instruction Members@ +=
-final OpenBitSet isLive;
+OpenBitSet isLive;
 ~~~~
 
-Like most collection implementations, we should try and tell the <tt>isLive</tt> <tt>OpenBitSet</tt> the most number of elements (<tt>Variable</tt> ids in this case) we're ever going to put in it so we don't have to resize it repeatedly as we put more and more elements in it. The <tt>ParsingState</tt> already keeps track of the number of <tt>Variable</tt>s it's seen, and clearly there can't be more live <tt>Variable</tt>s than the total number of <tt>Variable</tt>s, so we'll use this counter to initialize the <tt>OpenBitSet</tt> in <tt>append</tt>. This has another useful side-effect: when we <tt>append</tt> an <tt>Instruction</tt> we'll clear out any previous liveness information, which keeps the possibility of re-using or moving <tt>Instruction</tt>s open.
+Like most collection implementations, we should try and tell the <tt>isLive</tt> <tt>OpenBitSet</tt> the most number of elements (<tt>Variable</tt> ids in this case) we're ever going to put in it so we don't have to resize it repeatedly as we put more and more elements in it. The <tt>ParsingState</tt> already keeps track of the number of <tt>Variable</tt>s it's seen, and clearly there can't be more live <tt>Variable</tt>s than the total number of <tt>Variable</tt>s, so we'll use this counter to initialize the <tt>OpenBitSet</tt> in <tt>append</tt>. This has another useful side-effect: when we <tt>append</tt> an <tt>Instruction</tt> we'll clear out any previous liveness information, which keeps the possibility of re-using or moving <tt>Instruction</tt>s open. We'll initialize the liveness <tt>OpenBitSet</tt> to the <tt>Variable</tt>s we know are live at this <tt>Instruction</tt>, regardless of where it is in the function: the <tt>Variable</tt>s that this <tt>Instruction</tt> reads from.
 
 ~~~~
 @Reset The Instruction@ +=
 isLive = new OpenBitSet(state.numVariables);
+for(Variable v : Iterables.filter(readsFrom(), Variable.class)
+  isLive.set(v.id);
 ~~~~
 
 We'll define "liveness" such that if the current <tt>Instruction</tt> reads a <tt>Variable</tt> then that <tt>Variable</tt> is "live" at that <tt>Instruction</tt>; if the current <tt>Instruction</tt> writes to (and doesn't read) a <tt>Variable</tt> then the <tt>Variable</tt> is no longer "live" (i.e. has been "killed"), and otherwise the <tt>Variable</tt> is live if it is live in any of the <tt>Instruction</tt>s following the one we're considering.
@@ -1971,36 +1975,45 @@ Set<Value> killed = Sets.difference(
   i.readsFrom());
 ~~~~
 
-Liveness will be only be computed once, in the <tt>append</tt> method. The <tt>InstructionVisitor</tt> mechanism gives us a way of minimalising the work we have to do each <tt>append</tt>; if the newly-appended <tt>Instruction</tt> makes a <tt>Variable</tt> live, we'll iterate backwards through every code path from the new <tt>Instruction</tt>, marking that <tt>Variable</tt> as live, until we get to an <tt>Instruction</tt> that kills it (i.e. it writes to that <tt>Variable</tt> but doesn't read it).
+Liveness will be only be computed once, in the <tt>append</tt> method. The <tt>PullBackVisitor</tt> mechanism gives us a way of minimalising the work we have to do each <tt>append</tt>; if the newly-appended <tt>Instruction</tt> makes a <tt>Variable</tt> live, we'll iterate backwards through every code path from the new <tt>Instruction</tt>, marking that <tt>Variable</tt> as live, until we get to an <tt>Instruction</tt> that kills it (i.e. it writes to that <tt>Variable</tt> but doesn't read it).
 
 ~~~~
 @Static Classes@ +=
-static class KillVariables implements InstructionVisitor {
-  final Set<Variable> nowLive;
-  KillVariables(Set<Value> nowLive) {
-    this.nowLive = Sets.newHashSet(
-      Iterables.filter(
-        nowLive,
-        Variable.class));
-  }
-  public boolean visit(Instruction i) {
-    boolean anyPropagated = false;
+static class PropagateLiveness implements PullBackVisitor {
+  @Liveness Members@
+  public boolean visit(Instruction i, Set<Instruction> next) {
+    @Initialize Propagated Flag@
     @Calculate Variables Killed@
     @Calculate Variables Propagated@
     return anyPropagated;
   }
 }
+~~~~
+
+We'll start the <tt>PropagateLiveness</tt> visitor at this <tt>Instruction</tt>, and as (by this point in <tt>append</tt>) we've changed the <tt>next</tt> member to point to the <tt>Instruction</tt> we're <tt>append</tt>ing, the first call to the visitor will update the current <tt>Instruction</tt> with the liveness information in the <tt>Instruction</tt> being appended.
+
+~~~~
 @Update Parsing State@ +=
-visit(new KillVariables(readsFrom()), BACKWARDS);
+visit(new PropagateLiveness());
 ~~~~
 
 We only want to iterate once regardless of how many <tt>Variable</tt>s the new <tt>Instruction</tt> makes live, so the <tt>InstructionVisitor</tt> will keep a <tt>Set</tt> of alll the newly-live <tt>Variable</tt>s, and will only stop iterating when all of them have been marked as dead along all code paths back from the new <tt>Instruction</tt>. We also don't want to keep iterating when all we're doing is marking <tt>Variable</tt>s live that are already marked as live, so we'll also stop at a particular <tt>Instruction</tt> if all of the <tt>nowLive</tt> <tt>Variable</tt>s we're propagated are all live.
 
 ~~~~
 @Calculate Variables Propagated@ +=
-nowLive.removeAll(killed);
-for(Variable v : nowLive)
-  anyPropagated |= !i.isLive.getAndSet(v.id);
+for(Instruction n : next)
+  for(int v = n.isLive.nextSetBit(0); v >= 0; v = n.isLive.nextSetBit(v + 1))
+    if(!killed.contains(new Variable(v)))
+      anyPropagated |= !i.isLive.getAndSet(v.id);
+~~~~
+
+There's one edge case here: if we don't propagate any <tt>Variable</tt>s from the <tt>append</tt>ed <tt>Instruction</tt> to this <tt>Instruction</tt> then the visitor will terminate - even if we should propagate <tt>Variable</tt>s the current <tt>Instruction</tt> makes live to the previous <tt>Instruction</tt>! We can't just invoke the visitor on the <tt>Instruction</tt> in the <tt>prev</tt> member, as there could be more than one previous <tt>Instruction</tt> and the parent <tt>Instruction</tt> class doesn't know this. We could add a <tt>previous()</tt> method to <tt>Instruction</tt> that returns all the <tt>Instruction</tt> directly before this one (an analogue to <tt>next()</tt>), but it's simpler to force the visitor to visit at least two <tt>Instruction</tt>s:
+
+~~~~
+@initialize Propagated Flag@ +=
+boolean anyPropagated = visited++ > 0;
+@Liveness Members@ +=
+int visited = 0;
 ~~~~
 
 ### Registers In Use ###
