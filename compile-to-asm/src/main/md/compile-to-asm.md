@@ -940,6 +940,7 @@ static final class Call extends Instruction {
   final Value name;
   Call(Value name) { this.name = name; }
   public String toString() { @Call x86 Code@ }
+  @Call Members@
 }
 @Make The Call@ +=
 append(new Call(getAsValue(get(t, 0))));
@@ -2018,50 +2019,58 @@ int visited = 0;
 
 ### Registers In Use ###
 
-We know some instructions pre-specify <tt>Register</tt>s that they'll write to (e.g. the return value is put in <tt>rax</tt>, and the values in the <tt>CALLEE_SAVES</tt> <tt>Register</tt>s), and we don't want to overwrite these values by assigning another <tt>Variable</tt>s to those <tt>Register</tt>s. We'll build up a set of what <tt>Register</tt>s we shouldn't use at each <tt>Instruction</tt>.
+We know some instructions pre-specify <tt>Register</tt>s that they'll write to (e.g. the return value is put in <tt>rax</tt>, and the values in the <tt>CALLEE_SAVES</tt> <tt>Register</tt>s), and we don't want to overwrite these values by assigning another <tt>Variable</tt>s to those <tt>Register</tt>s. We'll build up a set of what <tt>Register</tt>s we shouldn't use at each <tt>Instruction</tt> in a member, following the pattern of the liveness analysis above.
 
 ~~~~
-@Control Flow Graph Members@ +=
-final BitSet registersInUse = new BitSet();
-boolean registerInUse(int i, Register r) {
-  return registersInUse.get(i * Register.values().length + r.ordinal());
+@Instruction Members@ +=
+Set<Register> inUse;
+~~~~
+
+As with the liveness information above, we'll initialize this <tt>Set</tt> in the <tt>reset</tt> method. However, some <tt>Instruction</tt> types use more <tt>Register</tt>s than those we can express using <tt>readsFrom</tt>, so we'll delegate the initialization of this <tt>Set</tt> to a method we can override when needed. 
+
+~~~~
+@Reset The Instruction@ +=
+inUse = registersInUse();
+@Instruction Members@ +=
+Set<Register> registersInUse() {
+  return Sets.newEnumSet(
+    Iterables.filter(readsFrom(), Register.class), 
+    Register.class);
 }
 ~~~~
 
-We'll deal with the <tt>CALLEE_SAVES</tt> <tt>Register</tt>s at the start of the function first. We shouldn't overwrite a <tt>CALLEE_SAVES</tt> <tt>Register</tt> between the start of the function (<tt>Instruction</tt> index <tt>0</tt> in our control flow graph) and the <tt>Instruction</tt> where we move the preserved value from the <tt>CALLEE_SAVES</tt> <tt>Register</tt> into a <tt>Variable</tt>. Now, since we add the <tt>Instruction</tt>s to preserve the <tt>CALLEE_SAVES</tt> <tt>Register</tt>s as the very start of the function (before we start processing the code of the function's body) we know there can't be any <tt>Jump</tt> <tt>Instruction</tt>s between the start of the function and the <tt>Instruction</tt> that saves that last <tt>CALLEE_SAVES</tt> <tt>Register</tt>. This means the <tt>next</tt> <tt>Multimap</tt> will only contain one <tt>Instruction</tt> for each of the <tt>Instruction</tt>s we'll iterate over, which simplifies our algorithm:
+One example of an <tt>Instruction</tt> that needs other <tt>Register</tt>s is <tt>Ret</tt>. Earlier we generated <tt>Instruction</tt>s to save and restore the values in the <tt>CALLEE_SAVES</tt> <tt>Register</tt>s after the <tt>Head</tt> <tt>Instruction</tt> and before each <tt>Ret</tt>. However, we don't want the register allocation to overwrite these values either before we've captured them into a <tt>Variable</tt> or after we've restored them to a <tt>Register</tt>, so we'll mark those <tt>Register</tt>s as "in use" when they have the preserved values. We get the preservation at the start of the function for free, as the <tt>Move</tt> <tt>Instruction</tt> that captures them marks them as "in use" as they're returned from <tt>registersInUse</tt>, and the <tt>PropagateInUse</tt> visitor will mark them in use in all <tt>Instruction</tt>s up to and including the <tt>Head</tt>, as we can guarantee no intervening <tt>Instruction</tt> reads from them. At the other end of the function, we can make <tt>Ret</tt> <tt>Instruction</tt> initialize <tt>inUse</tt> to the <tt>CALLEE_SAVES</tt> <tt>Register</tt>s, and that <tt>inUse</tt> flag will be propagated for each <tt>Register</tt> back as far as the <tt>Move</tt> <tt>Instruction</tt> that restores the corresponding preserved value. We'll also mark the <tt>RETURNS</tt> <tt>Register</tt>s as in use, so similarly <tt>Instruction</tt> will overwrite the values put there by a <tt>Return</tt> statement before control flow returns from the function.
 
 ~~~~
-@Find Registers Already In Use@ +=
-Set<Register> saved = Sets.newEnumSet(Arrays.asList(CALLEE_SAVES), Register.class);
-for (int i = 0; !saved.isEmpty(); i = Iterables.getOnlyElement(next.get(i))) {
-  for (Register r : saved)
-    registersInUse.set(i * Register.values().length + r.ordinal());
-  saved.removeAll(code.get(i).uses());
+@Ret Members@ +=
+Set<Register> registersInUse() {
+  Set<Register> ret = EnumSet.noneOf(Register.class);
+  Iterables.addAll(ret, RETURNS);
+  Iterables.addAll(ret, CALLEE_SAVES);
+  return ret;
 }
 ~~~~
 
-We'll use a similar procedure to identify the <tt>Register</tt>s we need to preserve in the <tt>Instruction</tt>s leading up to a <tt>ret</tt>. This time, as well as avoiding placing <tt>Variable</tt>s in the <tt>CALLEE_SAVES</tt> <tt>Register</tt>s after we've restored their original values, we must also avoid overwriting the function's return value after we <tt>mov</tt> it into <tt>rax</tt>. Also, while a function only has one entry point it can return from many places, so we'll run this algorithm once for each <tt>ret</tt> <tt>Instruction</tt> (the node before each <tt>ret</tt> <tt>Instruction</tt> is the predecessor of the dummy <tt>code.size()</tt> node). Note that this time we move through the control flow graph backwards, using the <tt>previous</tt> <tt>Multimap</tt> in the for-loop instead of the <tt>next</tt> one, but as we can still guarantee there's no <tt>Jump</tt> <tt>Instruction</tt>s as we're only going to iterate over the <tt>Instruction</tt>s we added in <tt>addReturn()</tt>.
+The <tt>CALLEE_SAVES</tt> <tt>Register</tt>s need to be considered when this function calls others too. Our function can put <tt>Variables</tt>s in the <tt>CALLEE_SAVES</tt> <tt>Register</tt>s or on the stack (the dummy <tt>THESTACK</tt> enum constant) as then they'll be preserved across the <tt>Call</tt>. We'll therefore return all other other <tt>Register</tt>s from <tt>registersInUse</tt> so <tt>Variables</tt>s aren't assigned to them:
 
 ~~~~
-@Find Registers Already In Use@ +=
-for (int ret : previous.get(code.size())) {
-  Set<Register> saved = Sets.newEnumSet(Arrays.asList(CALLEE_SAVES), Register.class);
-  saved.add(rax);
-  for (int i = ret; !saved.isEmpty(); i = Iterables.getOnlyElement(previous.get(i))) {
-    for (Register r : saved)
-      registersInUse.set(n * Register.values().length + r.ordinal());
-    saved.removeAll(code.get(j).uses());
-  }
+@Call Members@ +=
+Set<Register> registersInUse() {
+  Set<Register> ret = EnumSet.allOf(Register.class);
+  Iterables.removeAll(ret, CALLEE_SAVES);
+  ret.remove(THESTACK);
+  return ret;
 }
 ~~~~
 
-None of these iterations processed the dummy <tt>code.size()</tt> node, but we don't care what's assigned to it as control flow will never reach it (it's a dummy), and so will never overwrite the values we need to preserve.
 
-There's one edge case when processing the <tt>Instruction</tt>s at the end of the function - if the function doesn't have an explicit <tt>return</tt> statement at the end of the function we'll still insert a <tt>ret</tt> <tt>Instruction</tt>, but won't move anything into <tt>rax</tt>. This means that when the algorithm iterates backwards from the <tt>code.size()</tt> node it doesn't stop, as no <tt>Instruction</tt> removes <tt>rax</tt> from the <tt>saved</tt> <tt>Set</tt>. We'll rectify this by added a no-op <tt>mov</tt> <tt>Instruction</tt> that writes to <tt>rax</tt> if the function doesn't have an explicit <tt>return</tt>, as this <tt>Instruction</tt> will return <tt>rax</tt> in its <tt>uses()</tt> method. However, as it's clearly a no-op we can easily filter it out when writing out the final Assembly code.
+
+There's one edge case when processing the <tt>Instruction</tt>s at the end of the function - if the function doesn't have an explicit <tt>return</tt> statement at the end of the function we'll still insert a <tt>ret</tt> <tt>Instruction</tt>, but won't move anything into <tt>rax</tt>. This means that when the algorithm iterates backwards from the <tt>code.size()</tt> node it doesn't stop, as no <tt>Instruction</tt> removes <tt>rax</tt> from the <tt>inUse</tt> <tt>Set</tt>. We'll rectify this by added <tt>mov</tt> <tt>Instruction</tt> that writes to <tt>rax</tt> if the function doesn't have an explicit <tt>return</tt>, as this <tt>Instruction</tt> will return the <tt>Register</tt> from a call to <tt>writesTo(WILL_ERASE)</tt> method and the visitor will remove it from the <tt>inUse</tt> <tt>Set</tt>. However, we can't make it a no-op as then it'd read from that <tt>Register</tt> to, and so the <tt>Move</tt> <tt>Instruction</tt> would return it from <tt>registersInUse</tt> and it'd still be marked as in use.
 
 ~~~~
 @No Return Statement Given@ +=
-state.append(move(rax, rax));
+for(Register r : RETURNS)
+  state.append(move(new Immediate(0), r));
 ~~~~
 
 ### What Needs Assigning ###
