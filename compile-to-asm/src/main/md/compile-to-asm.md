@@ -511,11 +511,11 @@ Another clarification we should make should be what initialization work we do in
 
 ~~~~
 @Instruction Members@ +=
-void reset(ParsingState state) { 
+void reset() { 
   @Reset The Instruction@ 
 }
-@Update Parsing State@ += reset(state);
-@Ignoring Appended@ += reset(state);
+@Update Parsing State@ += reset();
+@Ignoring Appended@ += reset();
 ~~~~
 
 ### Visiting Instructions ###
@@ -627,8 +627,7 @@ static Label parseDefinition(Tree def, ProgramState program) {
   ParsingState state = new ParsingState(def, program);  
   state.parseStatements(children(def, 2));
   if(!(state.current instanceof Ret)) {
-    @No Return Statement Given@ 
-    state.addReturn();
+    state.addReturn(0);
   }
   @Do Register Allocation@
   return state.head.label;
@@ -872,18 +871,27 @@ Returns are another "intrinsic" function call. According to [the ABI](http://www
 static final Register[] RETURNS = { rax, rdx };
 ~~~~
 
+However, we'll store the exact number of <tt>Variable</tt> (0, 1 or 2) returned from the function by a particular <tt>Ret</tt> <tt>Instruction</tt> in a member, <tt>varsReturned</tt>. Note that we won't ensure that every <tt>Return</tt> statement has the same number of arguments, so different paths through the function could return different numbers of <tt>Variable</tt>s.
+
+~~~~
+@Ret Members@ +=
+final int varsReturned;
+Ret(int varsReturned) {
+  this.varsReturned = varsReturned;
+}
+~~~~
+
 We'll evaluate the zero, one or two expressions that we'll return, and then add <tt>Move</tt> instructions to put the return values into the right registers, and finally call the same <tt>addReturn</tt> method we saw in <tt>parseDefinition</tt>. We'll look at <tt>getAsValue</tt> shortly - as the expression attached to the return node can be quite complicated (e.g. the return value of a function call, or the <tt>Label</tt> returned by a nested function defintion) we'll have to calculate that first. The <tt>Value</tt> that is the net result of this expression is returned by <tt>getAsValue</tt>.
 
 ~~~~
 @Parse A Return@ +=
-Value[] returns = new Variable[RETURNS.length];
-for(Register r : RETURNS)
-  if(numChildren(t, 1) > r.ordinal())
-    returns[r.ordinal()] = getAsValue(get(t, 1, r.ordinal()));
-for(Register r : RETURNS)
-  if(returns[r.ordinal()] != null)
-    append(move(returns[r.ordinal()], r));
-addReturn();
+int varsReturned = Math.min(numChildren(t, 1), RETURNS.length);
+Value[] returns = new Variable[varsReturned];
+for(int r = 0; r < varsReturned; ++r)
+  returns[r] = getAsValue(get(t, 1, r));
+for(int r = 0; r < varsReturned; ++r)
+  append(move(returns[r], RETURNS[r]));
+addReturn(varsReturned);
 ~~~~
 
 <tt>addReturn</tt> exists to ensure the Assembly code we generate for our function maintains the invariants in [ABI](http://www.x86-64.org/documentation/abi.pdf). In particular, we must ensure that the values in the following six registers when we leave the function must be the same as when our function was called.
@@ -900,12 +908,12 @@ We'll move the values in the registers we have to save into <tt>Variable</tt>s. 
 for(Register r : CALLEE_SAVES)
   append(move(r, variable(CALLEE_SAVE_VAR + r)));
 @Parsing State Members@ +=
-void addReturn() {
+void addReturn(int varsReturned) {
   for(Register r : CALLEE_SAVES)
     append(move(variable(CALLEE_SAVE_VAR + r), r));
   @Before Returning From Function@
   @Are We Leaving The Main Function@
-  append(new Ret());
+  append(new Ret(varsReturned));
 }
 @Other Helpers@ +=
 private static final String CALLEE_SAVE_VAR = "save!";
@@ -932,18 +940,20 @@ The System V AMD ABI says that the first six integer parameters should be passed
 static final Register[] PARAMETERS = { rdi, rsi, rdx, rcx, r8, r9 };
 ~~~~
 
-As the language supports function pointers <tt>Call</tt> instructions can have a <tt>Label</tt> or a <tt>Register</tt> as their operand.
+As the language supports function pointers <tt>Call</tt> instructions can have a <tt>Label</tt> or a <tt>Register</tt> as their operand. We'll also make the <tt>Call</tt> <tt>Instruction</tt> keep track of exactly how many parameters we pass in registers in a <tt>registerArgs</tt> member, as this will be useful when analyzing the control flow later.
 
 ~~~~
 @Static Classes@ +=
 static final class Call extends Instruction {
-  final Value name;
-  Call(Value name) { this.name = name; }
+  final Value name; final int registerArgs;
+  Call(Value name, int registerArgs) { 
+    this.name = name; this.registerArgs = registerArgs;
+  }
   public String toString() { @Call x86 Code@ }
   @Call Members@
 }
 @Make The Call@ +=
-append(new Call(getAsValue(get(t, 0))));
+append(new Call(getAsValue(get(t, 0)), registerArgs));
 ~~~~
 
 We'll start by using <tt>getAsValue</tt> to generate code that evaluate all the expressions we're going to pass as parameters. These expressions can be complicated (and can even include other function calls). We need to keep all the parameter <tt>Value</tt>s we've calculated so far, which reduces the registers available for evaluating subsequent parameters. While we can't avoid this for the six parameters we're passing in registers, we could calculate the parameter values we're passing on the stack and put them there - so they don't need to take up registers. However, this means we can't use the stack layout described in next, so we won't do this.
@@ -1951,23 +1961,51 @@ Set<Value> readsFrom() {
 
 A <tt>Variable</tt> is "live" at an <tt>Instruction</tt> if we care about what value the <tt>Variable</tt> contains immediately before the <tt>Instruction</tt> is executed. <tt>Variable</tt>s become live as the function writes values to them, and <tt>Variable</tt>s are no longer live when every control flow path doesn't read from them. We'll use liveness to limit the size of the linear programming problem we'll construct. Liveness analysis will also help reduce memory pressure as if we just stored every <tt>Variable</tt> regardless of whether we needed it, we'd have more competition for space in the registers, so more <tt>Variable</tt> accesses would require reading from memory.
 
-We'll use a <tt>OpenBitSet</tt>s ([lucene's](???) bitset implementation) at each <tt>Instruction</tt> to store the ids of <tt>Variable</tt>s that are live at that <tt>Instruction</tt>. Because of the way we choose the <tt>id</tt>s of <tt>Variable</tt>s we know that they'll be integers between zero (inclusive) and the number of <tt>Variable</tt>s in the function (exclusive). This means an <tt>OpenBitSet</tt> is a very dense way of storing liveness as it only needs one bit per <tt>Variable</tt> in the function (you can think of it as a <tt>Variable</tt> being in a member of the set of live <tt>Variable</tt>s at that <tt>Instruction</tt>), even if it isn't sparse.
+We'll use a <tt>OpenBitSet</tt>s ([lucene's](???) bitset implementation) at each <tt>Instruction</tt> to store the ids of <tt>Variable</tt>s that are live at that <tt>Instruction</tt>. Because of the way we choose the <tt>id</tt>s of <tt>Variable</tt>s we know that they'll be integers between zero (inclusive) and the number of <tt>Variable</tt>s in the function (exclusive). This means an <tt>OpenBitSet</tt> is a very dense way of storing liveness as it only needs one bit per <tt>Variable</tt> in the function (you can think of it as a <tt>Variable</tt> being in a member of the set of live <tt>Variable</tt>s at that <tt>Instruction</tt>), even if it isn't sparse. However, <tt>OpenBitSet</tt> isn't that easy to work with as it goes to great lengths to avoid [boxing and unboxing](???) integers, so we'll wrap it in an adapter to Java's usual <tt>Set</tt> interface.
+
+~~~~
+@Static Classes@ +=
+static class VariableSet extends AbstractSet<Variable> {
+  private final OpenBitSet bits = new OpenBitSet();
+  public boolean add(Variable e) {
+    bits.ensureCapacity(e.id);
+    return !bits.getAndSet(e.id);
+  }
+  public int size() {
+    return (int) bits.cardinality();
+  }
+  public Iterator<Variable> iterator() {
+    return new Iterator<Variable>() {
+      int next = bits.nextSetBit(0);
+      public void remove() {
+        bits.fastClear(next);
+      }
+      public Variable next() {
+        int ret = next;
+        next = bits.nextSetBit(next + 1);
+        return new Variable(ret);
+      }
+      public boolean hasNext() {
+        return next >= 0;
+      }
+    };
+  }
+}
+~~~~
+
+This has another useful side-effect: when we <tt>append</tt> an <tt>Instruction</tt> we'll clear out any previous liveness information, which keeps the possibility of re-using or moving <tt>Instruction</tt>s open. We'll initialize the liveness <tt>OpenBitSet</tt> to the <tt>Variable</tt>s we know are live at this <tt>Instruction</tt>, regardless of where it is in the function: the <tt>Variable</tt>s that this <tt>Instruction</tt> reads from.
 
 ~~~~
 @Instruction Members@ +=
-OpenBitSet isLive;
-~~~~
-
-Like most collection implementations, we should try and tell the <tt>isLive</tt> <tt>OpenBitSet</tt> the most number of elements (<tt>Variable</tt> ids in this case) we're ever going to put in it so we don't have to resize it repeatedly as we put more and more elements in it. The <tt>ParsingState</tt> already keeps track of the number of <tt>Variable</tt>s it's seen, and clearly there can't be more live <tt>Variable</tt>s than the total number of <tt>Variable</tt>s, so we'll use this counter to initialize the <tt>OpenBitSet</tt> in <tt>append</tt>. This has another useful side-effect: when we <tt>append</tt> an <tt>Instruction</tt> we'll clear out any previous liveness information, which keeps the possibility of re-using or moving <tt>Instruction</tt>s open. We'll initialize the liveness <tt>OpenBitSet</tt> to the <tt>Variable</tt>s we know are live at this <tt>Instruction</tt>, regardless of where it is in the function: the <tt>Variable</tt>s that this <tt>Instruction</tt> reads from.
-
-~~~~
+VariableSet isLive;
 @Reset The Instruction@ +=
-isLive = new OpenBitSet(state.numVariables);
-for(Variable v : Iterables.filter(readsFrom(), Variable.class)
-  isLive.set(v.id);
+isLive = new VariableSet();
+Iterables.addAll(
+  isLive,
+  Iterables.filter(readsFrom(), Variable.class));
 ~~~~
 
-We'll define "liveness" such that if the current <tt>Instruction</tt> reads a <tt>Variable</tt> then that <tt>Variable</tt> is "live" at that <tt>Instruction</tt>; if the current <tt>Instruction</tt> writes to (and doesn't read) a <tt>Variable</tt> then the <tt>Variable</tt> is no longer "live" (i.e. has been "killed"), and otherwise the <tt>Variable</tt> is live if it is live in any of the <tt>Instruction</tt>s following the one we're considering.
+We're defining "liveness" such that if the current <tt>Instruction</tt> reads a <tt>Variable</tt> then that <tt>Variable</tt> is "live" at that <tt>Instruction</tt>; if the current <tt>Instruction</tt> writes to (and doesn't read) a <tt>Variable</tt> then the <tt>Variable</tt> is no longer "live" (i.e. has been "killed"), and otherwise the <tt>Variable</tt> is live if it is live in any of the <tt>Instruction</tt>s following the one we're considering.
 
 ~~~~
 @Calculate Variables Killed@ +=
@@ -1976,6 +2014,8 @@ Set<Value> killed = Sets.difference(
   i.readsFrom());
 ~~~~
 
+We decided earlier that when we <tt>append</tt>ed an <tt>Instruction</tt> we were going to calculate what liveness information it changed, and then use a <tt>PullBackVisitor</tt> to propagate this information as far back as we can, instead of pushing liveness information from the current <tt>Instruction</tt> to the <tt>append</tt>ed one. This definition of <tt>killed</tt> shows why: consider two writes to a <tt>Variable</tt> followed by a read, with no intervening <tt>Jump</tt> <tt>Instruction</tt>s or other changes of control flow. We don't want to mark this <tt>Variable</tt> as live between the two writes as we'll just overwrite the value it contains without looking at it, and marking it as live means we have to waste space (maybe even register space) storing the value. Pulling liveness information backwards means we'll only mark it live between the read and the second write that "kills" it. Pushing liveness forwards would mean it'd be marked as live from the first write to the read. However, we said at the beginning we weren't going to do any optimisation, so we won't remove any useless writes we come across.
+
 Liveness will be only be computed once, in the <tt>append</tt> method. The <tt>PullBackVisitor</tt> mechanism gives us a way of minimalising the work we have to do each <tt>append</tt>; if the newly-appended <tt>Instruction</tt> makes a <tt>Variable</tt> live, we'll iterate backwards through every code path from the new <tt>Instruction</tt>, marking that <tt>Variable</tt> as live, until we get to an <tt>Instruction</tt> that kills it (i.e. it writes to that <tt>Variable</tt> but doesn't read it).
 
 ~~~~
@@ -1983,7 +2023,7 @@ Liveness will be only be computed once, in the <tt>append</tt> method. The <tt>P
 static class PropagateLiveness implements PullBackVisitor {
   @Liveness Members@
   public boolean visit(Instruction i, Set<Instruction> next) {
-    @Initialize Propagated Flag@
+    boolean anyPropagated = false;
     @Calculate Variables Killed@
     @Calculate Variables Propagated@
     return anyPropagated;
@@ -1991,31 +2031,41 @@ static class PropagateLiveness implements PullBackVisitor {
 }
 ~~~~
 
-We'll start the <tt>PropagateLiveness</tt> visitor at this <tt>Instruction</tt>, and as (by this point in <tt>append</tt>) we've changed the <tt>next</tt> member to point to the <tt>Instruction</tt> we're <tt>append</tt>ing, the first call to the visitor will update the current <tt>Instruction</tt> with the liveness information in the <tt>Instruction</tt> being appended.
-
-~~~~
-@Update Parsing State@ +=
-visit(new PropagateLiveness());
-~~~~
-
 We only want to iterate once regardless of how many <tt>Variable</tt>s the new <tt>Instruction</tt> makes live, so the <tt>InstructionVisitor</tt> will keep a <tt>Set</tt> of alll the newly-live <tt>Variable</tt>s, and will only stop iterating when all of them have been marked as dead along all code paths back from the new <tt>Instruction</tt>. We also don't want to keep iterating when all we're doing is marking <tt>Variable</tt>s live that are already marked as live, so we'll also stop at a particular <tt>Instruction</tt> if all of the <tt>nowLive</tt> <tt>Variable</tt>s we're propagated are all live.
 
 ~~~~
 @Calculate Variables Propagated@ +=
 for(Instruction n : next)
-  for(int v = n.isLive.nextSetBit(0); v >= 0; v = n.isLive.nextSetBit(v + 1))
-    if(!killed.contains(new Variable(v)))
-      anyPropagated |= !i.isLive.getAndSet(v.id);
+  for(Variable v : n.isLive)
+    if(!killed.contains(v)
+      anyPropagated |= i.isLive.add(v);
 ~~~~
 
-There's one edge case here: if we don't propagate any <tt>Variable</tt>s from the <tt>append</tt>ed <tt>Instruction</tt> to this <tt>Instruction</tt> then the visitor will terminate - even if we should propagate <tt>Variable</tt>s the current <tt>Instruction</tt> makes live to the previous <tt>Instruction</tt>! We can't just invoke the visitor on the <tt>Instruction</tt> in the <tt>prev</tt> member, as there could be more than one previous <tt>Instruction</tt> and the parent <tt>Instruction</tt> class doesn't know this. We could add a <tt>previous()</tt> method to <tt>Instruction</tt> that returns all the <tt>Instruction</tt> directly before this one (an analogue to <tt>next()</tt>), but it's simpler to force the visitor to visit at least two <tt>Instruction</tt>s:
+We'll start the <tt>PropagateLiveness</tt> visitor at this <tt>Instruction</tt>, and as (by this point in <tt>append</tt>) we've changed the <tt>next</tt> member to point to the <tt>Instruction</tt> we're <tt>append</tt>ing, the first call to the visitor will update the current <tt>Instruction</tt> with the liveness information in the <tt>Instruction</tt> being appended.
 
 ~~~~
-@initialize Propagated Flag@ +=
-boolean anyPropagated = visited++ > 0;
-@Liveness Members@ +=
-int visited = 0;
+@Update Parsing State@ +=
+visit(new AtLeastTwice(new PropagateLiveness()));
 ~~~~
+
+There's one edge case here: if we don't propagate any <tt>Variable</tt>s from the <tt>append</tt>ed <tt>Instruction</tt> to this <tt>Instruction</tt> then the visitor will terminate - even if we should propagate <tt>Variable</tt>s the current <tt>Instruction</tt> makes live to the previous <tt>Instruction</tt>! We can't just invoke the visitor on the <tt>Instruction</tt> in the <tt>prev</tt> member, as there could be more than one previous <tt>Instruction</tt> and the parent <tt>Instruction</tt> class doesn't know this. We could add a <tt>previous()</tt> method to <tt>Instruction</tt> that returns all the <tt>Instruction</tt> directly before this one (an analogue to <tt>next()</tt>), but it's simpler to force the visitor to visit at least two <tt>Instruction</tt>s by wrapping the <tt>PropagateLiveness</tt> visitor in a decorator:
+
+~~~~
+@Static Classes@ +=
+static class AtLeastTwice implements PullBackVisitor {
+  final PullBackVisitor decorated; boolean visited = false;
+  AtLeastTwice(PullBackVisitor decorated) {
+    this.decorated = decorated;
+  }
+  public boolean visit(Instruction i, Set<Instruction> next) {
+    boolean ret = decorated.visit(i, next) || !visited;
+    visited = true;
+    return ret;
+  }
+}
+~~~~
+
+Note that we're using a boolean to detect the first visit (where we force the return value to true so we make at least two visits) rather than counting the number of visits we've made to avoid the unlikely possiblity of the visit counter overflowing.
 
 ### Registers In Use ###
 
