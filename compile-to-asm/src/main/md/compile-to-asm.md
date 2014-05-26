@@ -2016,17 +2016,35 @@ Set<Value> killed = Sets.difference(
 
 We decided earlier that when we <tt>append</tt>ed an <tt>Instruction</tt> we were going to calculate what liveness information it changed, and then use a <tt>PullBackVisitor</tt> to propagate this information as far back as we can, instead of pushing liveness information from the current <tt>Instruction</tt> to the <tt>append</tt>ed one. This definition of <tt>killed</tt> shows why: consider two writes to a <tt>Variable</tt> followed by a read, with no intervening <tt>Jump</tt> <tt>Instruction</tt>s or other changes of control flow. We don't want to mark this <tt>Variable</tt> as live between the two writes as we'll just overwrite the value it contains without looking at it, and marking it as live means we have to waste space (maybe even register space) storing the value. Pulling liveness information backwards means we'll only mark it live between the read and the second write that "kills" it. Pushing liveness forwards would mean it'd be marked as live from the first write to the read. However, we said at the beginning we weren't going to do any optimisation, so we won't remove any useless writes we come across.
 
-Liveness will be only be computed once, in the <tt>append</tt> method. The <tt>PullBackVisitor</tt> mechanism gives us a way of minimalising the work we have to do each <tt>append</tt>; if the newly-appended <tt>Instruction</tt> makes a <tt>Variable</tt> live, we'll iterate backwards through every code path from the new <tt>Instruction</tt>, marking that <tt>Variable</tt> as live, until we get to an <tt>Instruction</tt> that kills it (i.e. it writes to that <tt>Variable</tt> but doesn't read it).
+Liveness will be only be computed once, in the <tt>append</tt> method. The <tt>PullBackVisitor</tt> mechanism gives us a way of minimalising the work we have to do each <tt>append</tt>; if the newly-appended <tt>Instruction</tt> makes a <tt>Variable</tt> live, we'll iterate backwards through every code path from the new <tt>Instruction</tt>, marking that <tt>Variable</tt> as live, until we get to an <tt>Instruction</tt> that kills it (i.e. it writes to that <tt>Variable</tt> but doesn't read it). We'll re-use a lot of this logic in the registers-in-use analysis in the next section, so we'll put most of the visitor's logic in an abstract parent class <tt>Propagate</tt>:
 
 ~~~~
 @Static Classes@ +=
-static class PropagateLiveness implements PullBackVisitor {
-  @Liveness Members@
+abstract static class Propagate implements PullBackVisitor {
   public boolean visit(Instruction i, Set<Instruction> next) {
     boolean anyPropagated = false;
     @Calculate Variables Killed@
     @Calculate Variables Propagated@
     return anyPropagated;
+  }
+  abstract boolean mark(Instruction i, Set<Value> values);
+  abstract Set&lt;? extends Value&gt; marked(Instruction i);
+}
+~~~~
+
+In the liveness analysis, the <tt>mark</tt> method means mark the <tt>Variable</tt>s in the <tt>values</tt> <tt>Set</tt> as live, and <tt>marked</tt> returns the live <tt>Variable</tt>s in the given <tt>Instruction</tt>.
+
+~~~~
+@Static Classes@ +=
+static class PropagateLiveness extends Propagate {
+  boolean mark(Instruction i, Set<Value> values) {
+    return i.isLive.addAll(
+      Sets.filter(
+        values, 
+        Predicates.instanceOf(Variable.class)));
+  }
+  Set< ? extends Value> marked(Instruction i) {
+    return i.isLive;
   }
 }
 ~~~~
@@ -2036,9 +2054,8 @@ We only want to iterate once regardless of how many <tt>Variable</tt>s the new <
 ~~~~
 @Calculate Variables Propagated@ +=
 for(Instruction n : next)
-  for(Variable v : n.isLive)
-    if(!killed.contains(v)
-      anyPropagated |= i.isLive.add(v);
+  anyPropagated |= i.isLive.addAll(
+    Sets.difference(n.isLive, killed));
 ~~~~
 
 We'll start the <tt>PropagateLiveness</tt> visitor at this <tt>Instruction</tt>, and as (by this point in <tt>append</tt>) we've changed the <tt>next</tt> member to point to the <tt>Instruction</tt> we're <tt>append</tt>ing, the first call to the visitor will update the current <tt>Instruction</tt> with the liveness information in the <tt>Instruction</tt> being appended.
@@ -2071,21 +2088,25 @@ Note that we're using a boolean to detect the first visit (where we force the re
 
 We know some instructions pre-specify <tt>Register</tt>s that they'll write to (e.g. the return value is put in <tt>rax</tt>, and the values in the <tt>CALLEE_SAVES</tt> <tt>Register</tt>s), and we don't want to overwrite these values by assigning another <tt>Variable</tt>s to those <tt>Register</tt>s. We'll build up a set of what <tt>Register</tt>s we shouldn't use at each <tt>Instruction</tt> in a member, following the pattern of the liveness analysis above.
 
+However, there's one key different between the liveness ananlysis and the registers-in-use analysis: the state in <tt>Ret</tt> <tt>Instruction</tt>s. As we only do the analysis for an <tt>Instruction</tt> when <tt>append</tt> is called, we'll never do analysis on <tt>Instruction</tt>s that are never appended to - which, do to the way we translate our language into <tt>Instruction</tt>s in section one, are only <tt>Ret</tt>s. This doesn't matter in our liveness analysis as no <tt>Variable</tt>s are live at a <tt>Ret</tt>, but many <tt>Register</tt>s are in use at a <tt>Ret</tt> (i.e. the <tt>CALLEE_SAVES</tt> ones and some of the <tt>RETURNS</tt> ones, see later). 
+
 ~~~~
 @Instruction Members@ +=
-Set<Register> inUse;
+Set<Register> inUse = Collections.emptySet();
 ~~~~
 
-As with the liveness information above, we'll initialize this <tt>Set</tt> in the <tt>reset</tt> method. However, some <tt>Instruction</tt> types use more <tt>Register</tt>s than those we can express using <tt>readsFrom</tt>, so we'll delegate the initialization of this <tt>Set</tt> to a method we can override when needed. 
+As with the liveness information above, we'll initialize the <tt>inUse</tt> <tt>Set</tt> in the <tt>reset</tt> method. However, once of the consequences of doing this analysis in <tt>append</tt> is that we must be able to access a correct <tt>Set</tt> of in-use registers from an <tt>Instruction</tt>, even if we haven't called <tt>append</tt> on it. We'll therefore get the <tt>Register</tt>s an <tt>Instruction</tt> uses via a member method <tt>registersInUse</tt>, so we can fill in <tt>Register</tt>s we know this <tt>Instruction</tt> uses even if <tt>inUse</tt> hasn't been filled:
 
 ~~~~
 @Reset The Instruction@ +=
-inUse = registersInUse();
+inUse = EnumSet.noneOf(Register.class);
 @Instruction Members@ +=
 Set<Register> registersInUse() {
-  return Sets.newEnumSet(
-    Iterables.filter(readsFrom(), Register.class), 
-    Register.class);
+  return Sets.union(
+    inUse,
+    Sets.filter(
+      readsFrom(), 
+      Predicates.instanceOf(Register.class)));
 }
 ~~~~
 
@@ -2094,18 +2115,21 @@ One example of an <tt>Instruction</tt> that needs other <tt>Register</tt>s is <t
 ~~~~
 @Ret Members@ +=
 Set<Register> registersInUse() {
-  Set<Register> ret = EnumSet.noneOf(Register.class);
-  Iterables.addAll(ret, RETURNS);
+  Set<Register> ret = EnumSet.copyOf(inUse);
   Iterables.addAll(ret, CALLEE_SAVES);
+  for(int r = 0; r < varsReturned; ++r)
+    ret.add(RETURNS[r]);
   return ret;
 }
 ~~~~
 
-The <tt>CALLEE_SAVES</tt> <tt>Register</tt>s need to be considered when this function calls others too. Our function can put <tt>Variables</tt>s in the <tt>CALLEE_SAVES</tt> <tt>Register</tt>s or on the stack (the dummy <tt>THESTACK</tt> enum constant) as then they'll be preserved across the <tt>Call</tt>. We'll therefore return all other other <tt>Register</tt>s from <tt>registersInUse</tt> so <tt>Variables</tt>s aren't assigned to them:
+Function calls are another type of <tt>Instruction</tt> that has special <tt>registersInUse</tt> behaviour. We'll try to make this behaviour as clear as possible, by breaking it down into several parts.
+
+The calling convention of the [x86-64 ABI](???) allows us to put values in the <tt>CALLEE_SAVES</tt> <tt>Register</tt>s before a call, and the function we're calling will have to preserve those values. The function we call will also have its own stack frame, so any values we store on the stack (which we represent as assigning them to the dummy <tt>THESTACK</tt> <tt>Register</tt>) will also be preserved. We'll use the <tt>registersOverwritten</tt> to describe this behaviour; it'll return all the <tt>Register</tt>s we can't write values to.
 
 ~~~~
 @Call Members@ +=
-Set<Register> registersInUse() {
+Set<Register> registersOverwritten() {
   Set<Register> ret = EnumSet.allOf(Register.class);
   Iterables.removeAll(ret, CALLEE_SAVES);
   ret.remove(THESTACK);
@@ -2113,14 +2137,63 @@ Set<Register> registersInUse() {
 }
 ~~~~
 
-
-
-There's one edge case when processing the <tt>Instruction</tt>s at the end of the function - if the function doesn't have an explicit <tt>return</tt> statement at the end of the function we'll still insert a <tt>ret</tt> <tt>Instruction</tt>, but won't move anything into <tt>rax</tt>. This means that when the algorithm iterates backwards from the <tt>code.size()</tt> node it doesn't stop, as no <tt>Instruction</tt> removes <tt>rax</tt> from the <tt>inUse</tt> <tt>Set</tt>. We'll rectify this by added <tt>mov</tt> <tt>Instruction</tt> that writes to <tt>rax</tt> if the function doesn't have an explicit <tt>return</tt>, as this <tt>Instruction</tt> will return the <tt>Register</tt> from a call to <tt>writesTo(WILL_ERASE)</tt> method and the visitor will remove it from the <tt>inUse</tt> <tt>Set</tt>. However, we can't make it a no-op as then it'd read from that <tt>Register</tt> to, and so the <tt>Move</tt> <tt>Instruction</tt> would return it from <tt>registersInUse</tt> and it'd still be marked as in use.
+The second set of <tt>Register</tt>s we can't store values in are those that store the arguments we're passing the function to, and the name of the function we're calling (if it's directly specified as being in a <tt>Register</tt>). When we construct <tt>Call</tt> instances we give them the number of arguments we're passing to them in registers, which the <tt>Call</tt> object stores in its <tt>registerArgs</tt> int field. We'll use a method <tt>registersWithArgs</tt> to return this <tt>Set</tt> of <tt>Register</tt>s:
 
 ~~~~
-@No Return Statement Given@ +=
-for(Register r : RETURNS)
-  state.append(move(new Immediate(0), r));
+@Call Members@ +=
+Set<Register> registersWithArgs() {
+  Set<Register> ret = EnumSet.noneOf(Register.class);
+  for(int r = 0; r < registerArgs; ++r)
+    ret.add(PARAMETERS[r]);
+  if(name instanceof Register)
+    ret.add((Register) name);
+  return ret;
+}
+~~~~
+
+Now, we're defining <tt>registersInUse</tt> as the <tt>Set</tt> of <tt>Register</tt>s our allocation algorithm can't assign <tt>Variable</tt>s to, so we'll return the union of the <tt>Register</tt>s returned by the two methods above, as well as the other <tt>Register</tt>s we've marked as <tt>inUse</tt> during this analysis. Note that we don't care whether a <tt>Register</tt> in <tt>inUse</tt> is also in <tt>registersOverwritten</tt>: if it is, then we can't assign a <tt>Variable</tt> to it as it'll be overwritten by the function we call, and if it isn't then we still can't assign a <tt>Variable</tt> to it as we explicitly want to preserve the contents of that <tt>Register</tt>.
+
+~~~~
+@Call Members@ +=
+Set<Register> registersInUse() {
+  return Sets.union(
+    inUse, 
+    Sets.union(
+      registersWithArgs(),
+      registersOverwritten());
+}
+~~~~
+
+Now that each <tt>Instruction</tt> has a clear definition of what <tt>Register</tt>s it uses we can add a subclass of the <tt>Propagate</tt> visitor we defined for the liveness analysis. In the subclass for registers-in-use analysis, <tt>PropagateInUse</tt>, <tt>mark</tt>ing a <tt>Register</tt> adds it to the <tt>Instruction</tt>'s <tt>inUse</tt> <tt>Set</tt>.
+
+~~~~
+@Static Classes@ +=
+static class PropagateInUse extends Propagate {
+  boolean mark(Instruction i, Set<Value> values) {
+    @Mark In Use Registers@
+  }
+  Set< ? extends Value> marked(Instruction i) {
+    @Propagate In Use Registers@
+  }
+}
+@Update Parsing State@ +=
+visit(new AtLeastTwice(new PropagateInUse()));
+~~~~
+
+There's just one edge case: in <tt>marked</tt> we return a <tt>Set</tt> of <tt>Register</tt>s that we propagate back to previous <tt>Instruction</tt>s. Our override of <tt>registersInUse</tt> in the <tt>Call</tt> subclass has logic so we avoid the <tt>Register</tt>s that the function we're calling is allowed to overwrite. This exclusion clearly doesn't apply to a <tt>Call</tt> <tt>Instruction</tt>'s predecessors, so we don't want to blindly propagate the <tt>Register</tt>s returned by <tt>registersOverwritten</tt>. Instead, we'll limit propagation to the <tt>Register</tt>s that store the function's arguments (and possibly the name) returned by <tt>registersWithArgs</tt>, and any registers that have been marked as in use that we know the function we're calling won't have overwritten (i.e. <tt>Register</tt>s that are in <tt>inUse</tt> but aren't in <tt>registersOverwritten</tt>).
+
+~~~~
+@Call Members@ +=
+Set<Register> registersPropagated() {
+  return Sets.union(
+    Sets.difference(inUse, registersOverwritten()),
+    registersWithArgs());
+}
+@Propagate In Use Registers@ +=
+if(i instanceof Call)
+  return ((Call) i).registersPropagated();
+else
+  return i.registersInUse();
 ~~~~
 
 ### What Needs Assigning ###
