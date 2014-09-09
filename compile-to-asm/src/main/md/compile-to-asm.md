@@ -3096,38 +3096,25 @@ We'll only write out a section if it has at least one <tt>Instruction</tt>, so f
 return String.format(".%s\n\t.p2align 4\n", segment);
 ~~~~
 
-We'll use the <tt>OnePassVisitor</tt> mechanism to print out the generated assembly code to an <tt>Appendable</tt>. We'll inject a <tt>Printer</tt>into the first <tt>Instruction</tt> of every function (and the data & bss segments), and use its <tt>visit</tt> method to print the relevant code. The <tt>Printer</tt> visitor can skip the no-op <tt>Instruction</tt>s we identified earlier, and do some minor formatting of the generated Assembly code. It'll indent everything with a tab unless it's a <tt>Label<tt> <tt>Definition</tt> or a <tt>Segment</tt> - and will always return <tt>true</tt> as we want to visit every <tt>Instruction</tt>.
-
-~~~~
-@Static Classes@ +=
-static class Printer implements OnePassVisitor {
-  final Appendable out;
-  Printer(Appendable out) {
-    this.out = out;
-  }
-  boolean visit(Instruction i) {
-    if(!i.isNoOp()) {
-      if(!(i instanceof Definition) && !(i instanceof Segment))
-        out.append('\t');
-      out.append(i.toString()).append('\n');  
-    }
-    return true;
-  }
-}
-~~~~
+We'll print out the generated assembly code to an <tt>Appendable</tt>. We'll iterate through the linked lists of <tt>Instruction</tt>s starting at the <tt>head</tt> <tt>Instruction</tt> of every function (and the data & bss segments), and use the <tt>Instruction</tt>'s <tt>toString</tt> method to generate the relevant code. We can skip the no-op <tt>Instruction</tt>s we identified earlier, and do some minor formatting of the generated Assembly code: it'll indent everything with a tab unless it's a <tt>Label<tt> <tt>Definition</tt> or a <tt>Segment</tt>.
 
 We can now use this method to write out all three segments. The <tt>.text</tt> segment is the only segment we're writing to which has execute permissions by default, so we'll put all the Assembly code we've generated for the functions there. The <tt>ParsingState</tt>s in the <tt>ProgramState</tt> are added to the <tt>.text</tt> segment without re-ordering, so the functions will appear in the same order that they appear in the source code (with nested functions appearing before the functions they are declared in). It may be more efficient to put the code for functions that call each other next to each other, so when the code for the caller is pulled into the instruction cache any code for the called function on the same cache line will be pulled in for free, saving a memory load when we make the call. We'll also only print the text & bss segments if they have at least one <tt>Definition</tt> (i.e. the <tt>next</tt> pointer of the <tt>Segment</tt> isn't empty).
 
 ~~~~
 @Append Instructions@ +=
-InstructionVisitor printer = new Printer(asmOut);
-if(bss.next != null)
-  bss.visit(printer, FORWARDS);
-if(data.next != null)
-  data.visit(printer, FORWARDS);
-asmOut.append(new Segment("text").toString());
+List<Instruction> heads = Lists.newArrayList(
+  bss,
+  data,
+  new Segment("text"));
 for(ParsingState function : program.text)
-  function.head.visit(printer, FORWARDS);
+  heads.add(function.head);
+for(Instruction start : head)
+  for(Instruction i = start; i != null; i = i.next)
+    if(!i.isNoOp()) {
+      if(!(i instanceof Definition) && !(i instanceof Segment))
+        out.append('\t');
+      out.append(i.toString()).append('\n');  
+    }
 ~~~~
 
 ## Appendices ##
