@@ -447,7 +447,7 @@ static final class ParsingState {
 
 ### Connecting Instructions Together ###
 
-We'll make our <tt>Instruction</tt>s form an [intrusive doubly-linked list](http://www.boost.org/doc/libs/1_35_0/doc/html/intrusive/intrusive_vs_nontrusive.html) by adding pointers to the <tt>Instruction</tt>s immediately preceding and following each <tt>Instruction</tt>. These will be null for the first <tt>Instruction</tt> (the function's <tt>Definition</tt>) and for each <tt>Return</tt> (i.e. each exit from the function). This will give us an O(1) insertion into to the middle of the list, and (unlike linked-list containers, like Java's <tt>LinkedList</tt>) will allow us to link one <tt>Instruction</tt> to override the default implementation to allow multiple predecessors or successors, which will be useful when we come to (conditional) <tt>Jump</tt> <tt>Instruction</tt>s.
+We'll make our <tt>Instruction</tt>s form an [intrusive doubly-linked list](http://www.boost.org/doc/libs/1_35_0/doc/html/intrusive/intrusive_vs_nontrusive.html) by adding pointers to the <tt>Instruction</tt>s immediately preceding and following each <tt>Instruction</tt>. These will be null for the first <tt>Instruction</tt> (the function's <tt>Definition</tt>) and for each <tt>Return</tt> (i.e. each exit from the function). This will give us an O(1) insertion into to the middle of the list, and (unlike linked-list containers, like Java's <tt>LinkedList</tt>) will allow us to link one <tt>Instruction</tt> to override the default implementation to allow multiple predecessors or successors, which will be useful when we come to (conditional) <tt>Jump</tt> <tt>Instruction</tt>s. We'll also make this <tt>append</tt> return the newly-added <tt>Instruction</tt> so you can use it in a [fluent](???) way.
 
 ~~~~
 @Instruction Members@ +=
@@ -459,12 +459,10 @@ Instruction append(Instruction i, ParsingState state) {
   }
   next = i;
   i.prev = this;
-  @Update Parsing State@
+  @After Append@
   return i;
 }
 ~~~~
-
-Importantly, <tt>append</tt> returns the newly-added <tt>Instruction</tt>. We'll actually define <tt>append</tt>'s behaviour more precisely: it must return the <tt>Instruction</tt> that is now at the end of the linked list. In most cases (and so in the default implementation) this is the same <tt>Instruction</tt> as the one that was passed in, but we'll see examples of overriding this behaviour later.
 
 We'll keep references to the first <tt>Instruction</tt> as a member of the <tt>ParsingState</tt>, so we can easily iterate forwards through the function's code. Our compilation will occur in a series of "passes", or iterations through the <tt>Instruction</tt>s in order. We'll try to do as much work in each pass as possible (not least because iterating through the <tt>Instruction</tt>s will not be very cache-friendly).
 
@@ -472,6 +470,8 @@ We'll keep references to the first <tt>Instruction</tt> as a member of the <tt>P
 @Parsing State Members@ +=
 final Instruction head;
 ~~~~
+
+At this point we have two choices for the semantics of <tt>next</tt> and <tt>prev</tt>: (1) they could refer to the order the <tt>Instruction</tt>s appear in the final output or (2) they could refer they the order <tt>Instruction</tt>s are visited during execution (i.e. they match control flow). This has many interesting consequences; (1) makes iterating through the code visiting each <tt>Instruction</tt> exactly once much easier, but (2) gives us dead code elimination for free, as we'll see with the <tt>Ret</tt> <tt>Instruction</tt>. For this reason we'll chose the semantics of (2).
 
 The <tt>Ret</tt> <tt>Instruction</tt> (an x86 <tt>ret</tt>) is a good example of non-standard <tt>Instruction</tt> linking. We'll give ourselves dead-code elimination for free by simply not appending any <tt>Instruction</tt>s to a <tt>Ret</tt>. <tt>Ret</tt>'s <tt>append</tt> returns the <tt>Ret</tt>  itself, indicating it's still the end of the linked list. We'll also clear the appended <tt>Instruction</tt>'s <tt>prev</tt> pointer to keep its state consistent, as the <tt>Ret</tt>'s <tt>next</tt> pointer will never be set to a non-null value.
 
@@ -481,7 +481,6 @@ static final class Ret extends Instruction {
   @Ret Members@
   public String toString() { return @Ret x86 Code@; }
   Instruction append(Instruction i, ParsingState state) {
-    @Ignoring Appended@
     i.prev = null;
     return this;
   }
@@ -494,70 +493,32 @@ We'll support removing <tt>Instruction</tt>s from a function too; we'll cleanly 
 
 ~~~~
 @Instruction Members@ +=
-Instruction delete() {
+Instruction delete(ParsingState state) {
   Instruction oldPrev = prev;
   if(prev != null)
     prev.next = next;
   if(next != null)
     next.prev = prev;
   prev = next = null;
+  @After Delete@
   return oldPrev;
 }
 ~~~~
 
 We should also define here the exact semantics of <tt>append</tt>, and in particular when it should be called. When we're generating <tt>Instruction</tt>s that follow linear control flow (i.e. don't have jumps) then we know <tt>append</tt> will be called exactly once on each new <tt>Instruction</tt>, even if this call doesn't actually wire up the new <tt>Instruction</tt> (e.g. the implementation in <tt>Ret</tt>). To keep the code simple, for non-linear control flow (e.g. when <tt>append</tt>ing a <tt>Definition</tt> that can be jumped to or reached directly from the previous <tt>Instruction</tt>) we'll enforce the condition that <tt>append</tt> will *still only be called once* on the <tt>Instruction</tt> being appended, regardless of the number of ways control flow can reach that <tt>Instruction</tt>. A corollery of this is that wiring up jump <tt>Instruction</tt>s to their corresponding <tt>Definition</tt> <tt>Instruction</tt>s must occur via some other mechanism, which we'll cover later.
 
-Another clarification we should make should be what initialization work we do in an <tt>Instruction</tt>'s constructor and what initialization work we do elsewhere. This question is very relevant for [incremental compilers](https://en.wikipedia.org/wiki/Incremental_compiler); compilers that modify their outputs as the source code they're given is modified. While this article doesn't cover building an incremental compiler, we want to make that an easy extension to implement. In particular, as parts of the source code get added, deleted or moved the corresponding parts of the Antlr-generated AST should be updated, which would then add, remove and (importantly) move sequences of <tt>Instruction</tt>s in the linked list. Adding and deleting are covered by the <tt>append</tt> and <tt>delete</tt> methods detailed above, but some forward planning is needed if we're to support detaching a chain of <tt>Instruction</tt>s and <tt>append</tt>ing it elsewhere (much more efficient than deleting the chain and creating a new one just like it elsewhere). This requirement means we should push as much of the semantic analysis of the code into <tt>append</tt> as possible, which in turn means we should provide a hook in <tt>append</tt> that we can use to reset any of the <tt>Instruction</tt>'s internal state relating to the analysis:
-
-~~~~
-@Instruction Members@ +=
-void reset() { 
-  @Reset The Instruction@ 
-}
-@Update Parsing State@ += reset();
-@Ignoring Appended@ += reset();
-~~~~
+Another clarification we should make should be what initialization work we do in an <tt>Instruction</tt>'s constructor and what initialization work we do elsewhere. This question is very relevant for [incremental compilers](https://en.wikipedia.org/wiki/Incremental_compiler); compilers that modify their outputs as the source code they're given is modified. While this article doesn't cover building an incremental compiler, we want to make that an easy extension to implement. In particular, as parts of the source code get added, deleted or moved the corresponding parts of the Antlr-generated AST should be updated, which would then add, remove and (importantly) move sequences of <tt>Instruction</tt>s in the linked list. Adding and deleting are covered by the <tt>append</tt> and <tt>delete</tt> methods detailed above, but some forward planning is needed if we're to support detaching a chain of <tt>Instruction</tt>s and <tt>append</tt>ing it elsewhere (much more efficient than deleting the chain and creating a new one just like it elsewhere).
 
 ### Visiting Instructions ###
 
-As there's not an external container for <tt>Instruction</tt>s (only each <tt>Instruction</tt> knows which <tt>Instruction</tt>(s) follow it), traversing the linked list of <tt>Instruction</tt>s is best done via the [Vistor design pattern](???). We won't try to do a completely general mechanism - we'll just implement the specific patterns of iteration we need.
-
-The first pattern is a simple forward iteration through every <tt>Instruction</tt>, visiting each <tt>Instruction</tt> exactly once. Each <tt>Instruction</tt> will invoke the visitor, (which we'll call <tt>OnePassVisitor</tt>) on itself, before passing it to the <tt>Instruction</tt>s that directly follow it. This pattern of iteration will be useful later for printing out the final list of <tt>Instruction</tt>s. However, we may not always want to iterate through every following <tt>Instruction</tt>, so we'll give a <tt>OnePassVisitor</tt> a mechanism to terminate the iteration early. We'll make the <tt>visit</tt> method return a boolean, and if a visitor returns false for an <tt>Instruction</tt> then the backwards iteration through the linked list of <tt>Instruction</tt>s stops there and no more <tt>Instruction</tt>s are visited.
-
-~~~~
-@Static Classes@ +=
-interface OnePassVisitor {
-  boolean visit(Instruction i);
-}
-@Instruction Members@ +=
-void visit(OnePassVisitor v) {
-  if(!v.visit(this))
-    return;
-  if(next != null)
-    next.visit(v, d);
-}
-~~~~
-
-Most Java implementations don't do [tail-call optimisation](???), so the call to <tt>visit(v)</tt> will increase the stack space the compiler's using by adding another stack frame. If there are too many <tt>Instruction</tt>s in a function we risk causing a <tt>StackOverflowException</tt>. We'll make a call to <tt>visit</tt> finish when it gets to the last <tt>Ret</tt> <tt>Instruction</tt> by overriding the definition (which is not strictly necessary as a <tt>Ret</tt>'s <tt>next</tt> pointer should never be set to a non-null value):
-
-The second type of iteration is mainly for building up the structures that store information about data-flow in the function. We want to use <tt>OnePassVisitor</tt>s as rarely as possible as it does a lot of work - and so far we've been trying to make work we do when <tt>append</tt>ing an <tt>Instruction</tt> as localised as possible. There are two ways we could update the data flow information when we <tt>append</tt> an <tt>Instruction</tt>: (1) push information from the current <tt>Instruction</tt> to the new one, then update the new <tt>Instruction</tt> with information it changes, or (2) set the new <tt>Instruction</tt>'s information just based on what it does, then pull that information back to the current <tt>Instruction</tt>, and then pull it back through previous <tt>Instruction</tt>s until it's no longer relevant. For reasons we'll cover later, we'll do the latter, so the second visitor class looks like: 
-
-~~~~
-@Static Classes@ +=
-interface PullBackVisitor {
-  boolean visit(Instruction i, Set<Instruction> next);
-}
-~~~~
-
-A <tt>PullBackVisitor</tt> implementation can pull information from the <tt>next</tt> <tt>Set</tt> of <tt>Instruction</tt>s (which will usually only contain one - the <tt>Instruction</tt> pointed to by this <tt>Instruction</tt>'s <tt>next</tt> member) into the current <tt>Instruction</tt> <tt>i</tt>. We've set we want limit the amount of backwards iteration a <tt>PullBackVisitor</tt> does, so we'll use the same boolean return value mechanism as a <tt>OnePassVisitor</tt> to the iteration to stop.
+At the minute, each <tt>Instruction</tt> has at most one successor and one predecessor (via its <tt>next</tt> and <tt>prev</tt> links). We'll allow subclasses to extend this, by ensuring that when we're traversing the <tt>Instruction</tt> list we only access those members via these <tt>next()</tt> and <tt>prev</tt> method that subclasses can override:
 
 ~~~~
 @Instruction Members@ +=
-void visit(PullBackVisitor v) {
-  if(!v.visit(this, next()))
-    return;
-  if(prev != null)
-    prev.visit(v);
+Set<Instruction> prev() {
+  return prev == null ?
+    Collections.<Instruction>emptySet() :
+    ImmutableSet.of(prev);
 }
 Set<Instruction> next() {
   return next == null ?
@@ -1522,14 +1483,14 @@ if(numDerefs <= 1
 
 We'll use [jump](http://www.unixwiz.net/techtips/x86-jumps.html) instructions to do this. Jump instructions are like the conditional <tt>mov</tt> instructions we met above; as well as unconditional jumps we can also add a suffix to indicate the jump instruction should only be executed if certain flags in the [status register](http://en.wikipedia.org/wiki/Status_register) are set. As we're just jumping to different points in the same function the <tt>Jump</tt> instruction and the <tt>Label</tt> <tt>Definition</tt> we're jumping to will both be in the same <tt>text</tt> segment of the generated Assembly code, so we don't need to worry about [far jumps](http://stackoverflow.com/questions/14812160/near-and-far-jmps).
 
-As well as the <tt>Definition</tt> of the <tt>Label</tt> the <tt>Jump</tt> jumps to, we'll also have members to store the <tt>Condition</tt> if the jump is conditional, and the location of the <tt>Definition</tt> relative to the <tt>Jump</tt> (either <tt>FORWARDS</tt> if the <tt>Definiton</tt> is after the <tt>Jump</tt> and <tt>BACKWARDS</tt> otherwise). This will be useful later when we cover this <tt>Instruction</tt>'s <tt>visit</tt> implementation later.
+As well as the <tt>Definition</tt> of the <tt>Label</tt> the <tt>Jump</tt> jumps to, we'll also have members to store the <tt>Condition</tt> if the jump is conditional.
 
 ~~~~
 @Static Classes@ +=
 static class Jump extends Instruction {
-  Definition to; final Condition cond; Direction dir;
-  Jump(Definition to, Condition cond, Direction dir) { 
-    this.to = to; this.cond = cond; this.dir = dir;
+  Definition to; final Condition cond;
+  Jump(Definition to, Condition cond) { 
+    this.to = to; this.cond = cond;
     @After Constructing A Jump@
   }
   public String toString() { @Jump x86 Code@ }
@@ -1575,7 +1536,6 @@ Like the <tt>Ret</tt> class, we know that if we're making an unconditional jump,
 @Jump Members@ +=
 @Override Instruction append(Instruction i, ParsingState state) {
   if(cond == null) {
-    @Ignoring Appended@
     i.prev = null;
     return this;
   }
@@ -1584,56 +1544,7 @@ Like the <tt>Ret</tt> class, we know that if we're making an unconditional jump,
 }
 ~~~~
 
-### Visiting Jumps and Definitions ###
-
-<tt>Jump</tt> <tt>Instruction</tt>s can't use the default implementations of <tt>visit</tt> to process <tt>OnePassVisitor</tt>s and <tt>PullBackVisitor</tt>s as control flow may proceeed to one of two places. For an unconditional <tt>Jump</tt>, control flow will only get to the <tt>Definition</tt> of the <tt>Label</tt> it jumps to, but a conditional <tt>Jump</tt> can reach the <tt>Instruction</tt> directly following the <tt>Jump</tt> too.
-
-~~~~
-@Jump Members@ +=
-boolean visit(OnePassVisitor v) {
-  if(!v.visit(this))
-    return;
-  @Visiting a Jump@
-}
-~~~~
-
-The complexity comes with ensuring each <tt>Instruction</tt> is only ever visited once by a <tt>OnePassVisitor</tt>. Since <tt>Jump</tt> <tt>Instruction</tt>s only have a single <tt>Label</tt>, and we've decided that when we map the AST to a set of <tt>Instruction</tt>s we'll ensure that each control flow structure (i.e. <tt>if</tt>s and <tt>while</tt>s) will only create one <tt>Jump</tt> <tt>Instruction</tt> for each <tt>Definition</tt>, we know that the single <tt>Definiton</tt> for a <tt>Jump</tt> will either be before the <tt>Jump</tt> or after it. When translating the AST's control flow nodes to <tt>Instruction</tt>s we'll also ensure that this property holds for every possible control flow path through the function. Again, by making our high-level language restrict the possible control flow we can make assumptions that simplify the compiler.
-
-On to the first case - if the <tt>Definition</tt> is always before the <tt>Jump</tt>. In this case, when we visit the <tt>Jump</tt> we don't need to follow the control flow branch to the definition as we must have already visited the <tt>Definition</tt>. We only need to visit the <tt>Instruction</tt> directly following this one (which the <tt>next</tt> pointer refers to) if the <tt>Jump</tt> is conditional:
-
-~~~~
-@Visiting a Jump@ +=
-if(dir == BACKWARDS && next != null)
-  next.visit(v);
-~~~~
-
-The second case is a bit harder. If we know the <tt>Definition</tt> is in a later <tt>Instruction</tt>, then just iterating through <tt>next</tt> then all <tt>Instruction</tt>s after the <tt>Definition</tt> then we may visit some <tt>Instruction</tt>s twice. However, we can't just iterate through <tt>Instruction</tt>s after <tt>next</tt> as control flow may exit the function (maybe via a <tt>return</tt> statement) before the <tt>Definition</tt> - and so we won't visit those <tt>Instruction</tt>s. Instead, we'll add a [decorator](???) to <tt>InstructionVisitor</tt> so we can visit <tt>Instruction</tt>s starting at <tt>next</tt> - but only as far as the <tt>Definition</tt> we'll jump to. We'll then start iterating from the <tt>Definition</tt>, ensuring we only visit those <tt>Instruction</tt>s once.
-
-~~~~
-@Static Classes@ +=
-static class StopBeforeDefinition implements OnePassVisitor {
-  final OnePassVisitor decorated; final Definition to;
-  StopAtDefinition(OnePassVisitor decorated, Definition to) {
-    this.decorated = decorated; this.to = to;
-  }
-  public boolean visit(Instruction i) {
-    return i == to ? false : decorated.visit(i);
-  }
-}
-~~~~
-
-Note that if the jump is unconditional we'll never use the <tt>next</tt> pointer (as control flow will always jump somewhere else) - so we can just start visiting from the  <tt>Definition</tt>.
-
-~~~~
-@Visiting a Jump@ +=
-if(dir == FORWARDS) {
-  if(cond != null && next != null)
-    next.visit(new StopBeforeDefinition(v, to));
-  to.visit(v);
-}
-~~~~
-
-Supporting <tt>PullBackVisitor</tt>s is easier as we're iterating backwards - as only one <tt>Instruction</tt> can ever precede a <tt>Jump</tt>. We do have to override the <tt>next</tt> method though; control flow can always reach the <tt>to</tt> <tt>Definition</tt>, so it will always be a member of the returned set. We also don't care where the <tt>Definition</tt> is relative to the <tt>Jump</tt>, as in either case (before or after) ccontrol flow can still reach it.
+Similarly, we'll update the <tt>next()</tt> and <tt>prev()</tt> definitions to take into account that, for a <tt>Jump</tt>, the next <tt>Instruction</tt> could be one of two choices (or only one if the <tt>Jump</tt> is unconditional), and that a <tt>Defintion</tt> always has two predecessors; the <tt>Jump</tt> that refers to it and the directly preceding <tt>Instruction</tt>. These methods return <tt>Set</tt>s so we cover the case where the <tt>Definition</tt> comes directly after the <tt>Jump</tt> referring to it.
 
 ~~~~
 @Jump Members@ +=
@@ -1643,22 +1554,14 @@ Set<Instruction> next() {
   else
     return ImmutableSet.of(to);
 }
-~~~~
-
-The <tt>Definition</tt> class supports <tt>OnePassVisitor</tt>s without modification, as although control flow can reach it from either the preceding <tt>Instruction</tt> or exactly one <tt>Jump</tt> elsewhere in the function, only one <tt>Instruction</tt> will ever be executed after it: the <tt>Instruction</tt> directly following it. On the other hand, we do need to override the <tt>visit</tt> method for <tt>PullBackVisitor</tt>s, as once it's invoked the <tt>visit</tt> method on the <tt>PullBackVisitor</tt> it should iterate through both preceding <tt>Instruction</tt>s.
-
-~~~~
-@Jump Members@ +=
-void visit(PullBackVisitor v) {
-  if(!v.visit(this, next()))
-    return;
+@Definition Members@ +=
+Set<Instruction> prev() {
   if(prev != null)
-    prev.visit(v);
-  comeFrom.visit(v);
+    return ImmutableSet.of(prev, comeFrom);
+  else
+    return ImmutableSet.of(comeFrom);
 }
 ~~~~
-
-You can see that a badly-behaved <tt>PullBackVisitor</tt> could always return true from <tt>visit</tt>, and if a <tt>Definition</tt> was before its <tt>Jump</tt> we'd keep iterating forever. This shouldn't be a problem in practice as we don't let arbitary code use this visitor mechanism, but it's worth bearing in mind if the compiler was extended with a plugin mechanism or additional optimization code passes.
 
 ### If Statements ###
 
@@ -1991,19 +1894,23 @@ static class VariableSet extends AbstractSet<Variable> {
     };
   }
 }
+@Instruction Members@ +=
+final VariableSet isLive = new VariableSet();
 ~~~~
 
-This has another useful side-effect: when we <tt>append</tt> an <tt>Instruction</tt> we'll clear out any previous liveness information, which keeps the possibility of re-using or moving <tt>Instruction</tt>s open. We'll initialize the liveness <tt>OpenBitSet</tt> to the <tt>Variable</tt>s we know are live at this <tt>Instruction</tt>, regardless of where it is in the function: the <tt>Variable</tt>s that this <tt>Instruction</tt> reads from.
+We want to keep the logic that populates the <tt>isLive</tt> set separate from the logic that determines what we do with a live or dead <tt>Variable</tt>, so we'll create a pair of methods for the latter case:
 
 ~~~~
 @Instruction Members@ +=
-VariableSet isLive;
-@Reset The Instruction@ +=
-isLive = new VariableSet();
-Iterables.addAll(
-  isLive,
-  Iterables.filter(readsFrom(), Variable.class));
+void variableIsLive(Variable v, ParsingState state) {
+  @Variable Is Live@
+}
+void variableIsDead(Variable v, ParsingState state) {
+  @Variable Is Dead@
+}
 ~~~~
+
+When an <tt>Instruction</tt> is added to or removed from a chain of <tt>Instruction</tt>s via <tt>append</tt> or <tt>delete</tt> we'll work out the 'delta', or changes between what <tt>Variable</tt>s were live at the <tt>Instruction</tt> and what <tt>Variable</tt>s are live after it. We'll map this 'delta' to a series of calls to <tt>variableIsLive</tt> and <tt>variableIsDead</tt> so later parts of the code can act on this notification.
 
 We're defining "liveness" such that if the current <tt>Instruction</tt> reads a <tt>Variable</tt> then that <tt>Variable</tt> is "live" at that <tt>Instruction</tt>; if the current <tt>Instruction</tt> writes to (and doesn't read) a <tt>Variable</tt> then the <tt>Variable</tt> is no longer "live" (i.e. has been "killed"), and otherwise the <tt>Variable</tt> is live if it is live in any of the <tt>Instruction</tt>s following the one we're considering.
 
@@ -2014,75 +1921,78 @@ Set<Value> killed = Sets.difference(
   i.readsFrom());
 ~~~~
 
-We decided earlier that when we <tt>append</tt>ed an <tt>Instruction</tt> we were going to calculate what liveness information it changed, and then use a <tt>PullBackVisitor</tt> to propagate this information as far back as we can, instead of pushing liveness information from the current <tt>Instruction</tt> to the <tt>append</tt>ed one. This definition of <tt>killed</tt> shows why: consider two writes to a <tt>Variable</tt> followed by a read, with no intervening <tt>Jump</tt> <tt>Instruction</tt>s or other changes of control flow. We don't want to mark this <tt>Variable</tt> as live between the two writes as we'll just overwrite the value it contains without looking at it, and marking it as live means we have to waste space (maybe even register space) storing the value. Pulling liveness information backwards means we'll only mark it live between the read and the second write that "kills" it. Pushing liveness forwards would mean it'd be marked as live from the first write to the read. However, we said at the beginning we weren't going to do any optimisation, so we won't remove any useless writes we come across.
-
-Liveness will be only be computed once, in the <tt>append</tt> method. The <tt>PullBackVisitor</tt> mechanism gives us a way of minimalising the work we have to do each <tt>append</tt>; if the newly-appended <tt>Instruction</tt> makes a <tt>Variable</tt> live, we'll iterate backwards through every code path from the new <tt>Instruction</tt>, marking that <tt>Variable</tt> as live, until we get to an <tt>Instruction</tt> that kills it (i.e. it writes to that <tt>Variable</tt> but doesn't read it). We'll re-use a lot of this logic in the registers-in-use analysis in the next section, so we'll put most of the visitor's logic in an abstract parent class <tt>Propagate</tt>:
+We decided earlier that when we <tt>append</tt>ed an <tt>Instruction</tt> we were going to calculate what liveness information it changed, and then use the [visitor pattern](???) to propagate this information as far back as we can, instead of pushing liveness information from the current <tt>Instruction</tt> to the <tt>append</tt>ed one. This definition of <tt>killed</tt> shows why: consider two writes to a <tt>Variable</tt> followed by a read, with no intervening <tt>Jump</tt> <tt>Instruction</tt>s or other changes of control flow. We don't want to mark this <tt>Variable</tt> as live between the two writes as we'll just overwrite the value it contains without looking at it, and marking it as live means we have to waste space (maybe even register space) storing the value. Pulling liveness information backwards means we'll only mark it live between the read and the second write that "kills" it. Pushing liveness forwards would mean it'd be marked as live from the first write to the read. However, we said at the beginning we weren't going to do any optimisation, so we won't remove any useless writes we come across.
 
 ~~~~
-@Static Classes@ +=
-abstract static class Propagate implements PullBackVisitor {
-  public boolean visit(Instruction i, Set<Instruction> next) {
-    boolean anyPropagated = false;
-    @Calculate Variables Killed@
-    @Calculate Variables Propagated@
-    return anyPropagated;
-  }
-  abstract boolean mark(Instruction i, Set<Value> values);
-  abstract Set&lt;? extends Value&gt; marked(Instruction i);
+@Instruction Members@ +=
+boolean pullBackwards(ParsingState state) {
+  boolean anyChanged = false;
+  @Calculate Variables Killed@
+  @Calculate Variables Propagated@
+  @Trigger Callbacks@
+  return anyChanged;
 }
 ~~~~
 
-In the liveness analysis, the <tt>mark</tt> method means mark the <tt>Variable</tt>s in the <tt>values</tt> <tt>Set</tt> as live, and <tt>marked</tt> returns the live <tt>Variable</tt>s in the given <tt>Instruction</tt>.
+<tt>pullBackwards</tt> returns <tt>true</tt> if any <tt>Variable</tt>s have changed liveness (either have become alive or been made dead) because of this call. In this case we'll have to continue propagating changes to the <tt>Instruction</tt>'s predecessors. We don't want to keep iterating when all we're doing is marking <tt>Variable</tt>s live that are already marked as live, so we'll also stop at a particular <tt>Instruction</tt> if all of the <tt>nowLive</tt> <tt>Variable</tt>s we're propagated are all live.
 
 ~~~~
-@Static Classes@ +=
-static class PropagateLiveness extends Propagate {
-  boolean mark(Instruction i, Set<Value> values) {
-    return i.isLive.addAll(
-      Sets.filter(
-        values, 
-        Predicates.instanceOf(Variable.class)));
-  }
-  Set< ? extends Value> marked(Instruction i) {
-    return i.isLive;
-  }
+@Instruction Members@ +=
+void propagate(ParsingState state) {
+  if(pullBackwards(state))
+    for(Instruction i : prev())
+      i.propagate(state);
 }
 ~~~~
 
-We only want to iterate once regardless of how many <tt>Variable</tt>s the new <tt>Instruction</tt> makes live, so the <tt>InstructionVisitor</tt> will keep a <tt>Set</tt> of alll the newly-live <tt>Variable</tt>s, and will only stop iterating when all of them have been marked as dead along all code paths back from the new <tt>Instruction</tt>. We also don't want to keep iterating when all we're doing is marking <tt>Variable</tt>s live that are already marked as live, so we'll also stop at a particular <tt>Instruction</tt> if all of the <tt>nowLive</tt> <tt>Variable</tt>s we're propagated are all live.
+Liveness will be only be computed once, in the <tt>append</tt> method. This minimalises the work we have to do each <tt>append</tt>; if the newly-appended <tt>Instruction</tt> makes a <tt>Variable</tt> live, we'll iterate backwards through every code path from the new <tt>Instruction</tt>, marking that <tt>Variable</tt> as live, until we get to an <tt>Instruction</tt> that kills it (i.e. it writes to that <tt>Variable</tt> but doesn't read it).
+
+There's one edge case here: if we don't propagate any <tt>Variable</tt>s from the <tt>append</tt>ed <tt>Instruction</tt> to this <tt>Instruction</tt> then <tt>pullBackwards</tt> will return true and the recusive visit will terminate - even if we should propagate <tt>Variable</tt>s the current <tt>Instruction</tt> makes live to the previous <tt>Instruction</tt>! We'll therefore ignore the return value of <tt>pullBackwards</tt> on the <tt>Instruction</tt> that was appended to, and call <tt>propagate</tt> on its predecessors regardless.
+
+~~~~
+@After Append@ +=
+pullBackwards(state);
+for(Instruction i : prev())
+  i.propagate(state);
+~~~~
+
+Calculating the <tt>Variable</tt>s propagated is pretty straightforward; it's the union of all the <tt>Set</tt>s of live <tt>Variable</tt>s from the <tt>Instruction</tt>'s sucessors (which could be an empty set, if the <tt>Instruction</tt>'s <tt>next</tt> pointer isn't connected to anything).
 
 ~~~~
 @Calculate Variables Propagated@ +=
-for(Instruction n : next)
-  anyPropagated |= i.isLive.addAll(
-    Sets.difference(n.isLive, killed));
+Set<Value> propagated = readsFrom();
+for(Instruction i : next())
+  propagated = Sets.union(propagated, i.isLive);
+Set<Variable> live = Sets.filter(
+  Sets.difference(propagated, killed),
+  Predicates.instanceOf(Variable.class));
 ~~~~
 
-We'll start the <tt>PropagateLiveness</tt> visitor at this <tt>Instruction</tt>, and as (by this point in <tt>append</tt>) we've changed the <tt>next</tt> member to point to the <tt>Instruction</tt> we're <tt>append</tt>ing, the first call to the visitor will update the current <tt>Instruction</tt> with the liveness information in the <tt>Instruction</tt> being appended.
+The <tt>live</tt> variable stores the <tt>Variable</tt>s that should be live at this <tt>Instruction</tt>; we'll have to compare this with the current contents of <tt>isLive</tt> and invoke the <tt>variableIsLive</tt> and <tt>variableIsDead</tt> callbacks as appropriate.
 
 ~~~~
-@Update Parsing State@ +=
-visit(new AtLeastTwice(new PropagateLiveness()));
-~~~~
-
-There's one edge case here: if we don't propagate any <tt>Variable</tt>s from the <tt>append</tt>ed <tt>Instruction</tt> to this <tt>Instruction</tt> then the visitor will terminate - even if we should propagate <tt>Variable</tt>s the current <tt>Instruction</tt> makes live to the previous <tt>Instruction</tt>! We can't just invoke the visitor on the <tt>Instruction</tt> in the <tt>prev</tt> member, as there could be more than one previous <tt>Instruction</tt> and the parent <tt>Instruction</tt> class doesn't know this. We could add a <tt>previous()</tt> method to <tt>Instruction</tt> that returns all the <tt>Instruction</tt> directly before this one (an analogue to <tt>next()</tt>), but it's simpler to force the visitor to visit at least two <tt>Instruction</tt>s by wrapping the <tt>PropagateLiveness</tt> visitor in a decorator:
-
-~~~~
-@Static Classes@ +=
-static class AtLeastTwice implements PullBackVisitor {
-  final PullBackVisitor decorated; boolean visited = false;
-  AtLeastTwice(PullBackVisitor decorated) {
-    this.decorated = decorated;
+@Trigger Callbacks@ +=
+for(Variable v : live)
+  if(isLive.add(v)) {
+    variableIsLive(v, state);
+    anyChanged = true;
   }
-  public boolean visit(Instruction i, Set<Instruction> next) {
-    boolean ret = decorated.visit(i, next) || !visited;
-    visited = true;
-    return ret;
+for(Variable v : isLive)
+  if(!live.contains(v)) {
+    variableIsDead(v, state);
+    live.remove(v);
+    anyChanged = true;
   }
-}
 ~~~~
 
-Note that we're using a boolean to detect the first visit (where we force the return value to true so we make at least two visits) rather than counting the number of visits we've made to avoid the unlikely possiblity of the visit counter overflowing.
+Handling the deletion of an <tt>Instruction</tt> is much easier; we can just force the <tt>Instruction</tt> that was our predecessor to <tt>propagate</tt>, or synchronize its liveness information with its new sucessor <tt>Instruction</tt>. We can say <tt>Instruction</tt> in the singular here as when we remove a <tt>Jump</tt> (the only <tt>Instruction</tt> with more than one successor) or a <tt>Definition</tt> (the only <tt>Instruction</tt> with more than one predecessor) we automatically remove the other <tt>Instruction</tt> of the pair, so we never have to deal with a deletion that leaves two control flow paths dangling.
+
+~~~~
+@After Delete@ +=
+oldPrev.propagate(state);
+~~~~
+
+We'll finish this section with a note about initialization. After an <tt>Instruction</tt> has been instantiated, but before it has been <tt>append</tt>ed to another <tt>Instruction</tt> (or been <tt>append</tt> to) the contents of the <tt>isLive</tt> set won't be correct; it'll still be empty but any <tt>Variable</tt>s the <tt>Instruction</tt> writes to are actually live. Also, the <tt>Ret</tt> <tt>Instruction</tt>s will never do this analysis as it overrides the logic in <tt>append</tt> in its subclass and doesn't call the <tt>super</tt> implememtation. This means that a <tt>Ret</tt>'s <tt>isLive</tt> field will always be empty - but this is correct, as no <tt>Instruction</tt>s are live just before control flow returns.
 
 ### Registers In Use ###
 
@@ -3098,7 +3008,7 @@ return String.format(".%s\n\t.p2align 4\n", segment);
 
 We'll print out the generated assembly code to an <tt>Appendable</tt>. We'll iterate through the linked lists of <tt>Instruction</tt>s starting at the <tt>head</tt> <tt>Instruction</tt> of every function (and the data & bss segments), and use the <tt>Instruction</tt>'s <tt>toString</tt> method to generate the relevant code. We can skip the no-op <tt>Instruction</tt>s we identified earlier, and do some minor formatting of the generated Assembly code: it'll indent everything with a tab unless it's a <tt>Label<tt> <tt>Definition</tt> or a <tt>Segment</tt>.
 
-We can now use this method to write out all three segments. The <tt>.text</tt> segment is the only segment we're writing to which has execute permissions by default, so we'll put all the Assembly code we've generated for the functions there. The <tt>ParsingState</tt>s in the <tt>ProgramState</tt> are added to the <tt>.text</tt> segment without re-ordering, so the functions will appear in the same order that they appear in the source code (with nested functions appearing before the functions they are declared in). It may be more efficient to put the code for functions that call each other next to each other, so when the code for the caller is pulled into the instruction cache any code for the called function on the same cache line will be pulled in for free, saving a memory load when we make the call. We'll also only print the text & bss segments if they have at least one <tt>Definition</tt> (i.e. the <tt>next</tt> pointer of the <tt>Segment</tt> isn't empty).
+We'll use this method to write out all three segments. The <tt>.text</tt> segment is the only segment we're writing to which has execute permissions by default, so we'll put all the Assembly code we've generated for the functions there. The <tt>ParsingState</tt>s in the <tt>ProgramState</tt> are added to the <tt>.text</tt> segment without re-ordering, so the functions will appear in the same order that they appear in the source code (with nested functions appearing before the functions they are declared in). It may be more efficient to put the code for functions that call each other next to each other, so when the code for the caller is pulled into the instruction cache any code for the called function on the same cache line will be pulled in for free, saving a memory load when we make the call. We'll also only print the text & bss segments if they have at least one <tt>Definition</tt> (i.e. the <tt>next</tt> pointer of the <tt>Segment</tt> isn't empty).
 
 ~~~~
 @Append Instructions@ +=
@@ -3126,7 +3036,6 @@ The appendices contain a few pieces of miscellaneous boilerplate. We'll start wi
 import static com.blogspot.remisthoughts.compiletoasm.UnsignedLexer.*;
 import static com.blogspot.remisthoughts.compiletoasm.Compiler.Register.*;
 import static com.blogspot.remisthoughts.compiletoasm.Compiler.WriteType.*;
-import static com.blogspot.remisthoughts.compiletoasm.Compiler.Direction.*;
 import static com.google.common.collect.Iterables.*;
 import static org.gnu.glpk.GLPK.*;
 import java.io.*;
