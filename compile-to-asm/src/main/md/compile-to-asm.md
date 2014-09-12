@@ -440,6 +440,7 @@ static final class ParsingState {
     @Set Up Stack Allocation@
     @Identify Callee Saves Registers@
     @Parse Function Parameters@
+    @Set Up LP Problem@
   }
   @Parsing State Members@
 }
@@ -2059,7 +2060,7 @@ Set<Variable> isLive() {
 We've now calculated the live <tt>Variable</tt>s and <tt>Register</tt>s in use at each <tt>Instruction</tt>, but not every combination of the two sets is valid. The register assignment problem is basically "should we assign <tt>Variable</tt> v to <tt>Register</tt> r at <tt>Instruction</tt> i". We'll pose this problem as an Integer Programming problem to find the most efficient solution below, but at this point we can quickly eliminate some impossible (v, r, i) combinations. This is why we've been building up detailed control-flow information; the more solutions we rule out at this stage the smaller our Integer Programming problem will be, so the faster we can solve it. We'll also use this opportunity to eliminate some  <tt>Variable</tt>-<tt>Register</tt> combinations that are forbidden by the x86-64 ABI. This method is only for <tt>Variable</tt>s in <tt>isLive()</tt> and <tt>Register</tt>s that are not in <tt>inUse()</tt>; other combinations are definitely not valid.
 
 ~~~~
-@Instruuction Members@ +=
+@Instruction Members@ +=
 boolean isAssignable(Variable v, Register r) {
   @Is This Combination Impossible@
   return true;
@@ -2096,46 +2097,29 @@ if(v.equals(state.framePointer) && r == THESTACK)
 
 Now we can start setting up the Integer Programming problem described in [the paper](http://grothoff.org/christian/lcpc2006.pdf) we're following. While we won't go into the details here, the definition of a problem centres around maximising an "objective" function subject to a series of constraints on the dependent variables in that function. These constraints are usually defined in a matrix, where each row is a different constraint, each column is a dependent variable and each cell of the matrix is the coefficient of the corresponding variable in the constraint. Each of these constraint functions must evaluate to less than or equal to a constant; the constants for each constraint are stored in a (mathematical) vector.
 
-
 We'll decide on the "best" register assignment by codifying a fitness, or "objective", function for assignment. Good assignments that spill fewer variables to the stack and add fewer instructions to move variables between registers will have a lower score, and bad assignments that do expensive memory reads and writes will have a higher score. We'll define the "best" assignment as the one that produces the lowest value for the object function. As this is a Linear Programming problem the objective function must be a linear combination of the dependent variables (the columns we'll go on to define), so we'll let each column (dependent variable) decide its coefficient in the objective function:
 
 ~~~~
-@Set Up Objective@ +=
+@Set Up LP Problem@ +=
 glp_set_obj_name(allocation, "register assignment");
 glp_set_obj_dir(allocation, GLP_MIN);
 ~~~~
 
-We'll start by building up the matrix of coefficients to the constraint equations. We'll use <tt>CellKey</tt> subclasses to represent the logical columns in this matrix, and each column will add a fixed number of rows. In general, each row and column will be associated with a particular (v, r, i) combination, and we'll make our classes have a well-defined order (using the <tt>Comparable</tt> interface) so we can sort the rows and columns to give us O(lg n) lookup time for an given (v, r, i) combination.
-
-
 We'll start by defining the columns of the constraint matrix. The (Java SWIG bindings of the) GLPK library we're using represents a problem with an instance of <tt>glp_prob</tt>. Each column in the constraint matrix is a dependent variable, and each dependent variable appears once in the objective function with a linear coefficient (which may be zero). We'll keep the logic to determine this constant in the dependent variable's <tt>ColumnKey</tt> so we only have to maintain one <tt>List</tt> of dependent variables (the <tt>columns</tt> variable). Note that as we're going to sort the columns we don't know yet what index in <tt>columns</tt> each <tt>ColumnKey</tt> will end up in, so we'll have to pass that index in when we eventually call <tt>addToObjective</tt> so we can set the right column in <tt>glp_prob</tt>'s objective function.
 
+We referred to a <tt>updateLP</tt> method above; this is called whenever one or more <tt>Variable</tt>s or <tt>Register</tt>s change liveness or in-use state. We'll use it to clear any existing LP columns and constraints (rows) associated with the <tt>Instruction</tt> and add new ones based on the new liveness and in-use information. We could instead update the LP problem incrementally, based on exactly which <tt>Variable</tt>s or <tt>Register</tt>s have changed liveness or usage, but it's more straightforward just to make another snapshot. We'll therefore start by clearing any columns or rows we've added:
+
 ~~~~
-@Generate GLPK Mappings@ +=
-try (@GLPK Resources@) {
-  for(int i = 0; i < code.size(); ++i) {
-    @For Each Instruction@
-    for (Register r : ASSIGNABLE) {
-      @For Each Instruction And Register@
-      for (int v = new Variable(0); v.id < numVariables; v = new Variable(++v.id))
-        if(needsAssigning(v, i, r)) {
-          @For Each Combination@
-        }
-      @After Each Register@
-    }
-    @After Each Instruction@
+@Instruction Members@ +=
+void updateLP(ParsingState state) {
+  @Remove Existing Columns and Rows@
+  for(Variable v : isLive()) {
+    @For Each Variable@
+    for(Register r : Sets.complementOf(inUse()))
+      if(isAssignable(v, r)) {
+        @For Each Combination@
+      }
   }
-}
-~~~~
-
-The GLPK API is very C-style, so we'll add some helper methods to make it easier to work with. All our columns are binary (only 0 or 1 valued) columns, and we'll be adding them one at a time. <tt>addColumn</tt> adds this common case, and returns the column index which we'll need to refer to the column in constraints and the objective function.
-
-~~~~
-@Other Helpers@ +=
-static int addColumn(glp_prob problem) {
-  int col = glp_add_cols(problem, 1);
-  glp_set_col_kind(problem, col, GLP_BV);
-  return col;
 }
 ~~~~
 
@@ -2143,50 +2127,85 @@ GLPK also requires you to specify a whole constraint (a whole row of the constra
 
 ~~~~
 @Other Helpers@ +=
-static class Constraint implements AutoCloseable {
+static class Row {
+  final ParsingState state;
   final SWIGTYPE_p_int columns;
   final SWIGTYPE_p_double values;
-  Constraint(int numVariables) {
-    int size = numVariables * ASSIGNABLE.length + 1;
-    columns = new_intArray(size);
-    values = new_doubleArray(size);
+  final int row;
+  Row(ParsingState state, int row) {
+    this.state = state;
+    this.row = row;
+    int size = state.numVariables * ASSIGNABLE.length + 1;
+    columns = new_intArray(size + 1);
+    values = new_doubleArray(size + 1);
   }
-  void close() {
+  void finalize() {
     delete_intArray(columns);
     delete_doubleArray(values);
   }
-  @Constraint Members@
+  @Row Members@
 }
 ~~~~
 
 The <tt>set</tt> method is the accumulator - it sets the coefficient in the current constraint to the double value passed in. As described above, it uses <tt>+ 1</tt>s to ensure the <tt>columns</tt> and <tt>values</tt> arrays are one-indexed. The <tt>len</tt> variable keeps track of how many columns we've added to the constraint function, as GLPK expects all column indices in the <tt>columns</tt> array to be valid (i.e. non-zero). We don't have to worry about GLPK keeping a reference to the array or mutating it - <tt>glp_set_mat_row</tt> just does one pass through it, copying the constraints into the <tt>glp_prob</tt>'s internal representation of the problem. <tt>addTo</tt> resets the accumulator after it adds the constraint and sets the row's fixed (<tt>GLP_FX</tt>) or lower and upper (<tt>GLP_DB</tt>) bounds.
 
 ~~~~
-@Constraint Members@ +=
+@Row Members@ +=
 int len = 0;
 void set(int column, double value) {
   intArray_setitem(columns, len + 1, column);
   doubleArray_setitem(values, len + 1, value);
   ++len;
 }
-void addTo(glp_prob problem, int lowerBound, int upperBound) {
-  if(len == 0) return;
-  int row = glp_add_rows(problem, 1);
+void addTo(int lowerBound, int upperBound) {
   glp_set_mat_row(problem, row, len, columns, values);
   int type = lowerBound == upperBound ? GLP_FX : GLP_DB;
   glp_set_row_bnds(problem, row, type, lowerBound, upperBound);
-  len = 0;
 }
 ~~~~
 
-The first (and most important) set of dependent variables are the <tt>VarInRegAtInstr</tt> columns; these represent the variable <tt>v</tt> being in <tt>Register</tt> <tt>r</tt> at <tt>Instruction</tt> <tt>i</tt>, and so store the solution of the register assignment problem. We're phrasing this as an Integer programming problem, so the <tt>VarInRegAtInstr</tt> variables can only take integer values, and we'll add extra constaints to ensure the value is either zero or one. We can then intepret the zero or one values as a binary yes-or-no output. We'll use the <tt>needsAssigning</tt> method we defined earlier so we only have dependent variables for valid combinations - the fewer dependent variables our Integer Programming problem has the faster it will be to solve it. We'll define the <tt>addToObjective</tt>'s <tt>coefficient</tt> later as this is the main way we'll modify the problem to encode more domain knowledge. We want the optimal solution (the solution that minimises the objective function) to generate the most efficient solution, so we want to penalise register assignments that require expensive operations (like writing to the stack).
+We need to talk a bit about how we'll manage rows in the GLPK constraint matrix. This isn't straightforwards as a row's number isn't a fixed id - it's just the current position in the matrix; delete row <tt>i</tt> and what was row <tt>i + 1</tt> is now the new row <tt>i</tt>. The problem comes from our access patterns. As we expect the problem to be long-lived (as we would keep the same one for function during an iterative compilation session) we'll constantly be adding and removing rows and columns as new <tt>Variable</tt>s become live or dead and new <tt>Register</tt>s fall into or out of use. This even happens during a one-off compilation of a function; as we create successive <tt>Instruction</tt>s as we walk through the AST we propagate liveness and <tt>Register</tt> usage backwards, revising the GLPK columns and constraints as we go. We'll therefore use an [object pool](http://en.wikipedia.org/wiki/Object_pool_pattern) to manage this row and column churn. We'll let <tt>Instruction</tt>s "create" and "delete" rows, but they'll really be checking them into or out of an object pool owned by the <tt>ParsingState</tt>. We'll only create underlying rows (via <tt>glp_add_rows</tt>) when we've got no rows outstanding.
+
+~~~~
+@Instruction Members@ +=
+private final Set<Integer> rows = Sets.newTreeSet();
+private Row addRow(ParsingState state) {
+  Row r = state.addRow();
+  rows.add(r.row);
+  return r;
+}
+@Remove Existing Columns and Rows@ +=
+for(Integer row : rows)
+  state.deleteRow(row);
+rows.clear();
+~~~~
+
+So what does the <tt>ParsingState</tt> side look like? We'll use a <tt>LinkedList</tt> to store the rows we've created in the GLPK problem but haven't given out to any <tt>Instruction</tt> as we'll be removing from the first element and adding to the end of the list; unlike an array-backed implementation both operations are O(1) as they just involve updating pointers. The only complexity is in <tt>deleteRow</tt> as we have to update the GLPK problem to remove whatever values were in it previously. We'll also set the target value of the constraint to zero so the constraint is now mathematically <tt>0 = 0</tt>. 
+
+~~~~
+@Parsing State Members@ +=
+private final Queue<Integer> rows = Lists.newLinkedList();
+Row addRow() {
+  if(rows.isEmpty())
+    return new Row(this, glp_add_rows(allocation, 1));
+  else
+    return new Row(this, rows.poll());
+}
+void deleteRow(int row) {
+  glp_set_mat_row(allocation, row, 0, null, null);
+  glp_set_row_bnds(allocation, row, GLP_FX, 0.0, 0.0);
+  rows.add(row);
+}
+~~~~
+
+The first (and most important) set of dependent variables are the <tt>varInReg</tt> columns; these represent the variable <tt>v</tt> being in <tt>Register</tt> <tt>r</tt> at <tt>Instruction</tt> <tt>i</tt>, and so store the solution of the register assignment problem. We're phrasing this as an Integer programming problem, so the <tt>varInReg</tt> variables can only take integer values, and we'll add extra constaints to ensure the value is either zero or one. We can then intepret the zero or one values as a binary yes-or-no output. We'll use the <tt>needsAssigning</tt> method we defined earlier so we only have dependent variables for valid combinations - the fewer dependent variables our Integer Programming problem has the faster it will be to solve it. We'll define the <tt>addToObjective</tt>'s <tt>coefficient</tt> later as this is the main way we'll modify the problem to encode more domain knowledge. We want the optimal solution (the solution that minimises the objective function) to generate the most efficient solution, so we want to penalise register assignments that require expensive operations (like writing to the stack).
 
 ~~~~
 @For Each Combination@ +=
-int varInRegAtInstr = addColumn(allocation);
+int varInReg = addColumn(state);
 double coefficient = 0d;
-@Determine VarInRegAtInstr Coefficient@
-glp_set_obj_coef(allocation, varInRegAtInstr, coefficient);
+@Determine VarInReg Coefficient@
+glp_set_obj_coef(state.allocation, varInReg, coefficient);
 ~~~~
 
 How should we decide what value to add to the objective function if a particular (v, i, r) combination is chosen? While we know what assignments we want to penalise or reward, the amount they add to the objective function (and so their relative importance) is not quite so clear. We'll pick values rather arbitarily for now; we should tweak these values after we've seen examples of the assignments they produce.
@@ -2198,8 +2217,8 @@ However, we know that if a variable is used (read or written) by an instruction 
 ~~~~
 @Other Helpers@ +=
 private static final double COST_OF_SPILL = 100.0;
-@Determine VarInRegAtInstr Coefficient@ +=
-if(r == Register.THESTACK && code.get(i).uses().contains(v))
+@Determine varInReg Coefficient@ +=
+if(r == THESTACK && uses().contains(v))
   coefficient += COST_OF_SPILL;
 ~~~~
 
@@ -2226,7 +2245,7 @@ Our first hint aims to make as many <tt>mov</tt>s instructions no-ops as possibl
 boolean couldBeNoOp(Variable v, Register r) { return false; }
 @Move Members@ +=
 boolean couldBeNoOp(Variable v, Register r) { return uses(v) && uses(r); }
-@Determine VarInRegAtInstr Coefficient@ +=
+@Determine varInReg Coefficient@ +=
 if(code.get(i).couldBeNoOp(v, r))
   coefficient += MOVE_NOP_HINT;
 @Other Helpers@ +=
@@ -2258,7 +2277,7 @@ AliasingPair aliasingVars(ControlFlowGraph cfg, int i) {
 }
 ~~~~
 
-When two <tt>Variable</tt>s alias it's always best to assign them to the same <tt>Register</tt>; if we put another live <tt>Variable</tt> in the <tt>Register</tt> we'd add an extra <tt>mov</tt> <tt>Instruction</tt>. We'll therefore force the solver to assign aliasing <tt>Variable</tt>s together by adding a constraint that makes one <tt>Variable</tt>'s <tt>varInRegAtInstr</tt> minus the other's equal to zero, so either both <tt>varInRegAtInstr</tt>s are one or both are zero:
+When two <tt>Variable</tt>s alias it's always best to assign them to the same <tt>Register</tt>; if we put another live <tt>Variable</tt> in the <tt>Register</tt> we'd add an extra <tt>mov</tt> <tt>Instruction</tt>. We'll therefore force the solver to assign aliasing <tt>Variable</tt>s together by adding a constraint that makes one <tt>Variable</tt>'s <tt>varInReg</tt> minus the other's equal to zero, so either both <tt>varInReg</tt>s are one or both are zero:
 
 ~~~~
 @GLPK Resources@ +=
@@ -2268,14 +2287,14 @@ AliasingPair aliasingVars = code.get(i).aliasingVars(cfg, i);
 @For Each Combination@ +=
 if(aliasingVars != null)
   if(v.equals(aliasingVars.a))
-    aliasedInSameReg.set(varInRegAtInstr, +1.0);
+    aliasedInSameReg.set(varInReg, +1.0);
   else if(v.equals(aliasingVars.b))
-    aliasedInSameReg.set(varInRegAtInstr, -1.0);
+    aliasedInSameReg.set(varInReg, -1.0);
 @After Each Register@ +=
 aliasedInSameReg.addTo(allocation, 0, 0);
 ~~~~
 
-Now that we've identified any aliasing <tt>Variable</tt>s we can add a constraint to enforce that a single <tt>Register</tt> (but not the stack) can only have a single <tt>Variable</tt>, or a pair of aliasing <tt>Variable</tt>s assigned to it at each <tt>Instruction</tt>. We'll do this by ensuring that the sum of the <tt>varInRegAtInstr</tt>s for each <tt>Variable</tt> assigned to that <tt>Register</tt> is between zero and one (the <tt>Register</tt> could be empty if there are fewer live <tt>Variable</tt>s than there are <tt>Register</tt>s). If the <tt>Variable</tt> is the second of an aliasing pair we skip it, so each pair of aliasing <tt>Variable</tt>s only contributes one <tt>varInRegAtInstr</tt> to the contraint's sum.
+Now that we've identified any aliasing <tt>Variable</tt>s we can add a constraint to enforce that a single <tt>Register</tt> (but not the stack) can only have a single <tt>Variable</tt>, or a pair of aliasing <tt>Variable</tt>s assigned to it at each <tt>Instruction</tt>. We'll do this by ensuring that the sum of the <tt>varInReg</tt>s for each <tt>Variable</tt> assigned to that <tt>Register</tt> is between zero and one (the <tt>Register</tt> could be empty if there are fewer live <tt>Variable</tt>s than there are <tt>Register</tt>s). If the <tt>Variable</tt> is the second of an aliasing pair we skip it, so each pair of aliasing <tt>Variable</tt>s only contributes one <tt>varInReg</tt> to the contraint's sum.
 
 ~~~~
 @GLPK Resources@ +=
@@ -2283,12 +2302,12 @@ Constraint oneVarPerReg = new Constraint(numVariables);
 @For Each Combination@ +=
 if(r != Register.THESTACK
 && (aliasingVars == null || !v.equals(aliasingVars.b)))
-  oneVarPerReg.set(varInRegAtInstr, 1.0);
+  oneVarPerReg.set(varInReg, 1.0);
 @After Each Register@ +=
-oneVarPerReg.addTo(allocation, 0, 1);
+oneVarPerReg.addTo(0, 1);
 ~~~~
 
-We also want to ensure <tt>Variable</tt>s aren't 'lost' - they must be assigned to exactly one <tt>Register</tt> (which includes <tt>THESTACK</tt>). This is slightly harder to implement as the inner loop over the (v, i, r) combinations is over <tt>Variable</tt>s. We could either add a second loop over first <tt>Variable</tt>s then <tt>Register</tt>s so we could build up these contraints sequentially, or build up the constraints in parallel. We'd need one for each <tt>Variable</tt>, and as we loop over the (v, i, r)  combinations we'd add their <tt>varInRegAtInstr</tt> to the relevant <tt>Variable<tt>'s constraint accumulator. The latter implementation is below; we'd rather have fewer iterations and better memory access locality at the expense of a minor increase in memory used. We'll start by wrapping each <tt>Variable</tt>'s accumlator in a composite object:
+We also want to ensure <tt>Variable</tt>s aren't 'lost' - they must be assigned to exactly one <tt>Register</tt> (which includes <tt>THESTACK</tt>). This is slightly harder to implement as the inner loop over the (v, i, r) combinations is over <tt>Variable</tt>s. We could either add a second loop over first <tt>Variable</tt>s then <tt>Register</tt>s so we could build up these contraints sequentially, or build up the constraints in parallel. We'd need one for each <tt>Variable</tt>, and as we loop over the (v, i, r)  combinations we'd add their <tt>varInReg</tt> to the relevant <tt>Variable<tt>'s constraint accumulator. The latter implementation is below; we'd rather have fewer iterations and better memory access locality at the expense of a minor increase in memory used. We'll start by wrapping each <tt>Variable</tt>'s accumlator in a composite object:
 
 ~~~~
 @Other Helpers@ +=
@@ -2319,7 +2338,7 @@ Adding the constraints is now relatively straightforward:
 @GLPK Resources@ +=
 ManyConstraints varsNotLost = new ManyConstraints(numVariables);
 @For Each Combination@ +=
-varsNotLost.set(v, varInRegAtInstr, 1.0);
+varsNotLost.set(v, varInReg, 1.0);
 @After Each Instruction@ +=
 varsNotLost.addTo(allocation, 1, 1);
 ~~~~
@@ -2368,7 +2387,7 @@ static final class ForceWhenVariableFirstLive extends RowKey {
     glp_set_row_bnds(allocation, row + 1, GLP_FX, 0.0, 0.0);
     constraints.add(new Constraint(
       row, 
-      Collections.binarySearch(cfg.columns, new VarInRegAtInstr(v, r, n)),
+      Collections.binarySearch(cfg.columns, new varInReg(v, r, n)),
       setToOne ? -1.0 : 0.0));
     constraints.add(new Constraint(
       row, 
@@ -2393,7 +2412,7 @@ static final class ZeroIfInRegisterPreviously extends RowKey {
     glp_set_row_bnds(allocation, row + 1, GLP_UP, 0.0, 1.0);
     constraints.add(new Constraint(
       row, 
-      Collections.binarySearch(cfg.columns, new VarInRegAtInstr(v, r, n)),
+      Collections.binarySearch(cfg.columns, new varInReg(v, r, n)),
       1.0));
     constraints.add(new Constraint(
       row, 
@@ -2420,7 +2439,7 @@ static final class ZeroIfNotInRegister extends RowKey {
     glp_set_row_bnds(allocation, row + 1, GLP_LO, 0.0, 0.0);
     constraints.add(new Constraint(
       row, 
-      Collections.binarySearch(cfg.columns, new VarInRegAtInstr(v, r, n)),
+      Collections.binarySearch(cfg.columns, new varInReg(v, r, n)),
       1.0));
     constraints.add(new Constraint(
       row, 
@@ -2444,11 +2463,11 @@ static final class SetFlagOnChange extends RowKey {
     glp_set_row_bnds(allocation, row + 1, GLP_LO, 0.0, 0.0);
     constraints.add(new Constraint(
       row, 
-      Collections.binarySearch(cfg.columns, new VarInRegAtInstr(v, r, n)),
+      Collections.binarySearch(cfg.columns, new varInReg(v, r, n)),
       1.0));
     constraints.add(new Constraint(
       row, 
-      Collections.binarySearch(cfg.columns, new VarInRegAtInstr(v, r, nTo)),
+      Collections.binarySearch(cfg.columns, new varInReg(v, r, nTo)),
       -1.0));
     constraints.add(new Constraint(
       row, 
@@ -2471,14 +2490,11 @@ rows.add(new SetFlagOnChange(v, r, n.getKey(), n.getValue()));
 
 ~~~~
 @Solve@ +=
-glp_prob allocation = getLPproblem(controlFlow);
 glp_iocp iocp = new glp_iocp();
 glp_init_iocp(iocp);
 iocp.setPresolve(GLP_ON);
-if (glp_intopt(allocation, iocp) != 0)
+if (glp_intopt(state.allocation, iocp) != 0)
   throw new IllegalStateException();
-copySolutionIntoCode(allocation, controlFlow, state);
-glp_delete_prob(allocation);
 ~~~~
 
 We know which register each variable is in at each node now (assuming it's live):
@@ -2487,7 +2503,7 @@ We know which register each variable is in at each node now (assuming it's live)
 @Other Helpers@ +=
 static Register whereAmI(glp_prob allocation, ControlFlowGraph controlFlow, int v, int n) {
   for(Register r : ASSIGNABLE) {
-    int index = Collections.binarySearch(controlFlow.columns, new VarInRegAtInstr(v, r, n));
+    int index = Collections.binarySearch(controlFlow.columns, new varInReg(v, r, n));
     if(index >= 0 && glp_mip_col_val(allocation, index + 1) > 0.5)
         return r;
   }
@@ -2546,7 +2562,7 @@ for(int i = 0; i < state.code.size(); ++i) {
   for(Variable variable : state.code.get(i).uses(Variable.class)) {
     int v = indexOf(controlFlow.variables, variable);
     for (Register r : ASSIGNABLE) {
-      int index = Collections.binarySearch(controlFlow.columns, new VarInRegAtInstr(v, r, controlFlow.prevNode[i]));
+      int index = Collections.binarySearch(controlFlow.columns, new varInReg(v, r, controlFlow.prevNode[i]));
       if(index >= 0 && glp_mip_col_val(allocation, index + 1) > 0.5) // huge tolerance for 0-1 integer
         resolutions.put(variable, r);
     }
