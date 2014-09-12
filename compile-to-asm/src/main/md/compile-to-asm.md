@@ -1995,10 +1995,7 @@ Function calls are another type of <tt>Instruction</tt> that has special behavio
 ~~~~
 @Call Members@ +=
 Set<Value> writesTo(WriteType t) {
-  if(t == WILL_ERASE)
-    return ImmutableSet.<Value>of(rax);
-  else
-    return none;
+  return ImmutableSet.<Value>of(rax);
 }
 ~~~~
 
@@ -2048,56 +2045,50 @@ anyChanged |= inUse.retainAll(used);
 
 ### What Needs Assigning ###
 
-The register assignment problem is basically "should we assign <tt>Variable</tt> v to <tt>Register</tt> r at <tt>Instruction</tt> i". We'll pose this problem as an Integer Programming problem to find the most efficient solution below, but at this point we can quickly eliminate some impossible (v, r, i) combinations. This is why we've been building up detailed control-flow information; the more solutions we rule out at this stage the smaller our Integer Programming problem will be, so the faster we can solve it. We'll also use this opportunity to eliminate some (v, r, i) combinations that are forbidden by the x86-64 ABI.
+We've calculated the live <tt>Variable</tt>s at each <tt>Instruction</tt>, but these are just a subset of the <tt>Variable</tt>s we need to assign to <tt>Register</tt>s. <tt>Variable</tt>s that are dead immediately before an <tt>Instruction</tt> and are written to by the <tt>Instruction</tt> still need to be assigned so the CPU knows write the results out to. We'll use a similar method to <tt>inUse()</tt> above; we'll add an accessor to <tt>isLive</tt> that adds in these additional <tt>Variable</tt>s:
 
 ~~~~
-@Control Flow Graph Members@ +=
-boolean needsAssigning(Variable v, int i, Register r) {
-  boolean isUsed = code.get(i).uses().contains(v);
-  @Is This Combination Impossible@
-  return true;
+@Instruction Members@ +=
+Set<Variable> isLive() {
+  return Sets.union(
+    isLive,
+    Sets.filter(uses(), Predicates.instanceOf(Variable.class)));
 }
 ~~~~
 
-We'll start by using the <tt>Variable</tt> liveness information we calculated - if a <tt>Variable</tt> isn't live we definitely don't need to put it in a <tt>Register</tt>. However, our definition of liveness means a <tt>Variable</tt> is only "live" at a control flow node if a value has been written to it and hasn't yet been read. As our control flow graph nodes are before their corresponding <tt>Instruction</tt> in the <tt>code</tt> <tt>List</tt> a <tt>Variable</tt> that is written to at <tt>Instruction</tt> <tt>i</tt> won't be "live" at <tt>Instruction</tt> <tt>i</tt>. However, it'll still need to be assigned a <tt>Register</tt>, so the <tt>Instruction</tt> has somewhere to put its new value. Therefore we can only forbid (v, r, i) combinations where the <tt>Variable</tt> is both "dead" and not used by the current <tt>Instruction</tt>:
+We've now calculated the live <tt>Variable</tt>s and <tt>Register</tt>s in use at each <tt>Instruction</tt>, but not every combination of the two sets is valid. The register assignment problem is basically "should we assign <tt>Variable</tt> v to <tt>Register</tt> r at <tt>Instruction</tt> i". We'll pose this problem as an Integer Programming problem to find the most efficient solution below, but at this point we can quickly eliminate some impossible (v, r, i) combinations. This is why we've been building up detailed control-flow information; the more solutions we rule out at this stage the smaller our Integer Programming problem will be, so the faster we can solve it. We'll also use this opportunity to eliminate some  <tt>Variable</tt>-<tt>Register</tt> combinations that are forbidden by the x86-64 ABI. This method is only for <tt>Variable</tt>s in <tt>isLive()</tt> and <tt>Register</tt>s that are not in <tt>inUse()</tt>; other combinations are definitely not valid.
 
 ~~~~
-@Is This Combination Impossible@ +=
-if(!isLiveAt(v, i) && !isUsed)
-  return false;
-~~~~
-
-We've gone to some trouble to preserve the values in the <tt>CALLEE_SAVES</tt> <tt>Register</tt>s, so we'll take advantage of this contract when calling other functions. However, we know that values in other <tt>Register</tt>s could be overwritten, so we'll ensure that none of the <tt>Variable</tt>s we care about are stored in a <tt>Register</tt> that isn't saved.
-
-~~~~
-@Is This Combination Impossible@ +=
-if(code.get(i) instanceof Call 
-&& r != Register.THESTACK 
-&& indexOf(CALLEE_SAVES, r) < 0)
-  return false;
+@Instruuction Members@ +=
+boolean isAssignable(Variable v, Register r) {
+  @Is This Combination Impossible@
+  return true;
+}
 ~~~~
 
 If a <tt>Variable</tt> is used by the <tt>Instruction</tt> we're considering (i.e. the <tt>isUsed</tt> flag we calculated at the start of this function is true), then we can't assign this <tt>Variable</tt> to the stack. If the <tt>Instruction</tt> is a <tt>BinaryOp</tt> and the other operand is indirect, then if we assigned the other operand to the stack then we'd have two indirect operands, which is forbidden by the x86 instruction set. However, if both operands are direct then we could assign one of the to the stack - but this would complicate our linear programming problem as we'd have to penalise assignments (as we'd prefer solutions where the <tt>Variable</tt>s that are used are assigned to <tt>Register</tt>s). We'll therefore take the simple approach, and just forbid these technically valid edge cases:
 
 ~~~~
 @Is This Combination Impossible@ +=
-if(isUsed && r == Register.THESTACK)
+if(uses().contains(v) && r == THESTACK)
   return false;
 ~~~~
 
-The <tt>registersInUse</tt> <tt>BitSet</tt> we built up earlier contains a <tt>Register</tt>s we can't write to at a given <tt>Instruction</tt>. We'll use that information now to prevent the linear programming problem from assigning <tt>Variable</tt>s to those <tt>Register</tt>s. The only exception is if this <tt>Instruction</tt> is the one that saves or restores a <tt>Variable</tt> to this fixed <tt>Register</tt> (e.g. <tt>mov save!r14, r14</tt>). In this case it's actually preferable to assign the <tt>Variable</tt> to that <tt>Register</tt> as that makes this <tt>Instruction</tt> a no-op!
+If a <tt>Register</tt> is not in the <tt>inUse()</tt> set of an <tt>Instruction</tt> but the <tt>Instruction</tt> does write to it then we can't assign a <tt>Variable</tt> to that <tt>Register</tt> if it is alive after that <tt>Instruction</tt> (as we'll overwrite the value).
 
 ~~~~
 @Is This Combination Impossible@ +=
-if(registerInUse(i, r) && !(isUsed && code.get(i).uses().contains(r))
-  return false;
+if(writesTo(CAN_ERASE).contains(r))
+  for(Instruction i : next())
+    if(i.isLive().contains(v))
+      return false;
 ~~~~
 
 The final case is for the frame pointer. As we need this to resolve the memory addresses of stack-allocated values (including the <tt>Instruction</tt>s we'll add to spill <tt>Variable</tt>s to the stack) we'll keep it in a <tt>Register</tt> at all times, even across calls to other functions. Note that if this function doesn't dynamically allocate memory on the stack <tt>framePointer</tt> will be null so we'll never return false.
 
 ~~~~
 @Is This Combination Impossible@ +=
-if(v.equals(framePointer) && r == Register.THESTACK)
+if(v.equals(state.framePointer) && r == THESTACK)
   return false;
 ~~~~
 
