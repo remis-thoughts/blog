@@ -1905,10 +1905,12 @@ When an <tt>Instruction</tt> is added to or removed from a chain of <tt>Instruct
 We're defining "liveness" such that if the current <tt>Instruction</tt> reads a <tt>Variable</tt> then that <tt>Variable</tt> is "live" at that <tt>Instruction</tt>; if the current <tt>Instruction</tt> writes to (and doesn't read) a <tt>Variable</tt> then the <tt>Variable</tt> is no longer "live" (i.e. has been "killed"), and otherwise the <tt>Variable</tt> is live if it is live in any of the <tt>Instruction</tt>s following the one we're considering.
 
 ~~~~
-@Calculate Variables Killed@ +=
-Set<Value> killed = Sets.difference(
-  i.writesTo(WILL_ERASE), 
-  i.readsFrom());
+@Instruction Members@ +=
+Set<Value> killed() {
+  return Sets.difference(
+    i.writesTo(WILL_ERASE), 
+    i.readsFrom());
+}
 ~~~~
 
 We decided earlier that when we <tt>append</tt>ed an <tt>Instruction</tt> we were going to calculate what liveness information it changed, and then use the [visitor pattern](???) to propagate this information as far back as we can, instead of pushing liveness information from the current <tt>Instruction</tt> to the <tt>append</tt>ed one. This definition of <tt>killed</tt> shows why: consider two writes to a <tt>Variable</tt> followed by a read, with no intervening <tt>Jump</tt> <tt>Instruction</tt>s or other changes of control flow. We don't want to mark this <tt>Variable</tt> as live between the two writes as we'll just overwrite the value it contains without looking at it, and marking it as live means we have to waste space (maybe even register space) storing the value. Pulling liveness information backwards means we'll only mark it live between the read and the second write that "kills" it. Pushing liveness forwards would mean it'd be marked as live from the first write to the read. However, we said at the beginning we weren't going to do any optimisation, so we won't remove any useless writes we come across.
@@ -1917,7 +1919,6 @@ We decided earlier that when we <tt>append</tt>ed an <tt>Instruction</tt> we wer
 @Instruction Members@ +=
 boolean pullBackwards(ParsingState state) {
   boolean anyChanged = false;
-  @Calculate Variables Killed@
   @Calculate Variables Propagated@
   if(anyChanged)
     updateLP(state);
@@ -1954,9 +1955,8 @@ Calculating the <tt>Variable</tt>s propagated is pretty straightforward; it's th
 Set<Value> propagated = readsFrom();
 for(Instruction i : next())
   propagated = Sets.union(propagated, i.isLive);
-Set<Variable> live = Sets.filter(
-  Sets.difference(propagated, killed),
-  Predicates.instanceOf(Variable.class));
+Set<Variable> live = onlyVariables(
+  Sets.difference(propagated, killed()));
 anyChanged |= isLive.addAll(live);
 anyChanged |= isLive.retainAll(live);
 ~~~~
@@ -2049,11 +2049,17 @@ anyChanged |= inUse.retainAll(used);
 We've calculated the live <tt>Variable</tt>s at each <tt>Instruction</tt>, but these are just a subset of the <tt>Variable</tt>s we need to assign to <tt>Register</tt>s. <tt>Variable</tt>s that are dead immediately before an <tt>Instruction</tt> and are written to by the <tt>Instruction</tt> still need to be assigned so the CPU knows write the results out to. We'll use a similar method to <tt>inUse()</tt> above; we'll add an accessor to <tt>isLive</tt> that adds in these additional <tt>Variable</tt>s:
 
 ~~~~
+@Other Helpers@ +=
+static Set<Variable> onlyVariables(Set<Value> vs) {
+  return Sets.filter(
+    uses(),
+    Predicates.instanceOf(Variable.class));
+}
 @Instruction Members@ +=
 Set<Variable> isLive() {
   return Sets.union(
     isLive,
-    Sets.filter(uses(), Predicates.instanceOf(Variable.class)));
+    onlyVariables(uses()));
 }
 ~~~~
 
@@ -2113,6 +2119,7 @@ We referred to a <tt>updateLP</tt> method above; this is called whenever one or 
 @Instruction Members@ +=
 void updateLP(ParsingState state) {
   @Remove Existing Columns and Rows@
+  @Before Visiting Combinations@
   for(Variable v : isLive()) {
     @For Each Variable@
     for(Register r : Sets.complementOf(inUse()))
@@ -2120,8 +2127,11 @@ void updateLP(ParsingState state) {
         @For Each Combination@
       }
   }
+  @After Visiting Combinations@
 }
 ~~~~
+
+### Object Pools ###
 
 GLPK also requires you to specify a whole constraint (a whole row of the constraint matrix) at once. However, we're looping over <tt>Instruction</tt>s, <tt>Variable</tt>s and <tt>Register</tt>s, and want to build up our constraints one (v, i, r) combination at a time. We'll use a static class to accumulate components of a <tt>Constraint</tt> in a pair of <tt>SWIGTYPE_p_int</tt> and <tt>SWIGTYPE_p_double</tt> columns. These are arrays stored in native (off-heap) memory and are manually allocated and freed. We'll make our <tt>Constraint</tt> class implement <tt>AutoCloseable</tt> so we can use Java 7's [try-with-resources](http://docs.oracle.com/javase/tutorial/essential/exceptions/tryResourceClose.html) statements to ensure we release the arrays' memory when we leave a block, even if an exception is thrown, so the compiler doesn't leak native memory. We don't want to allocate new native arrays for each (v, i, r) combination as that'll reduce cache locality and require more (relatively expensive) JNI calls. Instead, we'll have one instance of this class for each type of constraint, and we'll reset it every <tt>Instruction</tt>. The most number of columns a constraint will involve is <tt>numVariables * ASSIGNABLE.length</tt> (i.e. every v and r combination), though in practice a combination's contraints will need fewer columns as <tt>needsAssigning</tt> (above) will return false for some. The <tt>+ 1</tt> when choosing <tt>size</tt> is because GLPK arrays are one-indexed - we'll have to be careful of this.
 
@@ -2198,6 +2208,65 @@ void deleteRow(int row) {
 }
 ~~~~
 
+We'll also do the same kind of object pooling for columns in the GLPK matrix. These will be more simple as we don't need to [builder](???) object:
+
+~~~~
+@Instruction Members@ +=
+private final Set<Integer> cols = Sets.newTreeSet();
+private int addColumn(ParsingState state) {
+  int col = state.addColumn();
+  cols.add(col);
+  return col;
+}
+@Remove Existing Columns and Rows@ +=
+for(Integer col : cols)
+  state.deleteColumn(col);
+cols.clear();
+~~~~
+
+ Deleting a column just means setting its contribution to the objective function to zero - so no matter what the value ends up as it won't affect which solution we pick as optimal.
+
+~~~~
+@Parsing State Members@ +=
+private final Queue<Integer> cols = Lists.newLinkedList();
+int addColumn() {
+  if(cols.isEmpty())
+    return glp_add_cols(allocation, 1));
+  else
+    return cols.poll();
+}
+void deleteColumn(int col) {
+  glp_set_obj_coef(allocation, col, 0.0);
+  cols.add(col);
+}
+~~~~
+
+As <tt>updateLP</tt> iterates over <tt>Variable</tt>s in its outer loop and <tt>Register</tt>s it its inner loop, we need one further class to make managing one constraint per <tt>Register</tt> (possibly encompassing all <tt>Variable</tt>s) easier. We'll use a [composite](???) class, <tt>Rows</tt>, to wrap the <tt>Row</tt> class:
+
+~~~~
+@Other Helpers@ +=
+static class Rows {
+  final Row[] rows = new Row[Register.values().length];
+  final ParsingState state;
+  Rows(ParsingState state) {
+    this.state = state;
+  }
+  void set(Register r, int column, double value) {
+    Row row = rows[r.ordinal()];
+    if(row == null)
+      row = rows[r.ordinal()] = addRow(state);
+    row.set(column, value);
+  }
+  void addTo(int lowerBound, int upperBound) {
+    for(Row row : rows)
+      if(row != null)
+        row.addTo(allocation, lowerBound, upperBound);
+  }
+}
+~~~~
+
+### Variable-In-Register Constraints ###
+
 The first (and most important) set of dependent variables are the <tt>varInReg</tt> columns; these represent the variable <tt>v</tt> being in <tt>Register</tt> <tt>r</tt> at <tt>Instruction</tt> <tt>i</tt>, and so store the solution of the register assignment problem. We're phrasing this as an Integer programming problem, so the <tt>varInReg</tt> variables can only take integer values, and we'll add extra constaints to ensure the value is either zero or one. We can then intepret the zero or one values as a binary yes-or-no output. We'll use the <tt>needsAssigning</tt> method we defined earlier so we only have dependent variables for valid combinations - the fewer dependent variables our Integer Programming problem has the faster it will be to solve it. We'll define the <tt>addToObjective</tt>'s <tt>coefficient</tt> later as this is the main way we'll modify the problem to encode more domain knowledge. We want the optimal solution (the solution that minimises the objective function) to generate the most efficient solution, so we want to penalise register assignments that require expensive operations (like writing to the stack).
 
 ~~~~
@@ -2238,7 +2307,7 @@ private static final double COST_OF_STACK_ACCESS = 100.0;
 
 The objective function as we've defined it so far will give us an efficient allocation. However, there's some domain knowledge we can take advantage of - and we'll do this by adding 'hints' to the objective function. We'll subtract a small amount from the objective function if an allocation satisfies our hint (and so the Integer Programming solver will choose an allocation that follows the hints over one that doesn't). However, these hints dwarfed by the penalties we've defined, so won't come at the cost of additional memory accesses.
 
-Our first hint aims to make as many <tt>mov</tt>s instructions no-ops as possible (especially if the <tt>Instruction</tt> contains a fixed <tt>Register</tt>). For example, as we insert a <tt>mov</tt> just before a <tt>ret</tt> to set the <tt>rax</tt> register to the return value; ideally the return value would already be in <tt>rax</tt> so we could save an instruction. Similarly, after a <tt>Call</tt> <tt>Instruction</tt> we add a <tt>mov</tt> to put the value the function returns in <tt>rax</tt> to the return <tt>Variable</tt> defined in the programme. 
+Our first hint aims to make as many <tt>mov</tt>s instructions no-ops as possible (especially if the <tt>Instruction</tt> contains a fixed <tt>Register</tt>). For example, as we insert a <tt>mov</tt> just before a <tt>ret</tt> to set the <tt>rax</tt> register to the return value; ideally the return value would already be in <tt>rax</tt> so we could save an instruction. Similarly, after a <tt>Call</tt> <tt>Instruction</tt> we add a <tt>mov</tt> to put the value the function returns in <tt>rax</tt> to the return <tt>Variable</tt> defined in the programme.
 
 ~~~~
 @Instruction Members@ +=
@@ -2246,66 +2315,61 @@ boolean couldBeNoOp(Variable v, Register r) { return false; }
 @Move Members@ +=
 boolean couldBeNoOp(Variable v, Register r) { return uses(v) && uses(r); }
 @Determine varInReg Coefficient@ +=
-if(code.get(i).couldBeNoOp(v, r))
+if(couldBeNoOp(v, r))
   coefficient += MOVE_NOP_HINT;
 @Other Helpers@ +=
 private static final double MOVE_NOP_HINT = -1.0;
 ~~~~
 
-Two variables are 'aliased' at an <tt>Instruction</tt> if that <tt>Instruction</tt> makes one of them dead (i.e. <tt>isLive</tt> returns false after the <tt>Instruction</tt>) and makes the other live (i.e. <tt>isLive</tt> returns true for this <tt>Instruction</tt> but not the previous one - remember <tt>isLive</tt> describes the variable's state just _before_ the <tt>Instruction</tt> is executed). Normally we'll use constraints to only allow one variable in a register at once (as one of their values would be erased), but if we assigned two aliasing variables to the same <tt>Register</tt> at an <tt>Instruction</tt> we would't lose information - as we don't mind losing the value of the <tt>Variable</tt> that just became 'dead'. Note that only <tt>Definition</tt> <tt>Instruction</tt>s have more than one predecessor and only <tt>Jump</tt> <tt>Instruction</tt>s have more than one successor, so when we're in a <tt>Move</tt> we can assume the set of <tt>next</tt> <tt>Instruction</tt>s has only one element. Since the <tt>Instruction</tt> subclasses only have two or fewer operands an <tt>Instruction</tt> will return at most a single pair of operands that alias. We'll represent this by a making <tt>aliasingVars</tt> return either an instance of <tt>AliasingPair</tt> or null if no <tt>Variable</tt>s alias.
+### Aliasing Variables ###
+
+Two variables are 'aliased' at an <tt>Instruction</tt> if that <tt>Instruction</tt> makes one of them dead (i.e. <tt>isLive()</tt> doesn't contain them for each following <tt>Instruction</tt>) and makes the other live (i.e. <tt>isLive()</tt> of at least one following <tt>Instruction</tt> contains it - remember <tt>isLive</tt> describes the variable's state just _before_ the <tt>Instruction</tt> is executed). Normally we'll use constraints to only allow one variable in a register at once (as one of their values would be erased), but if we assigned two aliasing variables to the same <tt>Register</tt> at an <tt>Instruction</tt> we would't lose information - as we don't mind losing the value of the <tt>Variable</tt> that just became 'dead'. We'll generate all the pairs of <tt>Variable</tt>s that could be put in the same <tt>Register</tt> (we're not generalising to sets of _n_ <tt>Variable</tt>s that could go in the same <tt>Register</tt> as the assembly instructions we'll generate only have at most two arguments). We're calculating the <tt>Variable</tt>s that are first made live by this <tt>Instruction</tt> (are "born") using the difference between <tt>isLive</tt> and <tt>isLive()</tt> (i.e. the <tt>Variable</tt>s referred to by the current <tt>Instruction</tt> but are not live). We have to be careful not to refer to the <tt>Instruction</tt>s following this one (in <tt>prev()</tt>) as then we'd risk missing aliasing pairs created when a successor <tt>Instruction</tt> changed but the current one didn't, as then we wouldn't reconstruct the GLPK columns and constraints for this <tt>Instruction</tt>.
 
 ~~~~
-@Other Helpers@ +=
-static class AliasingPair {
-  final Variable a; final Variable b;
-  AliasingPair(Variable a, Variable b) { this.a = a; this.b = b; }
-}
 @Instruction Members@ +=
-AliasingPair aliasingVars(ControlFlowGraph cfg, int i) {
-  return null;
+Set<Variable> born() {
+  return Sets.difference(isLive(), isLive);
 }
-@Move Members@ +=
-AliasingPair aliasingVars(ControlFlowGraph cfg, int i) {
-  if(from instanceof Variable 
-  && to instanceof Variable
-  && cond == null
-  && !cfg.isLiveAt((Variable) to, i)
-  && !cfg.isLiveAt((Variable) from, getOnlyElement(cfg.next.get(i))))
-    return new AliasingPair((Variable) to, (Variable) from);
-  else
-    return null;
+@Before Visiting Combinations@ +=
+Map<Pair<Variable, Variable, Rows> aliasing = Maps.newHashMap();
+for(Variable a : onlyVariables(killed()))
+  for(Variable b : born())
+    aliasing.put(Pair.of(a, b), new Rows(state));
+~~~~
+
+We'll therefore force the solver to assign aliasing <tt>Variable</tt>s together by adding a constraint for each <tt>Register</tt> that makes one <tt>Variable</tt>'s <tt>varInReg</tt> minus the other's equal to zero, so for that <tt>Register</tt> either both <tt>varInReg</tt>s are one or both are zero. This means the ordering of the <tt>Variable</tt>s in the aliasing <tt>Pair</tt> (i.e. does the killed <tt>Variable</tt> come before the new one?) doesn't matter.
+
+~~~~
+@For Each Combination@ +=
+for(Entry<Pair<Variable, Variable, Rows> e : aliasing) {
+  if(v.equals(e.getKey().getLeft()))
+    rows.set(r, varInReg, +1.0);
+  else if(v.equals(e.getKey().getRight()))
+    rows.set(r, varInReg, -1.0);
 }
+@After Visiting Combinations@ +=
+for(Rows rows : aliasing.values())
+  rows.addTo(allocation, 0, 0);
 ~~~~
 
-When two <tt>Variable</tt>s alias it's always best to assign them to the same <tt>Register</tt>; if we put another live <tt>Variable</tt> in the <tt>Register</tt> we'd add an extra <tt>mov</tt> <tt>Instruction</tt>. We'll therefore force the solver to assign aliasing <tt>Variable</tt>s together by adding a constraint that makes one <tt>Variable</tt>'s <tt>varInReg</tt> minus the other's equal to zero, so either both <tt>varInReg</tt>s are one or both are zero:
+### One Variable Per Register ###
+
+Now that we've identified any aliasing <tt>Variable</tt>s we can add a constraint to enforce that a single <tt>Register</tt> (but not the stack - we can store any number of <tt>Variable</tt>s there) can only have a single <tt>Variable</tt>, or a pair of aliasing <tt>Variable</tt>s assigned to it at each <tt>Instruction</tt>. We'll do this by ensuring that the sum of the <tt>varInReg</tt>s for each <tt>Variable</tt> assigned to that <tt>Register</tt> is between zero and one (the <tt>Register</tt> could be empty if there are fewer live <tt>Variable</tt>s than there are <tt>Register</tt>s). We'll implement this by skipping (arbitrarily) the second <tt>Variable</tt> of each aliasing pair, so each pair of aliasing <tt>Variable</tt>s only contributes one <tt>varInReg</tt> to the contraint's sum, and so we capping the sum at one means limiting the number of assigned <tt>Variable</tt>s to one. Note that we'd have to do this slightly differently if we gave the GLPK solver the choice of whether to place aliasing <tt>Variable</tt>s in the same <tt>Register</tt> or not, as these constriants below allow the second <tt>Variable</tt> of each aliasing pair to go in any <tt>Register</tt>, regardless of whether it's occupied or not.
 
 ~~~~
-@GLPK Resources@ +=
-Constraint aliasedInSameReg = new Constraint(numVariables);
-@For Each Instruction@ +=
-AliasingPair aliasingVars = code.get(i).aliasingVars(cfg, i);
+@Before Visiting Combinations@ +=
+Rows oneVarPerReg = new Rows(state);
 @For Each Combination@ +=
-if(aliasingVars != null)
-  if(v.equals(aliasingVars.a))
-    aliasedInSameReg.set(varInReg, +1.0);
-  else if(v.equals(aliasingVars.b))
-    aliasedInSameReg.set(varInReg, -1.0);
-@After Each Register@ +=
-aliasedInSameReg.addTo(allocation, 0, 0);
-~~~~
-
-Now that we've identified any aliasing <tt>Variable</tt>s we can add a constraint to enforce that a single <tt>Register</tt> (but not the stack) can only have a single <tt>Variable</tt>, or a pair of aliasing <tt>Variable</tt>s assigned to it at each <tt>Instruction</tt>. We'll do this by ensuring that the sum of the <tt>varInReg</tt>s for each <tt>Variable</tt> assigned to that <tt>Register</tt> is between zero and one (the <tt>Register</tt> could be empty if there are fewer live <tt>Variable</tt>s than there are <tt>Register</tt>s). If the <tt>Variable</tt> is the second of an aliasing pair we skip it, so each pair of aliasing <tt>Variable</tt>s only contributes one <tt>varInReg</tt> to the contraint's sum.
-
-~~~~
-@GLPK Resources@ +=
-Constraint oneVarPerReg = new Constraint(numVariables);
-@For Each Combination@ +=
-if(r != Register.THESTACK
-&& (aliasingVars == null || !v.equals(aliasingVars.b)))
-  oneVarPerReg.set(varInReg, 1.0);
-@After Each Register@ +=
+boolean relevant = r != THESTACK;
+for(Pair<Variable, Variable> p : aliasing.keySet())
+  relevant &= !v.equals(p.getRight());
+if(relevant)
+  oneVarPerReg.set(r, varInReg, 1.0);
+@After Visiting Combinations@ +=
 oneVarPerReg.addTo(0, 1);
 ~~~~
+
+### Ensuring Variables Aren't Lost ###
 
 We also want to ensure <tt>Variable</tt>s aren't 'lost' - they must be assigned to exactly one <tt>Register</tt> (which includes <tt>THESTACK</tt>). This is slightly harder to implement as the inner loop over the (v, i, r) combinations is over <tt>Variable</tt>s. We could either add a second loop over first <tt>Variable</tt>s then <tt>Register</tt>s so we could build up these contraints sequentially, or build up the constraints in parallel. We'd need one for each <tt>Variable</tt>, and as we loop over the (v, i, r)  combinations we'd add their <tt>varInReg</tt> to the relevant <tt>Variable<tt>'s constraint accumulator. The latter implementation is below; we'd rather have fewer iterations and better memory access locality at the expense of a minor increase in memory used. We'll start by wrapping each <tt>Variable</tt>'s accumlator in a composite object:
 
@@ -2342,6 +2406,8 @@ varsNotLost.set(v, varInReg, 1.0);
 @After Each Instruction@ +=
 varsNotLost.addTo(allocation, 1, 1);
 ~~~~
+
+### Setting the "New Variable In Register" Flag ###
 
 The last pair of constraints ensure that the _NEW_VAR_IN_REG_FLAG_ works as we want. Note that we set the constraints in pairs of nodes, at least one of which _needsAssigning_. We have to overhang (i.e. we don't only add constraints if both nodes _needsAssigning_) as if we don't we'll miss some constraints on the border, and so the flag will be undefined. A NEW_VAR_IN_REG_FLAG value of 1 means the variable just arrived in this register from somewhere. 
 
