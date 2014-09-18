@@ -2123,9 +2123,9 @@ void updateLP(ParsingState state) {
   for(Variable v : isLive()) {
     @For Each Variable@
     for(Register r : Sets.complementOf(inUse()))
-      if(isAssignable(v, r)) {
-        @For Each Combination@
-      }
+      if(isAssignable(v, r))
+        { @For Each Combination@ }
+    @After Each Variable@
   }
   @After Visiting Combinations@
 }
@@ -2371,39 +2371,14 @@ oneVarPerReg.addTo(0, 1);
 
 ### Ensuring Variables Aren't Lost ###
 
-We also want to ensure <tt>Variable</tt>s aren't 'lost' - they must be assigned to exactly one <tt>Register</tt> (which includes <tt>THESTACK</tt>). This is slightly harder to implement as the inner loop over the (v, i, r) combinations is over <tt>Variable</tt>s. We could either add a second loop over first <tt>Variable</tt>s then <tt>Register</tt>s so we could build up these contraints sequentially, or build up the constraints in parallel. We'd need one for each <tt>Variable</tt>, and as we loop over the (v, i, r)  combinations we'd add their <tt>varInReg</tt> to the relevant <tt>Variable<tt>'s constraint accumulator. The latter implementation is below; we'd rather have fewer iterations and better memory access locality at the expense of a minor increase in memory used. We'll start by wrapping each <tt>Variable</tt>'s accumlator in a composite object:
+We also want to ensure the (live) <tt>Variable</tt>s aren't 'lost' - they must be assigned to exactly one <tt>Register</tt> (which includes <tt>THESTACK</tt>). We'll make the constraint _exactly_ one rather than _at least_ one as otherwise we'd have to do extra work to ensure all copies of a <tt>Variable</tt> were updated when one was. As we loop over <tt>Variable</tt>s then <tt>Register</tt>s this step relatively straightforward:
 
 ~~~~
-@Other Helpers@ +=
-static class ManyConstraints implements AutoCloseable {
-  final Constraint[] constraints;
-  Constraint(int numVariables) {
-    constraints = new Constraint[numVariables];
-    for(int i = 0; i < constraints.length; ++i)
-      constraints[i] = new Constraint(1);
-  }
-  void close() {
-    for(Constraint constraint : constraints)
-      constraint.close();
-  }
-  void set(Variable v, int column, double value) {
-    constraints[v.id].set(column, value);
-  }
-  void addTo(glp_prob problem, int lowerBound, int upperBound) {
-    for(Constraint constraint : constraints)
-      constraint.addTo(problem, lowerBound, upperBound);
-  }
-}
-~~~~
-
-Adding the constraints is now relatively straightforward:
-
-~~~~
-@GLPK Resources@ +=
-ManyConstraints varsNotLost = new ManyConstraints(numVariables);
+@For Each Variable@ +=
+Row varsNotLost = addRow(state);
 @For Each Combination@ +=
-varsNotLost.set(v, varInReg, 1.0);
-@After Each Instruction@ +=
+varsNotLost.set(varInReg, 1.0);
+@After Each Variable@ +=
 varsNotLost.addTo(allocation, 1, 1);
 ~~~~
 
@@ -2551,17 +2526,22 @@ static final class SetFlagOnChange extends RowKey {
 rows.add(new SetFlagOnChange(v, r, n.getKey(), n.getValue()));
 ~~~~
 
-[All GLPK options](http://www.maximal-usa.com/solvopt/optglpk.html) - note presolve defaults to off.
-[GLPK manual](http://www.mai.liu.se/~kahol/kurser/all/glpk.pdf)
+### Solving The Problem ###
+
+We can now feed the problem into the GLPK solver. The [GLPK manual](http://www.mai.liu.se/~kahol/kurser/all/glpk.pdf) will be useful here, as will [a list of all the GLPK options](http://www.maximal-usa.com/solvopt/optglpk.html). We want to use the [branch and cut method](http://homepages.rpi.edu/~mitchj/handouts/bc_eg) (<tt>glp_intopt</tt> in GLPK). We also want to turn on the pre-solver (<tt>setPresolve(GLP_ON)</tt>). This basically tells the solver to try transforming the problem into a Mixed-Integer Programming problem (one where some variables we've specified as integers are allowed to be real numbers) in the hope that this variant is easier to solve; it'll then transform the optimal solution it finds to the MIP problem to an optimal solution of the Integer Programming problem we've specified.
 
 ~~~~
-@Solve@ +=
+@Parsing State Members@ +=
 glp_iocp iocp = new glp_iocp();
+@Set Up LP Problem@ +=
 glp_init_iocp(iocp);
 iocp.setPresolve(GLP_ON);
-if (glp_intopt(state.allocation, iocp) != 0)
+@Solve@ +=
+if (glp_intopt(state.allocation, state.iocp) != 0)
   throw new IllegalStateException();
 ~~~~
+
+### Unpacking The Results ###
 
 We know which register each variable is in at each node now (assuming it's live):
 
