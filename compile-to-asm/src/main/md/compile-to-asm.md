@@ -2430,55 +2430,29 @@ varInRegCols.put(Pair.of(v, r), varInReg);
 varInRegCols.clear();
 ~~~~
 
-The next constraint ensures that, for each of the previous <tt>Instruction</tt>s, if the combination's <tt>Variable</tt> was in this <tt>Register</tt> at that <tt>Instruction</tt> and this one then the <tt>newVarInReg</tt> flag must be zero. Now, if there is more that one previous <tt>Instruction</tt> we should only set the <tt>newVarInReg</tt> flag to zero if the <tt>Variable</tt> was in that <tt>Register</tt> for *all* of the predecessors. If we don't (i.e. if the flag is true if *any* of the predecessors have the <tt>Variable</tt> in that <tt>Register</tt>) then we won't penalise this assignment in the objective function, so the compiler would essentially get a <tt>mov</tt> instruction (of the <tt>Variable</tt> between the two <tt>Register</tt>s) for free.
+We must also ensure that, for *all* of the previous <tt>Instruction</tt>s, if the combination's <tt>Variable</tt> was in this <tt>Register</tt> at that <tt>Instruction</tt> and this one then the <tt>newVarInReg</tt> flag must be zero. I mean *all*, not any, as otherwise (i.e. if the flag is true if *any* of the predecessors have the <tt>Variable</tt> in that <tt>Register</tt>) then we won't penalise this assignment in the objective function, so the compiler would essentially get a <tt>mov</tt> instruction (of the <tt>Variable</tt> between the two <tt>Register</tt>s) for free. Luckily we don't have to explicitly add any constraints to enforce this, as the solver will always picking a solution where <tt>newVarInReg == 0</tt> when given the choice, as that will result in a lower value of the objective function (which the solver is trying to minimise).
 
-The previous <tt>Instruction</tt> may not have a <tt>varInReg</tt> column for the <tt>Variable</tt> and <tt>Register</tt> in the combination we're considering (e.g. if the <tt>Variable</tt> wasn't live down that code path). When this happens we'll just skip it. This constraint doesn't consider the value of the <tt>varInReg</tt> flag at the current <tt>Instruction</tt>; it's scope is much more limited. This constraint will just fix the semantics when the <tt>Variable</tt> hasn't changed <tt>Register</tt> along all code paths. Regardless of the value of <tt>varInReg</tt> the <tt>newVarInReg</tt> flag should be zero. If <tt>varInReg</tt> is one then the <tt>Variable</tt> hasn't moved so the flag should be zero, and if <tt>varInReg</tt> is zero then the <tt>Variable</tt> isn't even in this <tt>Register</tt> so the flag should be zero. We'll therefore define the constraint as  <tt>&Sigma;varInReg[prev] + newVarInReg <= |prev|</tt>, where <tt>|prev|</tt> is the number of predecessors and <tt>varInReg[prev]</tt> is the value of <tt>varInReg</tt> for this combination at the *previous* <tt>Instruction</tt>. This constraint works as if *all* the <tt>varInReg[prev]</tt> flags are one (all <tt>|prev|</tt> of them), then the <tt>newVarInReg</tt> flag must be zero for the upper bound of <tt>|prev|</tt> to hold. If any of the <tt>varInReg[prev]</tt> flags are zero then the <tt>newVarInReg</tt> flag could be either one or zero and the constraint would still be valid. This doesn't actually matter, as the solver will always picking a solution where <tt>newVarInReg == 0</tt> when given the choice, as that will result in a lower value of the objective function (which the solver is trying to minimise).
+This leaves our final (and most complicated) constraint. We'll consider each of the <tt>Instruction</tt>'s predecessors in turn, and if we see that the <tt>Variable</tt> was not in the current combination's <tt>Register</tt> then, but is now, then we'll set the <tt>newVarInReg</tt> flag to one. We'll do this by ensuring <tt>varInReg[prev] - varInReg + newVarInReg >= 0</tt> (where <tt>varInReg[prev]</tt> is the value of the <tt>varInReg</tt> column for this combination at the previous <tt>Instruction</tt>). The table below shows how this constraint restricts the value of <tt>newVarInReg</tt> (where <tt>?</tt> means the value isn't restricted):
+
+|| <tt>varInReg[prev]</tt> || <tt>varInReg</tt> || <tt>newVarInReg</tt> ||
+| 0 | 0 | ? |
+| 1 | 0 | ? |
+| 0 | 1 | 1 |
+| 1 | 1 | ? |
+
+As you can see, this only restricts a single case: when the <tt>Variable</tt> wasn't in the <tt>Register</tt> last <tt>Instruction</tt> but is now - and in this case the <tt>newVarInReg</tt> flag is forced to one. As we mentioned above, if the solver gets to choose the value of <tt>newVarInReg</tt> it'll always choose <tt>0</tt>, so if there's only a single predecessor <tt>Instruction</tt> you could consider all the <tt>?</tt>s in the table as zeros.
 
 ~~~~
 @Calculate newVarInReg From Previous@ +=
-Row unchanged = addRow(state).set(newVarInReg, 1);
-int sum = 0;
 for(Instruction i : prev()) {
   Integer c = i.varInRegCol(v, r);
-  if(c != null) {
-    unchanged.set(c, 1); ++sum;
-  }
+  if(c != null)
+    addRow(state).
+      set(c, 1).
+      set(varInReg, -1).
+      set(newVarInReg, 1).
+      addTo(0, 2);
 }
-unchanged.set(newVarInReg, 1).addTo(0, sum);
-~~~~
-
-~~~~
-@Other Helpers@ +=
-static final class SetFlagOnChange extends RowKey {
-  final int nTo;
-  SetFlagOnChange(int v, Register r, int nFrom, int nTo) { 
-    super(v, r, nFrom); this.nTo = nTo;
-  }
-  /** if R(n-1) - R(n) + F(n) >= 0 so when R(n) = 1 and R(n-1) = 0 then F(n) must be 1 */
-  void addConstraints(glp_prob allocation, int row, List<Constraint> constraints, ControlFlowGraph cfg) {
-    glp_set_row_bnds(allocation, row + 1, GLP_LO, 0.0, 0.0);
-    constraints.add(new Constraint(
-      row, 
-      Collections.binarySearch(cfg.columns, new varInReg(v, r, n)),
-      1.0));
-    constraints.add(new Constraint(
-      row, 
-      Collections.binarySearch(cfg.columns, new varInReg(v, r, nTo)),
-      -1.0));
-    constraints.add(new Constraint(
-      row, 
-      Collections.binarySearch(cfg.columns, new NewVarInRegFlag(v, r, nTo)),
-      1.0));
-  }
-  public int compareTo(CellKey o) {
-    return ComparisonChain.start().
-      compare(super.compareTo(o), 0).
-      compare(nTo, o instanceof SetFlagOnChange ? ((SetFlagOnChange)o).nTo : NONE).
-      result();
-  }
-}
-@Add Constraints If Both Nodes Are Relevant@ +=
-rows.add(new SetFlagOnChange(v, r, n.getKey(), n.getValue()));
 ~~~~
 
 ### Solving The Problem ###
