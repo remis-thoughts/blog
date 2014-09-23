@@ -2157,15 +2157,16 @@ static class Row {
 }
 ~~~~
 
-The <tt>set</tt> method is the accumulator - it sets the coefficient in the current constraint to the double value passed in. As described above, it uses <tt>+ 1</tt>s to ensure the <tt>columns</tt> and <tt>values</tt> arrays are one-indexed. The <tt>len</tt> variable keeps track of how many columns we've added to the constraint function, as GLPK expects all column indices in the <tt>columns</tt> array to be valid (i.e. non-zero). We don't have to worry about GLPK keeping a reference to the array or mutating it - <tt>glp_set_mat_row</tt> just does one pass through it, copying the constraints into the <tt>glp_prob</tt>'s internal representation of the problem. <tt>addTo</tt> resets the accumulator after it adds the constraint and sets the row's fixed (<tt>GLP_FX</tt>) or lower and upper (<tt>GLP_DB</tt>) bounds.
+The <tt>set</tt> method is the accumulator - it sets the coefficient in the current constraint to the double value passed in. As described above, it uses <tt>+ 1</tt>s to ensure the <tt>columns</tt> and <tt>values</tt> arrays are one-indexed. The <tt>len</tt> variable keeps track of how many columns we've added to the constraint function, as GLPK expects all column indices in the <tt>columns</tt> array to be valid (i.e. non-zero). We don't have to worry about GLPK keeping a reference to the array or mutating it - <tt>glp_set_mat_row</tt> just does one pass through it, copying the constraints into the <tt>glp_prob</tt>'s internal representation of the problem. <tt>addTo</tt> resets the accumulator after it adds the constraint and sets the row's fixed (<tt>GLP_FX</tt>) or lower and upper (<tt>GLP_DB</tt>) bounds. We'll make <tt>set</tt> return the <tt>Row</tt> object so it's easier to chain together several calls - another example of a [fluent interface](???).
 
 ~~~~
 @Row Members@ +=
 int len = 0;
-void set(int column, double value) {
+Row set(int column, int value) {
   intArray_setitem(columns, len + 1, column);
   doubleArray_setitem(values, len + 1, value);
   ++len;
+  return this;
 }
 void addTo(int lowerBound, int upperBound) {
   glp_set_mat_row(problem, row, len, columns, values);
@@ -2251,7 +2252,7 @@ static class Rows {
   Rows(ParsingState state) {
     this.state = state;
   }
-  void set(Register r, int column, double value) {
+  void set(Register r, int column, int value) {
     Row row = rows[r.ordinal()];
     if(row == null)
       row = rows[r.ordinal()] = addRow(state);
@@ -2343,9 +2344,9 @@ We'll therefore force the solver to assign aliasing <tt>Variable</tt>s together 
 @For Each Combination@ +=
 for(Entry<Pair<Variable, Variable, Rows> e : aliasing) {
   if(v.equals(e.getKey().getLeft()))
-    rows.set(r, varInReg, +1.0);
+    rows.set(r, varInReg, 1);
   else if(v.equals(e.getKey().getRight()))
-    rows.set(r, varInReg, -1.0);
+    rows.set(r, varInReg, -1);
 }
 @After Visiting Combinations@ +=
 for(Rows rows : aliasing.values())
@@ -2364,7 +2365,7 @@ boolean relevant = r != THESTACK;
 for(Pair<Variable, Variable> p : aliasing.keySet())
   relevant &= !v.equals(p.getRight());
 if(relevant)
-  oneVarPerReg.set(r, varInReg, 1.0);
+  oneVarPerReg.set(r, varInReg, 1);
 @After Visiting Combinations@ +=
 oneVarPerReg.addTo(0, 1);
 ~~~~
@@ -2377,119 +2378,73 @@ We also want to ensure the (live) <tt>Variable</tt>s aren't 'lost' - they must b
 @For Each Variable@ +=
 Row varsNotLost = addRow(state);
 @For Each Combination@ +=
-varsNotLost.set(varInReg, 1.0);
+varsNotLost.set(varInReg, 1);
 @After Each Variable@ +=
-varsNotLost.addTo(allocation, 1, 1);
+varsNotLost.addTo(1, 1);
 ~~~~
 
 ### Setting the "New Variable In Register" Flag ###
 
-The last pair of constraints ensure that the _NEW_VAR_IN_REG_FLAG_ works as we want. Note that we set the constraints in pairs of nodes, at least one of which _needsAssigning_. We have to overhang (i.e. we don't only add constraints if both nodes _needsAssigning_) as if we don't we'll miss some constraints on the border, and so the flag will be undefined. A NEW_VAR_IN_REG_FLAG value of 1 means the variable just arrived in this register from somewhere. 
+The last set of constraints ensure that the <tt>newVarInReg</tt> flags have the semantics we want: for each <tt>Variable</tt> and <tt>Register</tt> combination, when this column has a `1` the <tt>Variable</tt> either became live for the first time (i.e. first appeared in <tt>isLive()</tt>) or was assigned to a different <tt>Register</tt> at any one of the <tt>prev()</tt> <tt>Instruction</tt>s. The case when a <tt>Variable</tt> dies (i.e. is in <tt>isLive()</tt> at the <tt>Instruction</tt> but not in any of the <tt>next()</tt> <tt>Instruction</tt>s) is already covered; the column won't exit in the <tt>next()</tt> <tt>Instruction</tt>s so we don't have to worry about setting it.
+
+This first case is easy: to force the <tt>newVarInReg</tt> flag to one we'll add a constraint of the form <tt>1 * newVarInReg == 1</tt>. We'll use the "<tt>born()</tt>" <tt>Set</tt> of newly-live <tt>Variable</tt>s we calculated earlier.
 
 ~~~~
-@Add Row Keys@ +=
-for (int v = 0; v < numVariables; ++v)
-  for (Register r : ASSIGNABLE)
-    for(Entry<Integer, Integer> n : nextNodes.entries()) {
-      if(needsAssigning(v, n.getKey(), r)
-      && needsAssigning(v, n.getValue(), r)) 
-        { @Add Constraints If Both Nodes Are Relevant@ }
-      else if(needsAssigning(v, n.getValue(), r))
-        { @Force When Variable First Live@ }
-      else if(needsAssigning(v, n.getKey(), r))
-        { @Force Zero When Variable Dies@ }
-    }
+@For Each Combination@ +=
+if(born().contains(v)) {
+  addRow(state).set(newVarInReg, 1).addTo(1, 1);
+} else {
+  @Calculate newVarInReg From Previous@
+}
 ~~~~
 
+The second case - if the <tt>Variable</tt> was live at at least one <tt>prev()</tt> <tt>Instruction</tt> - is a bit more difficult. The first thing we can definitely say is that, at each combination, if the <tt>Variable</tt>'s not actually in that <tt>Register</tt> then the the <tt>newVarInReg</tt> flag must be zero. We can enforce this with a constraint of the form <tt>0 <= 1 * varInReg - 1 * newVarInReg <= 1</tt>. That is, if the <tt>Variable</tt> is in the <tt>Register</tt> at this <tt>Instruction</tt> (<tt>varInReg == 1</tt>) this reduces to <tt>0 <= 1 - newVarInReg <= 1</tt>, and so <tt>newVarInReg</tt> can be either <tt>0</tt> or <tt>1</tt>. However, if the <tt>Variable</tt> is assigned to a different <tt>Register</tt> (i.e. not the one in the currrent combination, <tt>varInReg == 0</tt>) then the constraint reduces to <tt>0 <= - 1 * newVarInReg <= 1</tt>, so <tt>newVarInReg</tt> must be <tt>0</tt>.
+
 ~~~~
-@Other Helpers@ +=
-static final class ForceZeroWhenVariableDies extends RowKey {
-  ForceZeroWhenVariableDies(int v, Register r, int n) { super(v, r, n); }
-  void addConstraints(glp_prob allocation, int row, List<Constraint> constraints, ControlFlowGraph cfg) {
-    glp_set_row_bnds(allocation, row + 1, GLP_FX, 0.0, 0.0);
-    constraints.add(new Constraint(
-      row, 
-      Collections.binarySearch(cfg.columns, new NewVarInRegFlag(v, r, n)),
-      1.0));
+@Calculate newVarInReg From Previous@ +=
+addRow(state).set(varInReg, 1).set(newVarInReg, -1).addTo(0, 1);
+~~~~
+
+If we couldn't possibly put the <tt>Variable</tt> in the <tt>Register</tt> last time as it wasn't available (it's in of the <tt>prev()</tt> <tt>Instruction</tt>'s <tt>inUse()</tt> sets), yet it's now in the <tt>Register</tt> at this <tt>Instruction</tt>, then the <tt>newVarInReg</tt> flag must be true. We'll enforce this mathematically with a contraint similar to the previous one: <tt>varInReg - newVarInReg == 0</tt>. If <tt>varInReg</tt> is <tt>1</tt>, then <tt>newVarInReg</tt> must be <tt>1</tt> for the difference between the two to be zero, and similarly if <tt>varInReg</tt> is <tt>0</tt>.
+
+~~~~
+@Calculate newVarInReg From Previous@ +=
+for(Instruction i : prev())
+  if(prev().inUse().contains(r)) {
+    addRow(state).set(varInReg, 1).set(newVarInReg, -1).addTo(0, 0);
+    break;
+  }
+~~~~
+
+We need one more bit of information to add the remaining constraints: we need to know whether the combination's <tt>Variable</tt> was in the <tt>Register</tt> (i.e. the value of the <tt>varInReg</tt> column) at any of the <tt>prev()</tt> <tt>Instruction</tt>s. This means we'll have to make each <tt>Instruction</tt> store the <tt>varInReg</tt> column numbers for each of it's combinations. We'll make this information available via a <tt>varInRegCol</tt> method on the <tt>Instruction</tt>, and we'll rely on other <tt>Instruction</tt>s only calling this method with valid arguments.
+
+~~~~
+@Instruction Members@ +=
+final Map<Pair<Variable, Register>, Integer> varInRegCols = Maps.newHashMap();
+Integer varInRegCol(Variable v, Register r) {
+  return varInRegCols.get(Pair.of(v, r));
+}
+@For Each Combination@ +=
+varInRegCols.put(Pair.of(v, r), varInReg);
+@Remove Existing Columns and Rows@ +=
+varInRegCols.clear();
+~~~~
+
+The next constraint ensures that, for each of the previous <tt>Instruction</tt>s, if the combination's <tt>Variable</tt> was in this <tt>Register</tt> at that <tt>Instruction</tt> and this one then the <tt>newVarInReg</tt> flag must be zero. Now, if there is more that one previous <tt>Instruction</tt> we should only set the <tt>newVarInReg</tt> flag to zero if the <tt>Variable</tt> was in that <tt>Register</tt> for *all* of the predecessors. If we don't (i.e. if the flag is true if *any* of the predecessors have the <tt>Variable</tt> in that <tt>Register</tt>) then we won't penalise this assignment in the objective function, so the compiler would essentially get a <tt>mov</tt> instruction (of the <tt>Variable</tt> between the two <tt>Register</tt>s) for free.
+
+The previous <tt>Instruction</tt> may not have a <tt>varInReg</tt> column for the <tt>Variable</tt> and <tt>Register</tt> in the combination we're considering (e.g. if the <tt>Variable</tt> wasn't live down that code path). When this happens we'll just skip it. This constraint doesn't consider the value of the <tt>varInReg</tt> flag at the current <tt>Instruction</tt>; it's scope is much more limited. This constraint will just fix the semantics when the <tt>Variable</tt> hasn't changed <tt>Register</tt> along all code paths. Regardless of the value of <tt>varInReg</tt> the <tt>newVarInReg</tt> flag should be zero. If <tt>varInReg</tt> is one then the <tt>Variable</tt> hasn't moved so the flag should be zero, and if <tt>varInReg</tt> is zero then the <tt>Variable</tt> isn't even in this <tt>Register</tt> so the flag should be zero. We'll therefore define the constraint as  <tt>&Sigma;varInReg[prev] + newVarInReg <= |prev|</tt>, where <tt>|prev|</tt> is the number of predecessors and <tt>varInReg[prev]</tt> is the value of <tt>varInReg</tt> for this combination at the *previous* <tt>Instruction</tt>. This constraint works as if *all* the <tt>varInReg[prev]</tt> flags are one (all <tt>|prev|</tt> of them), then the <tt>newVarInReg</tt> flag must be zero for the upper bound of <tt>|prev|</tt> to hold. If any of the <tt>varInReg[prev]</tt> flags are zero then the <tt>newVarInReg</tt> flag could be either one or zero and the constraint would still be valid. This doesn't actually matter, as the solver will always picking a solution where <tt>newVarInReg == 0</tt> when given the choice, as that will result in a lower value of the objective function (which the solver is trying to minimise).
+
+~~~~
+@Calculate newVarInReg From Previous@ +=
+Row unchanged = addRow(state).set(newVarInReg, 1);
+int sum = 0;
+for(Instruction i : prev()) {
+  Integer c = i.varInRegCol(v, r);
+  if(c != null) {
+    unchanged.set(c, 1); ++sum;
   }
 }
-@Force Zero When Variable Dies@ +=
-rows.add(new ForceZeroWhenVariableDies(v, r, n.getKey()));
-~~~~
-
-~~~~
-@Other Helpers@ +=
-static final class ForceWhenVariableFirstLive extends RowKey {
-  final boolean setToOne;
-  ForceWhenVariableFirstLive(int v, Register r, int n, boolean setToOne) { 
-    super(v, r, n); this.setToOne = setToOne;
-  }
-  void addConstraints(glp_prob allocation, int row, List<Constraint> constraints, ControlFlowGraph cfg) {
-    glp_set_row_bnds(allocation, row + 1, GLP_FX, 0.0, 0.0);
-    constraints.add(new Constraint(
-      row, 
-      Collections.binarySearch(cfg.columns, new varInReg(v, r, n)),
-      setToOne ? -1.0 : 0.0));
-    constraints.add(new Constraint(
-      row, 
-      Collections.binarySearch(cfg.columns, new NewVarInRegFlag(v, r, n)),
-      1.0));
-  }
-}
-@Force When Variable First Live@ +=
-boolean setToOne = isLiveAt(v, n.getKey()) || r == Register.THESTACK;
-rows.add(new ForceWhenVariableFirstLive(v, r, n.getValue(), setToOne));
-~~~~
-
-~~~~
-@Other Helpers@ +=
-static final class ZeroIfInRegisterPreviously extends RowKey {
-  final int nTo;
-  ZeroIfInRegisterPreviously(int v, Register r, int nFrom, int nTo) { 
-    super(v, r, nFrom); this.nTo = nTo;
-  }
-  /** if R(n-1) = 1 then F(n) = 0 */
-  void addConstraints(glp_prob allocation, int row, List<Constraint> constraints, ControlFlowGraph cfg) {
-    glp_set_row_bnds(allocation, row + 1, GLP_UP, 0.0, 1.0);
-    constraints.add(new Constraint(
-      row, 
-      Collections.binarySearch(cfg.columns, new varInReg(v, r, n)),
-      1.0));
-    constraints.add(new Constraint(
-      row, 
-      Collections.binarySearch(cfg.columns, new NewVarInRegFlag(v, r, nTo)),
-      1.0));
-  }
-  public int compareTo(CellKey o) {
-    return ComparisonChain.start().
-      compare(super.compareTo(o), 0).
-      compare(nTo, o instanceof ZeroIfInRegisterPreviously ? ((ZeroIfInRegisterPreviously)o).nTo : NONE).
-      result();
-  }
-}
-@Add Constraints If Both Nodes Are Relevant@ +=
-rows.add(new ZeroIfInRegisterPreviously(v, r, n.getKey(), n.getValue()));
-~~~~
-
-~~~~
-@Other Helpers@ +=
-static final class ZeroIfNotInRegister extends RowKey {
-  ZeroIfNotInRegister(int v, Register r, int n) { super(v, r, n); }
-  /** if R(n) = 0 then F(n) = 0 */
-  void addConstraints(glp_prob allocation, int row, List<Constraint> constraints, ControlFlowGraph cfg) {
-    glp_set_row_bnds(allocation, row + 1, GLP_LO, 0.0, 0.0);
-    constraints.add(new Constraint(
-      row, 
-      Collections.binarySearch(cfg.columns, new varInReg(v, r, n)),
-      1.0));
-    constraints.add(new Constraint(
-      row, 
-      Collections.binarySearch(cfg.columns, new NewVarInRegFlag(v, r, n)),
-      -1.0));
-  }
-}
-@Add Constraints If Both Nodes Are Relevant@ +=
-rows.add(new ZeroIfNotInRegister(v, r, n.getValue()));
+unchanged.set(newVarInReg, 1).addTo(0, sum);
 ~~~~
 
 ~~~~
